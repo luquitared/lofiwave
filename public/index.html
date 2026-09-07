@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent Console</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='13' font-size='13'>⚙️</text></svg>">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header>
+  <div class="brand">⚙ Agent Console</div>
+  <nav>
+    <button data-tab="agents" class="active">Agents</button>
+    <button data-tab="apps">Apps</button>
+    <button data-tab="workflows">Workflows</button>
+    <button data-tab="runs">Runs</button>
+    <button data-tab="types">Types</button>
+  </nav>
+  <a href="/docs" class="api-link" title="API documentation (give this URL to an agent)">API</a>
+  <div id="sysinfo" class="sysinfo"></div>
+</header>
+
+<main>
+  <section id="tab-agents" class="tab active">
+    <div class="toolbar">
+      <button class="primary" id="start-agent-btn">▶ Start an agent</button>
+      <span id="agent-count" class="muted"></span>
+      <label class="muted right"><input type="checkbox" id="hide-children"> hide child processes</label>
+    </div>
+    <table class="proc-table" id="agent-table">
+      <thead><tr><th>PID</th><th>Type</th><th>Working dir</th><th>Command</th><th>Up</th><th>CPU</th><th>Mem</th><th>Run</th><th></th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <section id="tab-apps" class="tab">
+    <div class="toolbar">
+      <button class="primary" id="add-app-btn">+ Add app</button>
+      <span class="muted">Apps are process types registered through the API or the Types tab. <a href="/docs" target="_blank">See the API docs</a> for how an agent can add one.</span>
+    </div>
+    <table id="app-table">
+      <thead><tr><th>App</th><th>Command</th><th>Running</th><th>Last run</th><th></th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <h3 class="section-title">Running app processes <span id="app-proc-count" class="muted"></span></h3>
+    <table class="proc-table" id="app-proc-table">
+      <thead><tr><th>PID</th><th>Type</th><th>Working dir</th><th>Command</th><th>Up</th><th>CPU</th><th>Mem</th><th>Run</th><th></th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <section id="tab-workflows" class="tab">
+    <details class="panel" id="wf-panel">
+      <summary id="wf-panel-title">New workflow</summary>
+      <form id="wf-form" class="grid">
+        <input type="hidden" name="id">
+        <label>Name <input name="name" required></label>
+        <label>Type <select name="type"></select></label>
+        <label class="wide">Working directory <span class="pp"><input name="cwd" autocomplete="off" data-pathpicker placeholder="blank = the type's default folder"></span></label>
+        <label class="wide">Prompt <textarea name="prompt" rows="3"></textarea></label>
+        <label>Extra args <input name="extra_args"></label>
+        <label>Env (KEY=VALUE per line) <textarea name="env" rows="2"></textarea></label>
+        <label>Schedule (cron, blank = manual) <input name="schedule" placeholder="0 9 * * 1-5"> <small class="muted">min hour day month weekday · @hourly @daily @weekly</small></label>
+        <label>Timeout (sec, 0 = none) <input name="timeout_sec" type="number" min="0" value="0"></label>
+        <label class="row"><input type="checkbox" name="enabled" checked> Enabled</label>
+        <label class="row"><input type="checkbox" name="allow_overlap"> Allow overlapping runs</label>
+        <div class="wide row">
+          <button type="submit" class="primary">Save</button>
+          <button type="button" id="wf-cancel">Cancel</button>
+        </div>
+      </form>
+    </details>
+    <table id="wf-table">
+      <thead><tr><th>Name</th><th>Type</th><th>Working dir</th><th>Schedule</th><th>Next</th><th>Last</th><th>On</th><th></th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <section id="tab-runs" class="tab">
+    <div class="toolbar">
+      <select id="runs-status"><option value="">any status</option><option>running</option><option>success</option><option>failed</option><option>killed</option><option>timeout</option><option>lost</option><option>error</option></select>
+      <select id="runs-type"><option value="">any type</option></select>
+      <select id="runs-workflow"><option value="">any workflow</option></select>
+      <span id="runs-count" class="muted"></span>
+    </div>
+    <div class="split">
+      <table id="runs-table">
+        <thead><tr><th>#</th><th>Workflow / type</th><th>Trigger</th><th>Status</th><th>Started</th><th>Duration</th><th>Exit</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <div id="run-detail" class="detail" hidden></div>
+    </div>
+  </section>
+
+  <section id="tab-types" class="tab">
+    <details class="panel" id="type-panel">
+      <summary id="type-panel-title">New process type</summary>
+      <form id="type-form" class="grid">
+        <input type="hidden" name="orig">
+        <label>Name <input name="name" required pattern="[a-zA-Z0-9_.\-]+"></label>
+        <label>Kind <select name="kind"><option value="app">app (Apps tab)</option><option value="agent">agent (Agents tab)</option></select></label>
+        <label>Command (binary) <input name="command" required placeholder="claude"></label>
+        <label>Default working directory <span class="pp"><input name="default_cwd" autocomplete="off" data-pathpicker placeholder="optional"></span></label>
+        <label class="wide">Args (one per line; use {prompt} and {cwd}) <textarea name="args" rows="3"></textarea></label>
+        <label>Detect regex (matches OS command lines) <input name="detect" placeholder="(^|/|\s)mytool(\s|$)"></label>
+        <label>Env (KEY=VALUE per line) <textarea name="env" rows="2"></textarea></label>
+        <label class="wide">Description <input name="description"></label>
+        <div class="wide row">
+          <button type="submit" class="primary">Save</button>
+          <button type="button" id="type-cancel">Cancel</button>
+        </div>
+      </form>
+    </details>
+    <table id="type-table">
+      <thead><tr><th>Name</th><th>Kind</th><th>Command</th><th>Args</th><th>Detect</th><th>Found</th><th></th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+</main>
+
+<dialog id="start-dialog">
+  <form id="start-form" class="grid" method="dialog">
+    <h3 class="wide" id="start-title">Start</h3>
+    <label>Type <select name="type"></select></label>
+    <label>Working directory <span class="pp"><input name="cwd" placeholder="start typing to search" autocomplete="off" data-pathpicker></span></label>
+    <label class="wide" id="prompt-label">Prompt <textarea name="prompt" rows="4" placeholder="What should the agent do?"></textarea></label>
+    <label>Extra args <input name="extra_args" placeholder="--permission-mode acceptEdits"></label>
+    <label>Timeout (sec, 0 = none) <input name="timeout_sec" type="number" min="0" value="0"></label>
+    <code id="preview" class="wide muted"></code>
+    <div class="wide row">
+      <button type="button" class="primary" id="start-submit">Start</button>
+      <button type="button" id="preview-btn">Preview command</button>
+      <button type="button" id="start-cancel" style="margin-left:auto">Cancel</button>
+    </div>
+  </form>
+</dialog>
+<div id="toast" hidden></div>
+<script src="/app.js"></script>
+</body>
+</html>

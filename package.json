@@ -1,0 +1,13 @@
+{
+  "name": "agent-console",
+  "version": "1.0.0",
+  "description": "Local web console for Claude Code / Codex / custom processes: monitor, start, stop, schedule workflows, keep run history in SQLite.",
+  "type": "module",
+  "scripts": {
+    "start": "bun run src/server.ts",
+    "dev": "bun --watch run src/server.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  }
+}
