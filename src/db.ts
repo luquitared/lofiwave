@@ -60,6 +60,23 @@ CREATE TABLE IF NOT EXISTS runs (
 );
 CREATE INDEX IF NOT EXISTS runs_workflow_idx ON runs(workflow_id, started_at DESC);
 CREATE INDEX IF NOT EXISTS runs_status_idx ON runs(status);
+
+-- Agent sessions (Claude Code today) reported back by a hook in the child process,
+-- so a run can be tied to the transcript on disk and resumed later.
+CREATE TABLE IF NOT EXISTS sessions (
+  id              INTEGER PRIMARY KEY,
+  run_id          INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+  session_id      TEXT NOT NULL UNIQUE,
+  agent           TEXT NOT NULL DEFAULT 'claude',
+  cwd             TEXT NOT NULL DEFAULT '',
+  transcript_path TEXT NOT NULL DEFAULT '',
+  model           TEXT NOT NULL DEFAULT '',
+  source          TEXT NOT NULL DEFAULT '',   -- startup | resume | clear | compact ...
+  started_at      INTEGER NOT NULL,
+  ended_at        INTEGER,
+  end_reason      TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS sessions_run_idx ON sessions(run_id, started_at);
 `);
 
 // ---- migrations for columns added after the first release
@@ -78,6 +95,10 @@ export type WorkflowRow = {
   id: number; name: string; type_name: string; cwd: string; prompt: string; extra_args: string; env: string;
   schedule: string; enabled: number; timeout_sec: number; allow_overlap: number;
   next_run_at: number | null; last_run_at: number | null; created_at: number; updated_at: number;
+};
+export type SessionRow = {
+  id: number; run_id: number; session_id: string; agent: string; cwd: string; transcript_path: string;
+  model: string; source: string; started_at: number; ended_at: number | null; end_reason: string;
 };
 export type RunRow = {
   id: number; workflow_id: number | null; workflow_name: string | null; type_name: string; cwd: string;

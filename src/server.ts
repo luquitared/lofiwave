@@ -1,8 +1,8 @@
 import { join, dirname, basename } from "node:path";
-import { readdirSync } from "node:fs";
+import { readdirSync, existsSync } from "node:fs";
 import { hostname, homedir } from "node:os";
 import { config } from "./config";
-import { db, now, hydrate, type ProcessTypeRow, type WorkflowRow, type RunRow } from "./db";
+import { db, now, hydrate, type ProcessTypeRow, type WorkflowRow, type RunRow, type SessionRow } from "./db";
 import { listOsProcesses, cwdOf, killTree, type OsProcess } from "./procs";
 import { ApiError, startRun, killRun, restartRun, getRun, getType, readLogFrom, isLive, buildCommand } from "./runner";
 import { startScheduler, refreshNextRun, runWorkflow, computeNext } from "./scheduler";
@@ -87,7 +87,17 @@ function runOut(r: RunRow, { withOutput = true } = {}) {
   const h = hydrate(r);
   const out: any = { ...h, duration_ms: (r.ended_at ?? now()) - r.started_at, live: isLive(r.id) };
   if (!withOutput) delete out.output;
+  else out.sessions = sessionsOf(r.id);
   return out;
+}
+
+function sessionsOf(runId: number): SessionRow[] {
+  return db.query<SessionRow, [number]>("SELECT * FROM sessions WHERE run_id = ? ORDER BY started_at").all(runId);
+}
+function getSession(runId: number, sessionId: string): SessionRow {
+  const s = db.query<SessionRow, [number, string]>("SELECT * FROM sessions WHERE run_id = ? AND session_id = ?").get(runId, sessionId);
+  if (!s) throw new ApiError(404, `session ${sessionId} not found on run ${runId}`);
+  return s;
 }
 
 function getWorkflow(id: number): WorkflowRow {
@@ -419,6 +429,47 @@ route("GET", "/api/runs/:id/log", (_r, p, url) => {
 
 route("POST", "/api/runs/:id/kill", async (_r, p, url) => json(runOut(await killRun(Number(p.id), bool(url.searchParams.get("force"), false)))));
 route("POST", "/api/runs/:id/restart", async (_r, p) => json(runOut(await restartRun(Number(p.id))), 201));
+
+// ---- sessions (reported by the agent's own hook; see scripts/claude-session-hook.sh)
+route("GET", "/api/runs/:id/sessions", (_r, p) => json(sessionsOf(getRun(Number(p.id)).id)));
+
+route("POST", "/api/runs/:id/sessions", async (req, p) => {
+  const run = getRun(Number(p.id));
+  const b = await body(req);
+  const session_id = str(b.session_id, "session_id", { required: true }).trim();
+  if (!/^[A-Za-z0-9_.-]+$/.test(session_id)) throw new ApiError(400, "session_id has unexpected characters");
+  const t = now();
+  db.prepare(
+    `INSERT INTO sessions (run_id, session_id, agent, cwd, transcript_path, model, source, started_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(session_id) DO UPDATE SET
+       cwd = CASE WHEN excluded.cwd != '' THEN excluded.cwd ELSE sessions.cwd END,
+       transcript_path = CASE WHEN excluded.transcript_path != '' THEN excluded.transcript_path ELSE sessions.transcript_path END,
+       model = CASE WHEN excluded.model != '' THEN excluded.model ELSE sessions.model END,
+       source = CASE WHEN excluded.source != '' THEN excluded.source ELSE sessions.source END`,
+  ).run(run.id, session_id, str(b.agent, "agent") || "claude", str(b.cwd, "cwd"), str(b.transcript_path, "transcript_path"),
+    str(b.model, "model"), str(b.source, "source"), t);
+  return json(getSession(run.id, session_id), 201);
+});
+
+route("PUT", "/api/runs/:id/sessions/:sid", async (req, p) => {
+  const run = getRun(Number(p.id));
+  const s = getSession(run.id, p.sid);
+  const b = await body(req);
+  const ended = bool(b.ended, false);
+  db.prepare("UPDATE sessions SET ended_at = ?, end_reason = ?, model = CASE WHEN ? != '' THEN ? ELSE model END WHERE id = ?")
+    .run(ended ? now() : s.ended_at, str(b.reason, "reason") || s.end_reason, str(b.model, "model"), str(b.model, "model"), s.id);
+  return json(getSession(run.id, p.sid));
+});
+
+// The raw transcript (Claude Code writes JSONL under ~/.claude/projects/...). Only paths under the home dir are served.
+route("GET", "/api/runs/:id/sessions/:sid/transcript", (_r, p) => {
+  const s = getSession(getRun(Number(p.id)).id, p.sid);
+  if (!s.transcript_path) throw new ApiError(404, "no transcript path recorded for this session");
+  if (!s.transcript_path.startsWith(homedir() + "/")) throw new ApiError(403, "transcript path is outside the home directory");
+  if (!existsSync(s.transcript_path)) throw new ApiError(404, `transcript not found on disk: ${s.transcript_path}`);
+  return new Response(Bun.file(s.transcript_path), { headers: { "content-type": "text/plain; charset=utf-8" } });
+});
 
 route("DELETE", "/api/runs/:id", async (_r, p) => {
   const run = getRun(Number(p.id));
