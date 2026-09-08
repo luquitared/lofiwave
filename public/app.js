@@ -196,6 +196,7 @@ function renderProcRows(tbody, procs) {
     h("td", {}, fmtMem(p.rssKb)),
     h("td", {}, p.run_id ? h("a", { class: "link", href: `#runs/${p.run_id}`, onclick: (e) => { e.preventDefault(); openRun(p.run_id); } }, `#${p.run_id}`, p.workflow_name ? ` ${p.workflow_name}` : "") : "–"),
     h("td", { class: "row" },
+      p.session?.session_id && !p.child ? h("button", { class: "small primary", title: `${p.session.resume_cmd} — in a tmux session managed here${p.session.agent === "claude" ? ", with Remote Control (this session is still open, so claude continues it as a copy under a new id)" : ""}`, onclick: () => guard(async () => { const r = await post("/sessions/resume", { agent: p.session.agent, session_id: p.session.session_id, cwd: p.session.cwd || p.cwd }); toast(`resumed as run #${r.id}`, true); openRun(r.id); })() }, "Resume here") : "",
       p.run_id && !p.child ? h("button", { class: "small", onclick: () => guard(async () => { const r = await post(`/runs/${p.run_id}/restart`); toast(`restarted as run #${r.id}`, true); refresh(); })() }, "Restart") : "",
       h("button", { class: "small danger", onclick: () => confirmDo(`Stop pid ${p.pid} (${p.type})?`, async () => { await del(`/processes/${p.pid}`); toast("SIGTERM sent", true); refresh(); }) }, "Stop"),
       h("button", { class: "small danger", title: "SIGKILL", onclick: () => confirmDo(`Force kill pid ${p.pid}?`, async () => { await del(`/processes/${p.pid}?force=1`); toast("SIGKILL sent", true); refresh(); }) }, "Kill"),

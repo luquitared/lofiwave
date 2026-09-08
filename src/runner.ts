@@ -324,10 +324,24 @@ export async function resumeSession(runId: number, sessionId: string): Promise<R
   // The run's own type if it is that agent (keeps its env/extra config), else the built-in type for the agent.
   const own = getType(run.type_name);
   const typeName = basename(own.command) === s.agent ? own.name : s.agent;
-  getType(typeName);
-  const cwd = s.cwd && existsSync(s.cwd) ? s.cwd : run.cwd;
-  return startRun({ typeName, cwd, trigger: "resume", resumeSession: sessionId, env: JSON.parse(run.env || "{}") });
+  return resumeAgentSession({ agent: s.agent, sessionId, cwd: s.cwd || run.cwd, typeName, env: JSON.parse(run.env || "{}") });
 }
+
+/**
+ * Reopen any agent session by id, whether or not the console started it (e.g. a claude session from a terminal, seen on the
+ * Agents tab). If that session is still open elsewhere, claude forks a copy that continues the conversation under a new id.
+ */
+export async function resumeAgentSession(o: { agent: string; sessionId: string; cwd?: string; typeName?: string; env?: Record<string, string> }): Promise<RawRun> {
+  const typeName = o.typeName ?? o.agent;
+  const type = getType(typeName);
+  if (!JSON.parse(type.resume_args || "[]").length) throw new ApiError(400, `process type "${typeName}" has no resume_args template`);
+  const cwd = o.cwd && existsSync(o.cwd) ? o.cwd : (type.default_cwd || process.env.HOME || "/");
+  const run = await startRun({ typeName, cwd, trigger: "resume", resumeSession: o.sessionId, env: o.env ?? {} });
+  // Until the agent reports back (claude's hook, codex's rollout), remember what we asked it to reopen.
+  recordSession(run.id, { session_id: o.sessionId, agent: o.agent, cwd, source: "resume" });
+  return getRun(run.id);
+}
+type RawRun = RunRow;
 
 export function readTail(path: string | null, bytes: number): string {
   if (!path || !existsSync(path)) return "";
