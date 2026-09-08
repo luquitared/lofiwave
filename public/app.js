@@ -149,12 +149,12 @@ const loadTypes = guard(async () => {
   const rt = $("#runs-type"); const cur = rt.value;
   rt.replaceChildren(h("option", { value: "" }, "any type"), ...types.map((t) => h("option", { value: t.name }, t.name))); rt.value = cur;
   $("#type-table tbody").replaceChildren(...types.map((t) => h("tr", {},
-    h("td", {}, h("b", {}, t.name), t.builtin ? h("span", { class: "muted" }, " built-in") : "", t.description ? h("div", { class: "muted", style: "font-size:12px;max-width:320px" }, t.description) : ""),
+    h("td", { class: "full" }, h("b", {}, t.name), t.builtin ? h("span", { class: "muted" }, " built-in") : "", t.description ? h("div", { class: "muted", style: "font-size:12px;max-width:320px" }, t.description) : ""),
     h("td", {}, h("span", { class: "pill" }, t.kind)),
-    h("td", { class: "mono" }, t.command, h("div", { class: "muted" }, t.resolved || ""), t.default_cwd ? h("div", { class: "muted", title: t.default_cwd }, `in ${shortCwd(t.default_cwd)}`) : ""),
-    h("td", { class: "mono" }, t.args.join(" ")),
-    h("td", { class: "mono trunc", title: t.detect }, t.detect || "–"),
-    h("td", {}, t.available ? "✓" : h("span", { style: "color:var(--bad)" }, "✗")),
+    h("td", { class: "mono full" }, t.command, h("div", { class: "muted" }, t.resolved || ""), t.default_cwd ? h("div", { class: "muted", title: t.default_cwd }, `in ${shortCwd(t.default_cwd)}`) : ""),
+    h("td", { class: "mono full", "data-l": "args" }, t.args.join(" ")),
+    h("td", { class: "mono trunc", "data-l": "detect", title: t.detect }, t.detect || "–"),
+    h("td", { "data-l": "found" }, t.available ? "✓" : h("span", { style: "color:var(--bad)" }, "✗")),
     h("td", { class: "row" },
       h("button", { class: "small", onclick: () => editType(t) }, "Edit"),
       !t.builtin && h("button", { class: "small danger", onclick: () => confirmDo(`Delete process type "${t.name}"?`, async () => { await del(`/process-types/${t.name}`); toast("deleted", true); loadTypes(); }) }, "Delete"),
@@ -191,10 +191,10 @@ function renderProcRows(tbody, procs) {
     h("td", { class: "sesscell" }, sessionCell(p.session)),
     h("td", { class: "mono trunc", title: p.cwd || "" }, shortCwd(p.cwd) || "–"),
     h("td", { class: "mono trunc", title: p.cmd }, p.cmd),
-    h("td", {}, fmtDur(p.elapsedSec)),
-    h("td", {}, p.cpu == null ? "–" : `${p.cpu}%`),
-    h("td", {}, fmtMem(p.rssKb)),
-    h("td", {}, p.run_id ? h("a", { class: "link", href: `#runs/${p.run_id}`, onclick: (e) => { e.preventDefault(); openRun(p.run_id); } }, `#${p.run_id}`, p.workflow_name ? ` ${p.workflow_name}` : "") : "–"),
+    h("td", { "data-l": "up" }, fmtDur(p.elapsedSec)),
+    h("td", { "data-l": "cpu" }, p.cpu == null ? "–" : `${p.cpu}%`),
+    h("td", { "data-l": "mem" }, fmtMem(p.rssKb)),
+    h("td", { "data-l": "run" }, p.run_id ? h("a", { class: "link", href: `#runs/${p.run_id}`, onclick: (e) => { e.preventDefault(); openRun(p.run_id); } }, `#${p.run_id}`, p.workflow_name ? ` ${p.workflow_name}` : "") : "–"),
     h("td", { class: "row" },
       p.session?.session_id && !p.child ? h("button", { class: "small primary", title: `${p.session.resume_cmd} — in a tmux session managed here${p.session.agent === "claude" ? ", with Remote Control (this session is still open, so claude continues it as a copy under a new id)" : ""}`, onclick: () => guard(async () => { const r = await post("/sessions/resume", { agent: p.session.agent, session_id: p.session.session_id, cwd: p.session.cwd || p.cwd }); toast(`resumed as run #${r.id}`, true); openRun(r.id); })() }, "Resume here") : "",
       p.run_id && !p.child ? h("button", { class: "small", onclick: () => guard(async () => { const r = await post(`/runs/${p.run_id}/restart`); toast(`restarted as run #${r.id}`, true); refresh(); })() }, "Restart") : "",
@@ -242,10 +242,10 @@ const loadApps = guard(async () => {
     const mine = procs.filter((p) => p.type === t.name && !p.child);
     const last = lastByType[t.name];
     return h("tr", {},
-      h("td", {}, h("div", { class: "app-name" }, t.name, t.available ? "" : h("span", { class: "muted", title: "command not found on PATH" }, " ✗")), t.description ? h("div", { class: "app-desc" }, t.description) : ""),
-      h("td", { class: "mono" }, quoteArgs([t.command, ...t.args]), t.default_cwd ? h("div", { class: "muted", title: t.default_cwd }, `in ${shortCwd(t.default_cwd)}`) : ""),
+      h("td", { class: "full" }, h("div", { class: "app-name" }, t.name, t.available ? "" : h("span", { class: "muted", title: "command not found on PATH" }, " ✗")), t.description ? h("div", { class: "app-desc" }, t.description) : ""),
+      h("td", { class: "mono full" }, quoteArgs([t.command, ...t.args]), t.default_cwd ? h("div", { class: "muted", title: t.default_cwd }, `in ${shortCwd(t.default_cwd)}`) : ""),
       h("td", {}, mine.length ? h("span", { class: "pill on" }, `${mine.length} running`) : h("span", { class: "pill" }, "stopped"), mine.length ? h("div", { class: "muted mono", style: "font-size:11.5px" }, `pid ${mine.map((p) => p.pid).join(", ")} · up ${fmtDur(Math.max(...mine.map((p) => p.elapsedSec ?? 0)))}`) : ""),
-      h("td", {}, last ? h("a", { class: "link", href: `#runs/${last.id}`, onclick: (e) => { e.preventDefault(); openRun(last.id); } }, badge(last.status), ` ${fmtRel(last.started_at)}`) : h("span", { class: "muted" }, "never")),
+      h("td", { "data-l": "last run" }, last ? h("a", { class: "link", href: `#runs/${last.id}`, onclick: (e) => { e.preventDefault(); openRun(last.id); } }, badge(last.status), ` ${fmtRel(last.started_at)}`) : h("span", { class: "muted" }, "never")),
       h("td", { class: "row" },
         h("button", { class: "small primary", onclick: () => openStartDialog({ type: t.name }) }, "Start"),
         mine.length ? h("button", { class: "small danger", onclick: () => confirmDo(`Stop all ${mine.length} ${t.name} process(es)?`, async () => { for (const p of mine) await del(`/processes/${p.pid}`); toast("stopped", true); refresh(); }) }, "Stop") : "",
@@ -309,12 +309,12 @@ const loadWorkflows = guard(async () => {
   const rw = $("#runs-workflow"); const cur = rw.value;
   rw.replaceChildren(h("option", { value: "" }, "any workflow"), ...workflows.map((w) => h("option", { value: w.id }, w.name))); rw.value = cur;
   $("#wf-table tbody").replaceChildren(...workflows.map((w) => h("tr", {},
-    h("td", {}, h("b", {}, w.name), w.prompt ? h("div", { class: "muted trunc", style: "max-width:260px;font-size:12px", title: w.prompt }, w.prompt) : ""),
-    h("td", {}, w.type_name),
+    h("td", { class: "full" }, h("b", {}, w.name), w.prompt ? h("div", { class: "muted trunc", style: "max-width:260px;font-size:12px", title: w.prompt }, w.prompt) : ""),
+    h("td", { "data-l": "type" }, w.type_name),
     h("td", { class: "mono trunc", title: w.cwd }, shortCwd(w.cwd)),
-    h("td", { class: "mono" }, w.schedule || h("span", { class: "muted" }, "manual")),
-    h("td", { title: fmtTime(w.next_run_at) }, w.enabled && w.schedule ? fmtRel(w.next_run_at) : "–"),
-    h("td", { title: fmtTime(w.last_run_at) }, fmtRel(w.last_run_at)),
+    h("td", { class: "mono", "data-l": "cron" }, w.schedule || h("span", { class: "muted" }, "manual")),
+    h("td", { "data-l": "next", title: fmtTime(w.next_run_at) }, w.enabled && w.schedule ? fmtRel(w.next_run_at) : "–"),
+    h("td", { "data-l": "last", title: fmtTime(w.last_run_at) }, fmtRel(w.last_run_at)),
     h("td", {}, h("button", { class: `on-toggle ${w.enabled ? "on" : ""}`, title: w.enabled ? "enabled" : "disabled", onclick: () => guard(async () => { await put(`/workflows/${w.id}`, { enabled: !w.enabled }); loadWorkflows(); })() })),
     h("td", { class: "row" },
       h("button", { class: "small primary", onclick: () => guard(async () => { const r = await post(`/workflows/${w.id}/run`); toast(`started run #${r.id}`, true); loadWorkflows(); })() }, "Run now"),
@@ -349,13 +349,13 @@ const loadRuns = guard(async () => {
   const { runs, total } = await get(`/runs?${q}`);
   $("#runs-count").textContent = `${total} run${total === 1 ? "" : "s"}`;
   $("#runs-table tbody").replaceChildren(...runs.map((r) => h("tr", { class: `clickable ${selectedRun?.id === r.id ? "selected" : ""}`, onclick: () => openRun(r.id) },
-    h("td", { class: "mono" }, r.id),
-    h("td", {}, r.workflow_name ? h("b", {}, r.workflow_name) : h("span", { class: "muted" }, "ad-hoc"), h("div", { class: "muted", style: "font-size:12px" }, `${r.type_name} · ${shortCwd(r.cwd)}`)),
-    h("td", {}, r.trigger),
-    h("td", {}, badge(r.status)),
-    h("td", { title: new Date(r.started_at).toLocaleString() }, fmtRel(r.started_at)),
-    h("td", {}, fmtDur(r.duration_ms / 1000)),
-    h("td", { class: "mono" }, r.exit_code ?? "–"),
+    h("td", { class: "mono" }, "#", r.id),
+    h("td", { class: "full" }, r.workflow_name ? h("b", {}, r.workflow_name) : h("span", { class: "muted" }, "ad-hoc"), h("div", { class: "muted", style: "font-size:12px" }, `${r.type_name} · ${shortCwd(r.cwd)}`)),
+    h("td", { "data-l": "trigger" }, r.trigger),
+    h("td", { class: "status" }, badge(r.status)),
+    h("td", { "data-l": "started", title: new Date(r.started_at).toLocaleString() }, fmtRel(r.started_at)),
+    h("td", { "data-l": "took" }, fmtDur(r.duration_ms / 1000)),
+    h("td", { class: "mono", "data-l": "exit" }, r.exit_code ?? "–"),
   )));
   if (!runs.length) $("#runs-table tbody").replaceChildren(h("tr", {}, h("td", { colspan: 7, class: "muted" }, "No runs match.")));
 });
@@ -365,12 +365,12 @@ async function openRun(id) {
   switchTab("runs", false);
   history.replaceState(null, "", `#runs/${id}`);
   selectedRun = { id }; logOffset = 0;
-  $("#run-detail").hidden = false; $(".split").classList.add("open");
+  $("#run-detail").hidden = false; $(".split").classList.add("open"); document.body.classList.add("run-open");
   $("#run-detail").replaceChildren(h("div", { class: "muted" }, "loading…"));
   await refreshRunDetail(true);
   loadRuns();
 }
-function closeRun() { selectedRun = null; $("#run-detail").hidden = true; $(".split").classList.remove("open"); history.replaceState(null, "", "#runs"); loadRuns(); }
+function closeRun() { selectedRun = null; $("#run-detail").hidden = true; $(".split").classList.remove("open"); document.body.classList.remove("run-open"); history.replaceState(null, "", "#runs"); loadRuns(); }
 
 const refreshRunDetail = guard(async (full = false) => {
   if (!selectedRun) return;
@@ -383,6 +383,8 @@ const refreshRunDetail = guard(async (full = false) => {
   if (changed || !$("#run-log")) {
     $("#run-detail").replaceChildren(
       h("h3", {}, `Run #${r.id}`, badge(r.status), h("span", { class: "muted", style: "font-weight:400;font-size:13px" }, r.workflow_name ? `workflow ${r.workflow_name}` : "ad-hoc"), h("span", { style: "margin-left:auto" }), h("button", { class: "small", onclick: closeRun }, "✕")),
+      h("details", { class: "meta", open: !matchMedia("(max-width: 720px)").matches },
+        h("summary", { class: "muted" }, `${r.type_name} · ${shortCwd(r.cwd)} · ${r.trigger} · ${fmtRel(r.started_at)}${r.meta?.remote_url ? " · " : ""}`, r.meta?.remote_url ? h("a", { href: r.meta.remote_url, target: "_blank", onclick: (e) => e.stopPropagation() }, "open on web ↗") : ""),
       h("dl", {},
         h("dt", {}, "type"), h("dd", {}, r.type_name),
         h("dt", {}, "cwd"), h("dd", {}, r.cwd),
@@ -399,7 +401,7 @@ const refreshRunDetail = guard(async (full = false) => {
         r.meta?.timeout_sec ? h("dt", {}, "timeout") : "", r.meta?.timeout_sec ? h("dd", {}, `${r.meta.timeout_sec}s`) : "",
         Object.keys(r.env || {}).length ? h("dt", {}, "env") : "", Object.keys(r.env || {}).length ? h("dd", {}, envText(r.env)) : "",
         r.error ? h("dt", {}, "error") : "", r.error ? h("dd", { style: "color:var(--bad)" }, r.error) : "",
-      ),
+      )),
       sessionsBlock(r),
       h("div", { class: "row" },
         r.status === "running" ? h("button", { class: "small danger", onclick: () => confirmDo(`Stop run #${r.id}?`, async () => { await post(`/runs/${r.id}/kill`); toast("stopped", true); refreshRunDetail(true); }) }, "Stop") : "",
@@ -409,8 +411,9 @@ const refreshRunDetail = guard(async (full = false) => {
         r.status !== "running" ? h("button", { class: "small danger", onclick: () => confirmDo(`Delete run #${r.id} and its log?`, async () => { await del(`/runs/${r.id}`); toast("deleted", true); closeRun(); }) }, "Delete") : "",
         h("label", { class: "muted", style: "margin-left:auto;font-size:12px" }, h("input", { type: "checkbox", id: "autoscroll", checked: true }), " follow"),
       ),
+      h("pre", { id: "run-log", class: r.meta?.interactive && r.status === "running" ? "screen" : "" }, ""),
       r.meta?.interactive && r.status === "running" ? h("form", { class: "row keys", onsubmit: (e) => { e.preventDefault(); sendKeysFromForm(r.id); } },
-        h("input", { name: "text", placeholder: "type into the terminal… (Enter sends it with ⏎)", autocomplete: "off", style: "flex:1" }),
+        h("input", { name: "text", placeholder: "type into the terminal… (Enter sends it with ⏎)", autocomplete: "off" }),
         h("button", { type: "submit", class: "small primary" }, "Send"),
         h("button", { type: "button", class: "small", title: "send a bare Enter (confirm a dialog)", onclick: () => post(`/runs/${r.id}/keys`, { text: "", enter: true }) }, "⏎"),
         h("button", { type: "button", class: "small", title: "send Escape", onclick: () => post(`/runs/${r.id}/keys`, { keys: ["Escape"], enter: false }) }, "Esc"),
@@ -418,17 +421,22 @@ const refreshRunDetail = guard(async (full = false) => {
         h("button", { type: "button", class: "small", title: "arrow down", onclick: () => post(`/runs/${r.id}/keys`, { keys: ["Down"], enter: false }) }, "↓"),
         h("button", { type: "button", class: "small", title: "send Ctrl-C", onclick: () => post(`/runs/${r.id}/keys`, { keys: ["C-c"], enter: false }) }, "^C"),
       ) : "",
-      h("pre", { id: "run-log", class: r.meta?.interactive && r.status === "running" ? "screen" : "" }, ""),
     );
     logOffset = 0;
   }
   if (r.meta?.interactive && r.status === "running") await pollScreen(); else await pollLog();
 });
 
+/** How many terminal columns fit in the screen box, so the server can resize the tmux window to the viewer. */
+function screenCols(pre) {
+  const probe = h("span", { style: "position:absolute;visibility:hidden;white-space:pre;font:inherit" }, "MMMMMMMMMM");
+  pre.appendChild(probe); const cw = probe.getBoundingClientRect().width / 10; probe.remove();
+  return Math.max(40, Math.min(220, Math.floor((pre.clientWidth - 22) / cw)));
+}
 async function pollScreen() {
   if (!selectedRun) return;
   const pre = $("#run-log"); if (!pre) return;
-  const { text } = await get(`/runs/${selectedRun.id}/screen?lines=300`);
+  const { text } = await get(`/runs/${selectedRun.id}/screen?lines=300&cols=${screenCols(pre)}`);
   if (pre.textContent !== text) { pre.textContent = text; if ($("#autoscroll")?.checked) pre.scrollTop = pre.scrollHeight; }
 }
 const sendKeysFromForm = guard(async (id) => {
