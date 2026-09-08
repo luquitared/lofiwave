@@ -194,6 +194,7 @@ On top of the recorded id, the console reads what the agents themselves know: Cl
 |---|---|
 | `GET /api/runs/:id/sessions` | `[{session_id, agent, cwd, transcript_path, model, source, started_at, ended_at, end_reason, title, name, status, web_url, resume_cmd}]` |
 | `POST /api/runs/:id/sessions/:session_id/resume` | reopen the session interactively (tmux) → 201 with the new run |
+| `POST /api/sessions/resume` | same for a session the console did not start: `{agent: "claude"\|"codex", session_id, cwd?}` → 201. If the session is still open elsewhere, claude continues it as a copy under a new id. |
 | `POST /api/runs/:id/sessions` | register (upsert by `session_id`): `{session_id, agent?, cwd?, transcript_path?, model?, source?}` → 201 |
 | `PUT /api/runs/:id/sessions/:session_id` | `{ended: true, reason?, model?}` marks it ended |
 | `GET /api/runs/:id/sessions/:session_id/transcript` | the raw JSONL transcript (`text/plain`; only files under the home directory are served) |
