@@ -105,10 +105,12 @@ dialog form.grid { padding: 0; }
   body { font-size: 15px; }
   header { padding: 8px 12px; gap: 10px; }
   .sysinfo { display: none; }
-  /* tabs become a bottom bar */
-  nav { position: fixed; left: 0; right: 0; bottom: 0; display: flex; background: var(--panel); border-top: 1px solid var(--line); padding: 6px 4px calc(6px + env(safe-area-inset-bottom)); z-index: 6; }
-  nav button { flex: 1; padding: 9px 2px; font-size: 12.5px; border-radius: 8px; }
-  main { padding: 12px 10px calc(88px + env(safe-area-inset-bottom)); }
+  /* tabs: a full-width row under the brand (not a fixed bottom bar: iOS Safari's own bottom toolbar sits over that and eats the taps) */
+  header { padding-bottom: 0; }
+  nav { order: 10; flex-basis: 100%; display: flex; gap: 2px; overflow-x: auto; -webkit-overflow-scrolling: touch; margin: 0 -12px; padding: 2px 6px 6px; scrollbar-width: none; }
+  nav::-webkit-scrollbar { display: none; }
+  nav button { flex: 1 0 auto; padding: 9px 10px; font-size: 13.5px; border-radius: 8px; }
+  main { padding: 12px 10px calc(24px + env(safe-area-inset-bottom)); }
   input, select, textarea { font-size: 16px; padding: 9px 10px; }            /* 16px stops iOS from zooming the page */
   button { padding: 9px 12px; font-size: 14px; } button.small { padding: 7px 10px; font-size: 13px; }
   .toolbar .right { margin-left: 0; }
