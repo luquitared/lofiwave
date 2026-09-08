@@ -7,7 +7,7 @@ A small local web app + REST API for managing coding-agent processes on a machin
 - **Schedule workflows** (cron) that launch an agent in a specific folder, and keep a **history of runs** with status, exit code, duration and full logs.
 - Everything is stored in **SQLite** (`data/agent-console.sqlite`) with per-run log files in `data/logs/`.
 - Runs on **Bun** (Linux primary; macOS/Windows best-effort), no other runtime dependencies.
-- Designed to run as a boot-time service and be reached from other devices over **Tailscale**.
+- Designed to run as a boot-time service and be reached from other devices over **Tailscale**. The UI is responsive: on a phone the tabs move to a bottom bar, tables become cards, a run opens full-screen, and an interactive run's terminal is resized to the phone's width so the agent's TUI reflows.
 
 ```
 ~/agent-console
@@ -169,7 +169,7 @@ Restarting is done through the run: `POST /api/runs/:id/restart`.
 | `GET /api/runs/:id/log?raw=1` | the whole log as `text/plain` |
 | `POST /api/runs/:id/kill?force=1` | stop (tree) → updated run |
 | `POST /api/runs/:id/restart` | start a new run with the same parameters (kills the old one first if it is running) → 201 |
-| `GET /api/runs/:id/screen?lines=200` | interactive runs: `{text, alive}` – the terminal's last `lines` lines (scrollback + screen) |
+| `GET /api/runs/:id/screen?lines=200&cols=` | interactive runs: `{text, alive, cols}` – the terminal's last `lines` lines (scrollback + screen). `cols` (40–220) resizes the tmux window to the viewer's width first, so the TUI reflows for a phone. |
 | `POST /api/runs/:id/keys` | interactive runs: type into the terminal: `{text?, keys?: ["Down", "Escape", "C-c", ...], enter?: true}` (`keys` are tmux key names, sent after `text`) |
 | `DELETE /api/runs/:id` | delete record + log (must not be running) |
 

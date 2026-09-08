@@ -447,7 +447,7 @@ route("POST", "/api/runs/:id/kill", async (_r, p, url) => json(runOut(await kill
 route("POST", "/api/runs/:id/restart", async (_r, p) => json(runOut(await restartRun(Number(p.id))), 201));
 
 // ---- interactive runs (tmux): live screen + typing into it
-route("GET", "/api/runs/:id/screen", async (_r, p, url) => json(await screenOf(getRun(Number(p.id)), int(url.searchParams.get("lines"), "lines", 200) || 200)));
+route("GET", "/api/runs/:id/screen", async (_r, p, url) => json(await screenOf(getRun(Number(p.id)), int(url.searchParams.get("lines"), "lines", 200) || 200, int(url.searchParams.get("cols"), "cols", 0))));
 route("POST", "/api/runs/:id/keys", async (req, p) => {
   const b = await body(req);
   await sendKeys(getRun(Number(p.id)), str(b.text, "text"), strArray(b.keys, "keys"), bool(b.enter, true));

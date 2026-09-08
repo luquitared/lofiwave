@@ -246,13 +246,21 @@ export async function startRun(opts: StartOptions): Promise<RunRow> {
 }
 
 /** Current contents of an interactive run's terminal (last `lines` of scrollback + screen). */
-export async function screenOf(run: RunRow, lines = 200): Promise<{ text: string; alive: boolean }> {
+export async function screenOf(run: RunRow, lines = 200, cols = 0): Promise<{ text: string; alive: boolean; cols: number }> {
   const meta = JSON.parse(run.meta || "{}");
   if (!meta.tmux) throw new ApiError(400, `run ${run.id} is not interactive`);
+  let width = 0;
+  const size = await tmux("display-message", "-p", "-t", meta.tmux, "#{window_width}");
+  if (size.code === 0) width = Number(size.out) || 0;
+  // A phone can't show 180 columns: resize the window to the viewer's width and the TUI reflows (SIGWINCH), like a real terminal would.
+  if (cols >= 40 && cols <= 220 && width && cols !== width && run.status === "running") {
+    const r = await tmux("resize-window", "-t", meta.tmux, "-x", String(cols), "-y", String(cols < 100 ? 40 : 48));
+    if (r.code === 0) width = cols;
+  }
   const cap = await tmux("capture-pane", "-p", "-J", "-t", meta.tmux, "-S", String(-lines));
-  if (cap.code !== 0) return { text: "", alive: false };
-  // TUIs pin their input box to the bottom of a 48-row pane; collapse the padding so the useful part fits on a phone.
-  return { text: cap.out.replace(/\n{3,}/g, "\n\n").replace(/\s+$/, ""), alive: run.status === "running" };
+  if (cap.code !== 0) return { text: "", alive: false, cols: width };
+  // TUIs pin their input box to the bottom of the pane; collapse the padding so the useful part fits on a phone.
+  return { text: cap.out.replace(/\n{3,}/g, "\n\n").replace(/\s+$/, ""), alive: run.status === "running", cols: width };
 }
 
 /** Type text and/or named keys (tmux names: Up, Down, Escape, C-c, Tab ...) into an interactive run's terminal, then optionally Enter. */
