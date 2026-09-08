@@ -66,7 +66,7 @@ CREATE INDEX IF NOT EXISTS runs_status_idx ON runs(status);
 CREATE TABLE IF NOT EXISTS sessions (
   id              INTEGER PRIMARY KEY,
   run_id          INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
-  session_id      TEXT NOT NULL UNIQUE,
+  session_id      TEXT NOT NULL,
   agent           TEXT NOT NULL DEFAULT 'claude',
   cwd             TEXT NOT NULL DEFAULT '',
   transcript_path TEXT NOT NULL DEFAULT '',
@@ -74,7 +74,8 @@ CREATE TABLE IF NOT EXISTS sessions (
   source          TEXT NOT NULL DEFAULT '',   -- startup | resume | clear | compact ...
   started_at      INTEGER NOT NULL,
   ended_at        INTEGER,
-  end_reason      TEXT NOT NULL DEFAULT ''
+  end_reason      TEXT NOT NULL DEFAULT '',
+  UNIQUE(run_id, session_id)
 );
 CREATE INDEX IF NOT EXISTS sessions_run_idx ON sessions(run_id, started_at);
 `);
@@ -90,13 +91,36 @@ if (!typeCols.has("interactive_args")) {
   db.exec(`UPDATE process_types SET interactive_args = '["{prompt}","--remote-control"]' WHERE name = 'claude' AND builtin = 1`);
   db.exec(`UPDATE process_types SET interactive_args = '["{prompt}"]' WHERE name = 'codex' AND builtin = 1`);
 }
+if (!typeCols.has("resume_args")) {
+  // Args template for reopening a recorded session interactively ({session} = the agent's session id).
+  db.exec("ALTER TABLE process_types ADD COLUMN resume_args TEXT NOT NULL DEFAULT ''");
+  db.exec(`UPDATE process_types SET resume_args = '["--resume","{session}","--remote-control"]' WHERE name = 'claude' AND builtin = 1`);
+  db.exec(`UPDATE process_types SET resume_args = '["resume","{session}"]' WHERE name = 'codex' AND builtin = 1`);
+}
+// sessions.session_id started out UNIQUE; a resumed session legitimately belongs to several runs.
+const sessionsUniqueOnIdOnly = db.query<{ name: string; unique: number }, []>("PRAGMA index_list(sessions)").all()
+  .some((i) => i.unique === 1 && db.query<{ name: string }, [string]>(`PRAGMA index_info(${i.name})`).all(i.name).map((c) => c.name).join(",") === "session_id");
+if (sessionsUniqueOnIdOnly) {
+  db.exec(`
+    CREATE TABLE sessions_new (
+      id INTEGER PRIMARY KEY, run_id INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE, session_id TEXT NOT NULL,
+      agent TEXT NOT NULL DEFAULT 'claude', cwd TEXT NOT NULL DEFAULT '', transcript_path TEXT NOT NULL DEFAULT '', model TEXT NOT NULL DEFAULT '',
+      source TEXT NOT NULL DEFAULT '', started_at INTEGER NOT NULL, ended_at INTEGER, end_reason TEXT NOT NULL DEFAULT '',
+      UNIQUE(run_id, session_id)
+    );
+    INSERT INTO sessions_new SELECT * FROM sessions;
+    DROP TABLE sessions;
+    ALTER TABLE sessions_new RENAME TO sessions;
+    CREATE INDEX IF NOT EXISTS sessions_run_idx ON sessions(run_id, started_at);
+  `);
+}
 db.exec("UPDATE process_types SET kind = 'agent' WHERE builtin = 1 AND kind = 'app'");
 
 export const now = () => Date.now();
 
 export type ProcessTypeRow = {
   id: number; name: string; description: string; command: string; args: string; env: string;
-  detect: string; builtin: number; kind: string; default_cwd: string; interactive_args: string; created_at: number; updated_at: number;
+  detect: string; builtin: number; kind: string; default_cwd: string; interactive_args: string; resume_args: string; created_at: number; updated_at: number;
 };
 export type WorkflowRow = {
   id: number; name: string; type_name: string; cwd: string; prompt: string; extra_args: string; env: string;
@@ -119,7 +143,7 @@ export const ACTIVE_STATUSES = ["running"];
 /** Parse the JSON columns of a row so API consumers get real arrays/objects. */
 export function hydrate<T extends Record<string, any>>(row: T): T {
   const out: any = { ...row };
-  for (const k of ["args", "interactive_args", "extra_args", "env", "meta"]) {
+  for (const k of ["args", "interactive_args", "resume_args", "extra_args", "env", "meta"]) {
     if (typeof out[k] === "string") {
       try { out[k] = JSON.parse(out[k]); } catch { /* leave as-is */ }
     }
@@ -137,6 +161,7 @@ const BUILTIN_TYPES = [
     command: "claude",
     args: ["-p", "{prompt}"],
     interactive_args: ["{prompt}", "--remote-control"],
+    resume_args: ["--resume", "{session}", "--remote-control"],
     env: {},
     detect: "(^|/|\\s)claude(\\s|$)",
   },
@@ -146,6 +171,7 @@ const BUILTIN_TYPES = [
     command: "codex",
     args: ["exec", "{prompt}"],
     interactive_args: ["{prompt}"],
+    resume_args: ["resume", "{session}"],
     env: {},
     detect: "(^|/|\\s)codex(\\s|$)",
   },
@@ -153,12 +179,12 @@ const BUILTIN_TYPES = [
 
 export function seedBuiltinTypes() {
   const insert = db.prepare(
-    `INSERT OR IGNORE INTO process_types (name, description, command, args, interactive_args, env, detect, builtin, kind, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, 1, 'agent', ?, ?)`,
+    `INSERT OR IGNORE INTO process_types (name, description, command, args, interactive_args, resume_args, env, detect, builtin, kind, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 'agent', ?, ?)`,
   );
   const t = now();
   for (const b of BUILTIN_TYPES) {
-    insert.run(b.name, b.description, b.command, JSON.stringify(b.args), JSON.stringify(b.interactive_args ?? []), JSON.stringify(b.env), b.detect, t, t);
+    insert.run(b.name, b.description, b.command, JSON.stringify(b.args), JSON.stringify(b.interactive_args ?? []), JSON.stringify(b.resume_args ?? []), JSON.stringify(b.env), b.detect, t, t);
   }
 }
 seedBuiltinTypes();

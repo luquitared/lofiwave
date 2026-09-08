@@ -133,15 +133,15 @@ If `AUTH_TOKEN` is set, send it as one of: `Authorization: Bearer <token>`, `X-A
 |---|---|
 | `GET /api/process-types` | list; each has `kind`, `default_cwd`, `available` (binary found on PATH) and `resolved` path |
 | `GET /api/process-types/:name` | one |
-| `POST /api/process-types` | create: `{name, command, args?, interactive_args?, env?, detect?, description?, kind?: "agent"\|"app", default_cwd?}` → 201 |
-| `PUT /api/process-types/:name` | update any subset of `command, args, interactive_args, env, detect, description, kind, default_cwd` |
+| `POST /api/process-types` | create: `{name, command, args?, interactive_args?, resume_args?, env?, detect?, description?, kind?: "agent"\|"app", default_cwd?}` → 201 |
+| `PUT /api/process-types/:name` | update any subset of `command, args, interactive_args, resume_args, env, detect, description, kind, default_cwd` |
 | `DELETE /api/process-types/:name` | delete (built-ins and types used by a workflow are refused) |
 
 ### Processes (live view)
 
 | | |
 |---|---|
-| `GET /api/processes?type=&kind=` | running processes matching any type (filter by type name or kind): `{pid, ppid, user, cmd, cwd, elapsedSec, rssKb, cpu, type, managed, child, run_id, workflow_name}` |
+| `GET /api/processes?type=&kind=` | running processes matching any type (filter by type name or kind): `{pid, ppid, user, cmd, cwd, elapsedSec, rssKb, cpu, type, managed, child, run_id, workflow_name, session}` – `session` is `{session_id, agent, title, name, status, model, web_url, resume_cmd, ...}` or null |
 | `POST /api/processes` | start one: `{type, cwd?, prompt?, extra_args?, env?, timeout_sec?, interactive?}` → 201 with the run record. `cwd` falls back to the type's `default_cwd`. `interactive: true` starts it in a tmux session that stays open (see Concepts). |
 | `POST /api/processes/preview` | same body; returns the `{command, args}` that would be executed, without running |
 | `DELETE /api/processes/:pid?force=1` | SIGTERM (or SIGKILL with `force`) the process **tree**. Works on unmanaged processes too. If the pid belongs to a run, the run is marked `killed`. |
@@ -186,11 +186,14 @@ Every process the console starts gets `AGENT_CONSOLE_RUN_ID`, `AGENT_CONSOLE_URL
 } }
 ```
 
-It works for `claude` started directly by the console *and* for claude processes started by a wrapper script the console launched (the environment is inherited). Each run then shows its session id(s) in the UI with a **Copy resume** button (`claude --resume <id>`) and a **Transcript** link.
+It works for `claude` started directly by the console *and* for claude processes started by a wrapper script the console launched (the environment is inherited). Codex needs no hook: the console reads the `session id:` that `codex exec` prints, or finds the rollout file a Codex TUI creates under `~/.codex/sessions`.
+
+On top of the recorded id, the console reads what the agents themselves know: Claude Code's per-process registry (`~/.claude/sessions/<pid>.json`: the **name** it gave the session – what the Claude app shows – its idle/working **status** and its Remote Control bridge) and the transcript (auto **title**, `/rename` title, model). That is also how the Agents tab labels claude processes you started from a terminal. Each session in the UI shows title/name, id, model, and offers **Open on web** (the same session on claude.ai, when it has Remote Control), **Resume here** (reopens it in a tmux session on this machine using the type's `resume_args`; for claude that is `claude --resume <id> --remote-control`, so it appears in the Claude app too), **Copy resume** (the terminal command) and **Transcript**.
 
 | | |
 |---|---|
-| `GET /api/runs/:id/sessions` | `[{session_id, agent, cwd, transcript_path, model, source, started_at, ended_at, end_reason}]` |
+| `GET /api/runs/:id/sessions` | `[{session_id, agent, cwd, transcript_path, model, source, started_at, ended_at, end_reason, title, name, status, web_url, resume_cmd}]` |
+| `POST /api/runs/:id/sessions/:session_id/resume` | reopen the session interactively (tmux) → 201 with the new run |
 | `POST /api/runs/:id/sessions` | register (upsert by `session_id`): `{session_id, agent?, cwd?, transcript_path?, model?, source?}` → 201 |
 | `PUT /api/runs/:id/sessions/:session_id` | `{ended: true, reason?, model?}` marks it ended |
 | `GET /api/runs/:id/sessions/:session_id/transcript` | the raw JSONL transcript (`text/plain`; only files under the home directory are served) |

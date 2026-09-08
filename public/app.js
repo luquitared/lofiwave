@@ -164,7 +164,7 @@ const loadTypes = guard(async () => {
 function editType(t) {
   const f = $("#type-form");
   f.orig.value = t.name; f.name.value = t.name; f.name.disabled = true; f.kind.value = t.kind; f.command.value = t.command; f.default_cwd.value = t.default_cwd || "";
-  f.args.value = t.args.join("\n"); f.interactive_args.value = (t.interactive_args || []).join("\n"); f.detect.value = t.detect; f.env.value = envText(t.env); f.description.value = t.description;
+  f.args.value = t.args.join("\n"); f.interactive_args.value = (t.interactive_args || []).join("\n"); f.resume_args.value = (t.resume_args || []).join("\n"); f.detect.value = t.detect; f.env.value = envText(t.env); f.description.value = t.description;
   $("#type-panel-title").textContent = `Edit process type: ${t.name}`; $("#type-panel").open = true; f.command.focus();
 }
 function newType(kind) {
@@ -178,7 +178,7 @@ $("#add-app-btn").onclick = () => newType("app");
 $("#type-form").addEventListener("submit", guard(async (e) => {
   e.preventDefault();
   const f = e.target;
-  const body = { name: f.name.value.trim(), kind: f.kind.value, command: f.command.value.trim(), default_cwd: f.default_cwd.value.trim(), args: f.args.value.split("\n").filter((l) => l !== ""), interactive_args: f.interactive_args.value.split("\n").filter((l) => l !== ""), detect: f.detect.value, env: parseEnv(f.env.value), description: f.description.value };
+  const body = { name: f.name.value.trim(), kind: f.kind.value, command: f.command.value.trim(), default_cwd: f.default_cwd.value.trim(), args: f.args.value.split("\n").filter((l) => l !== ""), interactive_args: f.interactive_args.value.split("\n").filter((l) => l !== ""), resume_args: f.resume_args.value.split("\n").filter((l) => l !== ""), detect: f.detect.value, env: parseEnv(f.env.value), description: f.description.value };
   if (f.orig.value) await put(`/process-types/${f.orig.value}`, body); else await post("/process-types", body);
   toast("saved", true); resetTypeForm(); loadTypes();
 }));
@@ -188,6 +188,7 @@ function renderProcRows(tbody, procs) {
   tbody.replaceChildren(...procs.map((p) => h("tr", { class: p.child ? "child" : "" },
     h("td", { class: "mono" }, p.pid),
     h("td", {}, p.type, p.managed && !p.child ? " " : "", p.managed && !p.child ? badge("managed") : ""),
+    h("td", { class: "sesscell" }, sessionCell(p.session)),
     h("td", { class: "mono trunc", title: p.cwd || "" }, shortCwd(p.cwd) || "–"),
     h("td", { class: "mono trunc", title: p.cmd }, p.cmd),
     h("td", {}, fmtDur(p.elapsedSec)),
@@ -200,7 +201,20 @@ function renderProcRows(tbody, procs) {
       h("button", { class: "small danger", title: "SIGKILL", onclick: () => confirmDo(`Force kill pid ${p.pid}?`, async () => { await del(`/processes/${p.pid}?force=1`); toast("SIGKILL sent", true); refresh(); }) }, "Kill"),
     ),
   )));
-  if (!procs.length) tbody.replaceChildren(h("tr", {}, h("td", { colspan: 9, class: "muted" }, "Nothing running.")));
+  if (!procs.length) tbody.replaceChildren(h("tr", {}, h("td", { colspan: 10, class: "muted" }, "Nothing running.")));
+}
+const shortId = (id) => (id || "").slice(0, 8);
+/** Name / title / status / web link of an agent session, as reported by the agent itself. */
+function sessionCell(s) {
+  if (!s) return h("span", { class: "muted" }, "–");
+  const label = s.title || s.name || shortId(s.session_id);
+  return h("div", { class: "sess", title: `${s.agent} session ${s.session_id}${s.name ? `\nname: ${s.name}` : ""}${s.title ? `\ntitle: ${s.title}` : ""}\n${s.resume_cmd}` },
+    h("div", {}, s.status ? h("span", { class: `dot ${s.status}`, title: s.status }) : "", label),
+    h("div", { class: "muted", style: "font-size:11.5px" },
+      s.name && s.title ? `${s.name} · ` : "", h("code", { class: "mono" }, shortId(s.session_id)), s.model ? ` · ${s.model.replace(/^claude-/, "")}` : "",
+      s.web_url ? h("a", { href: s.web_url, target: "_blank", style: "margin-left:6px" }, "open on web ↗") : "",
+    ),
+  );
 }
 const countText = (procs, what) => {
   const top = procs.filter((p) => !p.child).length, managed = procs.filter((p) => p.managed && !p.child).length;
@@ -362,7 +376,8 @@ const refreshRunDetail = guard(async (full = false) => {
   const id = selectedRun.id;
   const r = await get(`/runs/${id}`);
   if (!selectedRun || selectedRun.id !== id) return;
-  const changed = full || r.status !== selectedRun.status || (r.meta?.remote_url && !selectedRun.meta?.remote_url);
+  const sig = (x) => JSON.stringify((x.sessions || []).map((s) => [s.session_id, s.title, s.name, s.status, s.web_url, s.ended_at]));
+  const changed = full || r.status !== selectedRun.status || (r.meta?.remote_url && !selectedRun.meta?.remote_url) || sig(r) !== sig(selectedRun);
   selectedRun = r;
   if (changed || !$("#run-log")) {
     $("#run-detail").replaceChildren(
@@ -421,7 +436,7 @@ const sendKeysFromForm = guard(async (id) => {
   f.text.value = ""; setTimeout(pollScreen, 400);
 });
 
-// Agent sessions reported by the hook (scripts/claude-session-hook.sh): id, resume command, transcript link.
+// Agent sessions on this run (from the claude hook, codex's rollout file, and the agents' own state): name, title, links, resume.
 function sessionsBlock(r) {
   const list = r.sessions || [];
   if (!list.length) return "";
@@ -429,12 +444,20 @@ function sessionsBlock(r) {
   return h("div", { class: "sessions" },
     h("div", { class: "muted", style: "font-size:12px;margin-bottom:4px" }, list.length === 1 ? "session" : `${list.length} sessions`),
     ...list.map((s) => {
-      const resume = `claude --resume ${s.session_id}`;
+      const live = r.status === "running" && !s.ended_at;
+      const label = s.title || s.name || "(untitled)";
       return h("div", { class: "session" },
-        h("code", { class: "mono", title: s.transcript_path || "" }, s.session_id),
-        h("span", { class: "muted" }, ` ${s.agent}${s.model ? ` · ${s.model}` : ""}${s.source && s.source !== "startup" ? ` · ${s.source}` : ""} · ${fmtRel(s.started_at)}${s.ended_at ? ` → ${fmtDur((s.ended_at - s.started_at) / 1000)}${s.end_reason ? ` (${s.end_reason})` : ""}` : r.status === "running" ? " · live" : ""}`),
-        h("span", { class: "row", style: "gap:6px;margin-left:auto" },
-          h("button", { class: "small", title: resume, onclick: () => navigator.clipboard?.writeText(resume).then(() => toast("copied resume command", true)) }, "Copy resume"),
+        h("div", { style: "flex:1;min-width:0" },
+          h("div", {}, s.status ? h("span", { class: `dot ${s.status}`, title: s.status }) : "", h("b", {}, label), s.name && s.title ? h("span", { class: "muted" }, ` · ${s.name}`) : ""),
+          h("div", { class: "muted", style: "font-size:11.5px" },
+            h("code", { class: "mono", title: s.transcript_path || "" }, s.session_id),
+            ` · ${s.agent}${s.model ? ` · ${s.model}` : ""}${s.source && s.source !== "startup" ? ` · ${s.source}` : ""} · ${fmtRel(s.started_at)}${s.ended_at ? ` → ${fmtDur((s.ended_at - s.started_at) / 1000)}${s.end_reason ? ` (${s.end_reason})` : ""}` : live ? " · live" : ""}`,
+          ),
+        ),
+        h("span", { class: "row", style: "gap:6px;flex-wrap:wrap" },
+          s.web_url ? h("a", { href: s.web_url, target: "_blank" }, h("button", { class: "small" }, "Open on web")) : "",
+          !live ? h("button", { class: "small primary", title: `${s.resume_cmd} — in a tmux session here; claude also gets --remote-control`, onclick: () => guard(async () => { const n = await post(`/runs/${r.id}/sessions/${encodeURIComponent(s.session_id)}/resume`); toast(`resumed as run #${n.id}`, true); openRun(n.id); })() }, "Resume here") : "",
+          h("button", { class: "small", title: s.resume_cmd, onclick: () => navigator.clipboard?.writeText(s.resume_cmd).then(() => toast("copied: " + s.resume_cmd, true)) }, "Copy resume"),
           s.transcript_path ? h("a", { href: `/api/runs/${r.id}/sessions/${encodeURIComponent(s.session_id)}/transcript${tokenQ}`, target: "_blank" }, h("button", { class: "small" }, "Transcript")) : "",
         ),
       );

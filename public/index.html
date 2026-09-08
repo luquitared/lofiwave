@@ -29,7 +29,7 @@
       <label class="muted right"><input type="checkbox" id="hide-children"> hide child processes</label>
     </div>
     <table class="proc-table" id="agent-table">
-      <thead><tr><th>PID</th><th>Type</th><th>Working dir</th><th>Command</th><th>Up</th><th>CPU</th><th>Mem</th><th>Run</th><th></th></tr></thead>
+      <thead><tr><th>PID</th><th>Type</th><th>Session</th><th>Working dir</th><th>Command</th><th>Up</th><th>CPU</th><th>Mem</th><th>Run</th><th></th></tr></thead>
       <tbody></tbody>
     </table>
   </section>
@@ -45,7 +45,7 @@
     </table>
     <h3 class="section-title">Running app processes <span id="app-proc-count" class="muted"></span></h3>
     <table class="proc-table" id="app-proc-table">
-      <thead><tr><th>PID</th><th>Type</th><th>Working dir</th><th>Command</th><th>Up</th><th>CPU</th><th>Mem</th><th>Run</th><th></th></tr></thead>
+      <thead><tr><th>PID</th><th>Type</th><th>Session</th><th>Working dir</th><th>Command</th><th>Up</th><th>CPU</th><th>Mem</th><th>Run</th><th></th></tr></thead>
       <tbody></tbody>
     </table>
   </section>
@@ -104,6 +104,7 @@
         <label>Default working directory <span class="pp"><input name="default_cwd" autocomplete="off" data-pathpicker placeholder="optional"></span></label>
         <label class="wide">Args (one per line; use {prompt} and {cwd}) <textarea name="args" rows="3"></textarea></label>
         <label class="wide">Interactive args (used by interactive runs; blank = same as args) <textarea name="interactive_args" rows="2" placeholder="{prompt}&#10;--remote-control"></textarea></label>
+        <label class="wide">Resume args (reopen a recorded session; use {session}) <textarea name="resume_args" rows="2" placeholder="--resume&#10;{session}&#10;--remote-control"></textarea></label>
         <label>Detect regex (matches OS command lines) <input name="detect" placeholder="(^|/|\s)mytool(\s|$)"></label>
         <label>Env (KEY=VALUE per line) <textarea name="env" rows="2"></textarea></label>
         <label class="wide">Description <input name="description"></label>

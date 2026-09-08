@@ -2,11 +2,12 @@
  * Starts and tracks managed processes ("runs"). Every process started through the
  * console — ad-hoc or from a workflow — is a row in `runs` with its own log file.
  */
-import { join } from "node:path";
+import { join, basename } from "node:path";
 import { existsSync, statSync, openSync, readSync, closeSync, appendFileSync } from "node:fs";
 import { db, now, hydrate, type ProcessTypeRow, type RunRow, type WorkflowRow } from "./db";
 import { config, logDir } from "./config";
 import { killTree, pidAlive } from "./procs";
+import { discoverCodexSession, codexRolloutPath } from "./agents";
 
 export class ApiError extends Error {
   constructor(public status: number, message: string) { super(message); }
@@ -50,7 +51,22 @@ export type StartOptions = {
   timeoutSec?: number;
   /** Start inside a detached tmux session that stays open (an agent's own TUI, e.g. `claude` with Remote Control). */
   interactive?: boolean;
+  /** Reopen this recorded session (uses the type's `resume_args`; implies interactive). */
+  resumeSession?: string;
 };
+
+/** Record (or refresh) an agent session on a run. Keyed by (run, session id) so a resumed session can belong to several runs. */
+export function recordSession(runId: number, s: { session_id: string; agent?: string; cwd?: string; transcript_path?: string; model?: string; source?: string }) {
+  db.prepare(
+    `INSERT INTO sessions (run_id, session_id, agent, cwd, transcript_path, model, source, started_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(run_id, session_id) DO UPDATE SET
+       cwd = CASE WHEN excluded.cwd != '' THEN excluded.cwd ELSE sessions.cwd END,
+       transcript_path = CASE WHEN excluded.transcript_path != '' THEN excluded.transcript_path ELSE sessions.transcript_path END,
+       model = CASE WHEN excluded.model != '' THEN excluded.model ELSE sessions.model END,
+       source = CASE WHEN excluded.source != '' THEN excluded.source ELSE sessions.source END`,
+  ).run(runId, s.session_id, s.agent || "claude", s.cwd ?? "", s.transcript_path ?? "", s.model ?? "", s.source ?? "", now());
+}
 
 export function tmuxPath(): string | null { return Bun.which("tmux"); }
 export const tmuxSessionName = (runId: number) => `ac-${runId}`;
@@ -61,19 +77,24 @@ async function tmux(...args: string[]): Promise<{ code: number; out: string; err
   return { code, out: out.replace(/\n$/, ""), err: err.trim() };
 }
 
-/** The argv template for a type: `interactive_args` when starting interactively (falls back to `args`). */
-function templateFor(type: ProcessTypeRow, interactive: boolean): string[] {
+/** The argv template for a type: `resume_args` when reopening a session, `interactive_args` when starting interactively (falls back to `args`). */
+function templateFor(type: ProcessTypeRow, interactive: boolean, resume: boolean): string[] {
+  if (resume) {
+    const ra: string[] = JSON.parse(type.resume_args || "[]");
+    if (!ra.length) throw new ApiError(400, `process type "${type.name}" has no resume_args template`);
+    return ra;
+  }
   const ia: string[] = interactive ? JSON.parse(type.interactive_args || "[]") : [];
   return ia.length ? ia : JSON.parse(type.args || "[]");
 }
 
-export function buildCommand(type: ProcessTypeRow, opts: { cwd: string; prompt?: string; extraArgs?: string[]; interactive?: boolean }) {
-  const templateArgs = templateFor(type, Boolean(opts.interactive));
+export function buildCommand(type: ProcessTypeRow, opts: { cwd: string; prompt?: string; extraArgs?: string[]; interactive?: boolean; resumeSession?: string }) {
+  const templateArgs = templateFor(type, Boolean(opts.interactive), Boolean(opts.resumeSession));
   const prompt = opts.prompt ?? "";
   const needsPrompt = templateArgs.some((a) => a.includes("{prompt}")) || type.command.includes("{prompt}");
   // Interactive sessions can start empty: the user types (or Remote Control sends) the first message. Drop {prompt} args then.
   if (needsPrompt && !prompt.trim() && !opts.interactive) throw new ApiError(400, `process type "${type.name}" requires a prompt`);
-  const vars = { prompt, cwd: opts.cwd };
+  const vars = { prompt, cwd: opts.cwd, session: opts.resumeSession ?? "" };
   const kept = prompt.trim() ? templateArgs : templateArgs.filter((a) => !a.includes("{prompt}"));
   const args = [...kept.map((a) => substitute(a, vars)), ...(opts.extraArgs ?? [])];
   return { command: substitute(type.command, vars), args, template_len: kept.length };
@@ -84,7 +105,7 @@ export async function startRun(opts: StartOptions): Promise<RunRow> {
   const cwd = opts.cwd?.trim();
   if (!cwd) throw new ApiError(400, "cwd is required");
   if (!existsSync(cwd) || !statSync(cwd).isDirectory()) throw new ApiError(400, `cwd does not exist: ${cwd}`);
-  const interactive = Boolean(opts.interactive);
+  const interactive = Boolean(opts.interactive) || Boolean(opts.resumeSession);
   if (interactive && !tmuxPath()) throw new ApiError(400, "interactive runs need tmux on PATH (brew install tmux / apt install tmux)");
   const { command, args, template_len } = buildCommand(type, opts);
   const typeEnv: Record<string, string> = JSON.parse(type.env || "{}");
@@ -92,6 +113,8 @@ export async function startRun(opts: StartOptions): Promise<RunRow> {
   const t = now();
   const timeoutSec = opts.timeoutSec ?? opts.workflow?.timeout_sec ?? 0;
   const meta: Record<string, any> = { timeout_sec: timeoutSec, template_len };
+  if (opts.resumeSession) meta.resume_session = opts.resumeSession;
+  const isCodex = basename(command) === "codex";
 
   const ins = db.prepare(
     `INSERT INTO runs (workflow_id, workflow_name, type_name, cwd, command, args, prompt, env, trigger, status, started_at, meta)
@@ -151,8 +174,14 @@ export async function startRun(opts: StartOptions): Promise<RunRow> {
         if (q.code !== 0) return null;                    // session vanished (killed from outside)
         const [dead, status] = q.out.split(" ");
         if (dead === "1") return status === "" ? null : Number(status);
+        // Codex has no hook: find the rollout file it just created and record the session.
+        if (isCodex && !meta.codex_session && ticks % 5 === 0) {
+          const found = opts.resumeSession ? { session_id: opts.resumeSession, path: codexRolloutPath(opts.resumeSession) } : discoverCodexSession(t, cwd);
+          if (found) { meta.codex_session = found.session_id; db.prepare("UPDATE runs SET meta = ? WHERE id = ?").run(JSON.stringify(meta), id); recordSession(id, { session_id: found.session_id, agent: "codex", cwd, transcript_path: found.path, source: opts.resumeSession ? "resume" : "startup" }); }
+        }
         // Claude Code prints its Remote Control link once it is up; keep it on the run so the UI can open the session in the Claude app.
-        if (!meta.remote_url && ticks++ < 120 && ticks % 2 === 0) {
+        ticks++;
+        if (!meta.remote_url && ticks < 120 && ticks % 2 === 0) {
           const cap = await tmux("capture-pane", "-p", "-J", "-t", sess);
           const m = cap.code === 0 ? /https:\/\/claude\.ai\/code\/session_[A-Za-z0-9]+/.exec(cap.out) : null;
           if (m) { meta.remote_url = m[0]; db.prepare("UPDATE runs SET meta = ? WHERE id = ?").run(JSON.stringify(meta), id); }
@@ -202,6 +231,11 @@ export async function startRun(opts: StartOptions): Promise<RunRow> {
     const status = entry.killedBy === "timeout" ? "timeout" : entry.killedBy ? "killed" : code === 0 ? "success" : code === null ? "lost" : "failed";
     sink.write(`\n# agent-console: exited with code ${code ?? "unknown"} (${status})\n`);
     await sink.end();
+    if (isCodex && !meta.codex_session) {
+      // `codex exec` prints "session id: <uuid>" in its header.
+      const m = /session id:\s*([0-9a-f-]{36})/.exec(readTail(logPath, 64 * 1024));
+      if (m) recordSession(id, { session_id: m[1], agent: "codex", cwd, transcript_path: codexRolloutPath(m[1]), source: "startup" });
+    }
     live.delete(id);
     db.prepare("UPDATE runs SET status = ?, ended_at = ?, exit_code = ?, output = ?, error = ? WHERE id = ?")
       .run(status, now(), code, readTail(logPath, config.outputTailBytes), code === null && !entry.killedBy ? "tmux session disappeared" : "", id);
@@ -278,8 +312,21 @@ export async function restartRun(id: number): Promise<RunRow> {
   return startRun({
     typeName: run.type_name, cwd: run.cwd, prompt: run.prompt, extraArgs,
     env: JSON.parse(run.env || "{}"), trigger: "restart", workflow: wf, timeoutSec: meta.timeout_sec ?? 0,
-    interactive: Boolean(meta.interactive),
+    interactive: Boolean(meta.interactive), resumeSession: meta.resume_session,
   });
+}
+
+/** Reopen a recorded session interactively (tmux) using the agent type's resume_args. */
+export async function resumeSession(runId: number, sessionId: string): Promise<RunRow> {
+  const run = getRun(runId);
+  const s = db.query<{ agent: string; cwd: string }, [number, string]>("SELECT agent, cwd FROM sessions WHERE run_id = ? AND session_id = ?").get(runId, sessionId);
+  if (!s) throw new ApiError(404, `session ${sessionId} not found on run ${runId}`);
+  // The run's own type if it is that agent (keeps its env/extra config), else the built-in type for the agent.
+  const own = getType(run.type_name);
+  const typeName = basename(own.command) === s.agent ? own.name : s.agent;
+  getType(typeName);
+  const cwd = s.cwd && existsSync(s.cwd) ? s.cwd : run.cwd;
+  return startRun({ typeName, cwd, trigger: "resume", resumeSession: sessionId, env: JSON.parse(run.env || "{}") });
 }
 
 export function readTail(path: string | null, bytes: number): string {
