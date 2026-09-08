@@ -47,8 +47,11 @@ else
   sudo ufw default allow incoming   # keep today's behaviour for every other port
 fi
 sudo ufw default allow outgoing
-# Order matters: the allow rule must come before the deny rule.
-sudo ufw insert 1 allow in on tailscale0 to any port 22 proto tcp comment 'ssh via tailscale'
+# Order matters: the allow rule must come before the deny rule. Remove any previous
+# copies first so re-running keeps the order correct.
+sudo ufw delete allow in on tailscale0 to any port 22 proto tcp comment 'ssh via tailscale' >/dev/null 2>&1 || true
+sudo ufw delete deny in to any port 22 proto tcp comment 'ssh blocked off-tailnet' >/dev/null 2>&1 || true
+sudo ufw allow in on tailscale0 to any port 22 proto tcp comment 'ssh via tailscale'
 sudo ufw deny in to any port 22 proto tcp comment 'ssh blocked off-tailnet'
 sudo ufw --force enable
 
