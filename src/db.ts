@@ -83,13 +83,20 @@ CREATE INDEX IF NOT EXISTS sessions_run_idx ON sessions(run_id, started_at);
 const typeCols = new Set(db.query<{ name: string }, []>("PRAGMA table_info(process_types)").all().map((c) => c.name));
 if (!typeCols.has("kind")) db.exec("ALTER TABLE process_types ADD COLUMN kind TEXT NOT NULL DEFAULT 'app'");
 if (!typeCols.has("default_cwd")) db.exec("ALTER TABLE process_types ADD COLUMN default_cwd TEXT NOT NULL DEFAULT ''");
+if (!typeCols.has("interactive_args")) {
+  // Args template used when a run is started with interactive=true (a tmux session that stays open).
+  // '' means "same as args". Built-ins get templates that open the agent's own TUI.
+  db.exec("ALTER TABLE process_types ADD COLUMN interactive_args TEXT NOT NULL DEFAULT ''");
+  db.exec(`UPDATE process_types SET interactive_args = '["{prompt}","--remote-control"]' WHERE name = 'claude' AND builtin = 1`);
+  db.exec(`UPDATE process_types SET interactive_args = '["{prompt}"]' WHERE name = 'codex' AND builtin = 1`);
+}
 db.exec("UPDATE process_types SET kind = 'agent' WHERE builtin = 1 AND kind = 'app'");
 
 export const now = () => Date.now();
 
 export type ProcessTypeRow = {
   id: number; name: string; description: string; command: string; args: string; env: string;
-  detect: string; builtin: number; kind: string; default_cwd: string; created_at: number; updated_at: number;
+  detect: string; builtin: number; kind: string; default_cwd: string; interactive_args: string; created_at: number; updated_at: number;
 };
 export type WorkflowRow = {
   id: number; name: string; type_name: string; cwd: string; prompt: string; extra_args: string; env: string;
@@ -112,7 +119,7 @@ export const ACTIVE_STATUSES = ["running"];
 /** Parse the JSON columns of a row so API consumers get real arrays/objects. */
 export function hydrate<T extends Record<string, any>>(row: T): T {
   const out: any = { ...row };
-  for (const k of ["args", "extra_args", "env", "meta"]) {
+  for (const k of ["args", "interactive_args", "extra_args", "env", "meta"]) {
     if (typeof out[k] === "string") {
       try { out[k] = JSON.parse(out[k]); } catch { /* leave as-is */ }
     }
@@ -129,6 +136,7 @@ const BUILTIN_TYPES = [
     description: "Claude Code (headless). Prompt is passed with -p. Add e.g. --permission-mode acceptEdits or --dangerously-skip-permissions via extra args.",
     command: "claude",
     args: ["-p", "{prompt}"],
+    interactive_args: ["{prompt}", "--remote-control"],
     env: {},
     detect: "(^|/|\\s)claude(\\s|$)",
   },
@@ -137,6 +145,7 @@ const BUILTIN_TYPES = [
     description: "OpenAI Codex CLI (non-interactive). Add e.g. --full-auto or --skip-git-repo-check via extra args.",
     command: "codex",
     args: ["exec", "{prompt}"],
+    interactive_args: ["{prompt}"],
     env: {},
     detect: "(^|/|\\s)codex(\\s|$)",
   },
@@ -144,12 +153,12 @@ const BUILTIN_TYPES = [
 
 export function seedBuiltinTypes() {
   const insert = db.prepare(
-    `INSERT OR IGNORE INTO process_types (name, description, command, args, env, detect, builtin, kind, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, 1, 'agent', ?, ?)`,
+    `INSERT OR IGNORE INTO process_types (name, description, command, args, interactive_args, env, detect, builtin, kind, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 1, 'agent', ?, ?)`,
   );
   const t = now();
   for (const b of BUILTIN_TYPES) {
-    insert.run(b.name, b.description, b.command, JSON.stringify(b.args), JSON.stringify(b.env), b.detect, t, t);
+    insert.run(b.name, b.description, b.command, JSON.stringify(b.args), JSON.stringify(b.interactive_args ?? []), JSON.stringify(b.env), b.detect, t, t);
   }
 }
 seedBuiltinTypes();

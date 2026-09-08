@@ -3,7 +3,7 @@
  * console — ad-hoc or from a workflow — is a row in `runs` with its own log file.
  */
 import { join } from "node:path";
-import { existsSync, statSync, openSync, readSync, closeSync } from "node:fs";
+import { existsSync, statSync, openSync, readSync, closeSync, appendFileSync } from "node:fs";
 import { db, now, hydrate, type ProcessTypeRow, type RunRow, type WorkflowRow } from "./db";
 import { config, logDir } from "./config";
 import { killTree, pidAlive } from "./procs";
@@ -13,7 +13,14 @@ export class ApiError extends Error {
 }
 
 /** In-memory handles for runs started by this server process. */
-type LiveEntry = { proc: Bun.Subprocess; timer?: ReturnType<typeof setTimeout>; killedBy?: string; done: Promise<void> };
+type LiveEntry = {
+  pid: number;
+  proc?: Bun.Subprocess;      // direct child (normal runs)
+  tmux?: string;              // tmux session name (interactive runs)
+  timer?: ReturnType<typeof setTimeout>;
+  killedBy?: string;
+  done: Promise<void>;
+};
 const live = new Map<number, LiveEntry>();
 
 export function getType(name: string): ProcessTypeRow {
@@ -41,16 +48,35 @@ export type StartOptions = {
   trigger: string;
   workflow?: WorkflowRow | null;
   timeoutSec?: number;
+  /** Start inside a detached tmux session that stays open (an agent's own TUI, e.g. `claude` with Remote Control). */
+  interactive?: boolean;
 };
 
-export function buildCommand(type: ProcessTypeRow, opts: { cwd: string; prompt?: string; extraArgs?: string[] }) {
-  const templateArgs: string[] = JSON.parse(type.args || "[]");
+export function tmuxPath(): string | null { return Bun.which("tmux"); }
+export const tmuxSessionName = (runId: number) => `ac-${runId}`;
+
+async function tmux(...args: string[]): Promise<{ code: number; out: string; err: string }> {
+  const p = Bun.spawn(["tmux", ...args], { stdout: "pipe", stderr: "pipe" });
+  const [out, err, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
+  return { code, out: out.replace(/\n$/, ""), err: err.trim() };
+}
+
+/** The argv template for a type: `interactive_args` when starting interactively (falls back to `args`). */
+function templateFor(type: ProcessTypeRow, interactive: boolean): string[] {
+  const ia: string[] = interactive ? JSON.parse(type.interactive_args || "[]") : [];
+  return ia.length ? ia : JSON.parse(type.args || "[]");
+}
+
+export function buildCommand(type: ProcessTypeRow, opts: { cwd: string; prompt?: string; extraArgs?: string[]; interactive?: boolean }) {
+  const templateArgs = templateFor(type, Boolean(opts.interactive));
   const prompt = opts.prompt ?? "";
   const needsPrompt = templateArgs.some((a) => a.includes("{prompt}")) || type.command.includes("{prompt}");
-  if (needsPrompt && !prompt.trim()) throw new ApiError(400, `process type "${type.name}" requires a prompt`);
+  // Interactive sessions can start empty: the user types (or Remote Control sends) the first message. Drop {prompt} args then.
+  if (needsPrompt && !prompt.trim() && !opts.interactive) throw new ApiError(400, `process type "${type.name}" requires a prompt`);
   const vars = { prompt, cwd: opts.cwd };
-  const args = [...templateArgs.map((a) => substitute(a, vars)), ...(opts.extraArgs ?? [])];
-  return { command: substitute(type.command, vars), args };
+  const kept = prompt.trim() ? templateArgs : templateArgs.filter((a) => !a.includes("{prompt}"));
+  const args = [...kept.map((a) => substitute(a, vars)), ...(opts.extraArgs ?? [])];
+  return { command: substitute(type.command, vars), args, template_len: kept.length };
 }
 
 export async function startRun(opts: StartOptions): Promise<RunRow> {
@@ -58,86 +84,158 @@ export async function startRun(opts: StartOptions): Promise<RunRow> {
   const cwd = opts.cwd?.trim();
   if (!cwd) throw new ApiError(400, "cwd is required");
   if (!existsSync(cwd) || !statSync(cwd).isDirectory()) throw new ApiError(400, `cwd does not exist: ${cwd}`);
-  const { command, args } = buildCommand(type, opts);
+  const interactive = Boolean(opts.interactive);
+  if (interactive && !tmuxPath()) throw new ApiError(400, "interactive runs need tmux on PATH (brew install tmux / apt install tmux)");
+  const { command, args, template_len } = buildCommand(type, opts);
   const typeEnv: Record<string, string> = JSON.parse(type.env || "{}");
   const env = { ...typeEnv, ...(opts.env ?? {}) };
   const t = now();
   const timeoutSec = opts.timeoutSec ?? opts.workflow?.timeout_sec ?? 0;
+  const meta: Record<string, any> = { timeout_sec: timeoutSec, template_len };
 
   const ins = db.prepare(
     `INSERT INTO runs (workflow_id, workflow_name, type_name, cwd, command, args, prompt, env, trigger, status, started_at, meta)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?)`,
   ).run(
     opts.workflow?.id ?? null, opts.workflow?.name ?? null, type.name, cwd, command, JSON.stringify(args),
-    opts.prompt ?? "", JSON.stringify(env), opts.trigger, t, JSON.stringify({ timeout_sec: timeoutSec }),
+    opts.prompt ?? "", JSON.stringify(env), opts.trigger, t, JSON.stringify(meta),
   );
   const id = Number(ins.lastInsertRowid);
   const logPath = join(logDir, `run-${id}.log`);
-  db.prepare("UPDATE runs SET log_path = ? WHERE id = ?").run(logPath, id);
+  if (interactive) { meta.interactive = true; meta.tmux = tmuxSessionName(id); }
+  db.prepare("UPDATE runs SET log_path = ?, meta = ? WHERE id = ?").run(logPath, JSON.stringify(meta), id);
 
   const sink = Bun.file(logPath).writer();
-  const header = `# agent-console run ${id} | ${new Date(t).toISOString()} | cwd=${cwd}\n# $ ${[command, ...args].map(shellQuote).join(" ")}\n\n`;
+  const header = `# agent-console run ${id} | ${new Date(t).toISOString()} | cwd=${cwd}\n# $ ${[command, ...args].map(shellQuote).join(" ")}\n` +
+    (interactive ? `# interactive: tmux session "${meta.tmux}" (attach with: tmux attach -t ${meta.tmux}); the screen is captured here when it ends\n` : "") + "\n";
   sink.write(header);
   sink.flush();
 
-  let proc: Bun.Subprocess;
-  try {
-    proc = Bun.spawn([command, ...args], {
-      cwd,
-      env: {
-        ...process.env, ...env,
-        AGENT_CONSOLE_RUN_ID: String(id),
-        // Lets scripts/claude-session-hook.sh (a Claude Code SessionStart/SessionEnd hook) report the session back.
-        AGENT_CONSOLE_URL: `http://127.0.0.1:${config.port}`,
-        AGENT_CONSOLE_TOKEN: config.authToken,
-      },
-      stdin: "ignore",
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-  } catch (e: any) {
-    const msg = `failed to spawn "${command}": ${e?.message ?? e}`;
+  const childEnv = {
+    ...process.env, ...env,
+    AGENT_CONSOLE_RUN_ID: String(id),
+    // Lets scripts/claude-session-hook.sh (a Claude Code SessionStart/SessionEnd hook) report the session back.
+    AGENT_CONSOLE_URL: `http://127.0.0.1:${config.port}`,
+    AGENT_CONSOLE_TOKEN: config.authToken,
+  };
+
+  const fail = async (msg: string) => {
     sink.write(`\n${msg}\n`);
     await sink.end();
     db.prepare("UPDATE runs SET status = 'error', ended_at = ?, error = ? WHERE id = ?").run(now(), msg, id);
     throw new ApiError(400, msg);
-  }
-
-  db.prepare("UPDATE runs SET pid = ? WHERE id = ?").run(proc.pid, id);
-  if (opts.workflow) db.prepare("UPDATE workflows SET last_run_at = ? WHERE id = ?").run(t, opts.workflow.id);
+  };
 
   let markDone!: () => void;
-  const entry: LiveEntry = { proc, done: new Promise<void>((res) => (markDone = res)) };
+  const done = new Promise<void>((res) => (markDone = res));
+  let entry: LiveEntry;
+  let exited: Promise<number | null>;
+
+  if (interactive) {
+    // A detached tmux session owns the pty; we track the pane's process and poll its exit status.
+    const sess = meta.tmux as string;
+    const envFlags = Object.entries({ ...env, PATH: childEnv.PATH ?? "", AGENT_CONSOLE_RUN_ID: childEnv.AGENT_CONSOLE_RUN_ID, AGENT_CONSOLE_URL: childEnv.AGENT_CONSOLE_URL, AGENT_CONSOLE_TOKEN: childEnv.AGENT_CONSOLE_TOKEN })
+      .flatMap(([k, v]) => ["-e", `${k}=${v}`]);
+    const created = await tmux("new-session", "-d", "-s", sess, "-c", cwd, "-x", "180", "-y", "48", ...envFlags, "--", command, ...args);
+    if (created.code !== 0) await fail(`failed to start tmux session: ${created.err || created.out}`);
+    await tmux("set-option", "-t", sess, "remain-on-exit", "on");
+    const pane = await tmux("display-message", "-p", "-t", sess, "#{pane_pid}");
+    const pid = Number(pane.out);
+    if (!pid) await fail(`could not read the tmux pane pid: ${pane.err || pane.out}`);
+    entry = { pid, tmux: sess, done };
+    exited = (async () => {
+      let ticks = 0;
+      for (;;) {
+        await Bun.sleep(1000);
+        const q = await tmux("display-message", "-p", "-t", sess, "#{pane_dead} #{pane_dead_status}");
+        if (q.code !== 0) return null;                    // session vanished (killed from outside)
+        const [dead, status] = q.out.split(" ");
+        if (dead === "1") return status === "" ? null : Number(status);
+        // Claude Code prints its Remote Control link once it is up; keep it on the run so the UI can open the session in the Claude app.
+        if (!meta.remote_url && ticks++ < 120 && ticks % 2 === 0) {
+          const cap = await tmux("capture-pane", "-p", "-J", "-t", sess);
+          const m = cap.code === 0 ? /https:\/\/claude\.ai\/code\/session_[A-Za-z0-9]+/.exec(cap.out) : null;
+          if (m) { meta.remote_url = m[0]; db.prepare("UPDATE runs SET meta = ? WHERE id = ?").run(JSON.stringify(meta), id); }
+        }
+      }
+    })();
+  } else {
+    let proc: Bun.Subprocess;
+    try {
+      proc = Bun.spawn([command, ...args], { cwd, env: childEnv, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+    } catch (e: any) {
+      await fail(`failed to spawn "${command}": ${e?.message ?? e}`);
+    }
+    entry = { pid: proc!.pid, proc: proc!, done };
+    const pump = async (stream: ReadableStream<Uint8Array> | undefined | null) => {
+      if (!stream) return;
+      for await (const chunk of stream) { sink.write(chunk); sink.flush(); }
+    };
+    const io = Promise.all([pump(proc!.stdout as any), pump(proc!.stderr as any)]);
+    exited = proc!.exited.then(async (code) => {
+      // Grandchildren may still hold the pipes open; don't wait on them forever.
+      await Promise.race([io.catch(() => {}), Bun.sleep(3000)]);
+      return code;
+    });
+  }
+
+  db.prepare("UPDATE runs SET pid = ? WHERE id = ?").run(entry.pid, id);
+  if (opts.workflow) db.prepare("UPDATE workflows SET last_run_at = ? WHERE id = ?").run(t, opts.workflow.id);
   live.set(id, entry);
   if (timeoutSec > 0) {
     entry.timer = setTimeout(() => {
       entry.killedBy = "timeout";
       sink.write(`\n# agent-console: timeout after ${timeoutSec}s, killing process tree\n`);
-      killTree(proc.pid, true).catch(() => {});
+      killTree(entry.pid, true).catch(() => {});
     }, timeoutSec * 1000);
   }
 
-  const pump = async (stream: ReadableStream<Uint8Array> | undefined | null) => {
-    if (!stream) return;
-    for await (const chunk of stream) { sink.write(chunk); sink.flush(); }
-  };
-  const io = Promise.all([pump(proc.stdout as any), pump(proc.stderr as any)]);
-
   (async () => {
-    const code = await proc.exited;
-    // Grandchildren may still hold the pipes open; don't wait on them forever.
-    await Promise.race([io.catch(() => {}), Bun.sleep(3000)]);
+    const code = await exited;
     if (entry.timer) clearTimeout(entry.timer);
-    const status = entry.killedBy === "timeout" ? "timeout" : entry.killedBy ? "killed" : code === 0 ? "success" : "failed";
-    sink.write(`\n# agent-console: exited with code ${code} (${status})\n`);
+    if (entry.tmux) {
+      // Keep what was on screen (scrollback included) as the run's record, then drop the dead session.
+      const cap = await tmux("capture-pane", "-p", "-J", "-t", entry.tmux, "-S", "-2000");
+      if (cap.code === 0) sink.write(cap.out.replace(/^Pane is dead.*$/m, "").replace(/\n{3,}/g, "\n\n").replace(/\s+$/, "") + "\n");
+      await tmux("kill-session", "-t", entry.tmux);
+    }
+    const status = entry.killedBy === "timeout" ? "timeout" : entry.killedBy ? "killed" : code === 0 ? "success" : code === null ? "lost" : "failed";
+    sink.write(`\n# agent-console: exited with code ${code ?? "unknown"} (${status})\n`);
     await sink.end();
     live.delete(id);
-    db.prepare("UPDATE runs SET status = ?, ended_at = ?, exit_code = ?, output = ? WHERE id = ?")
-      .run(status, now(), code, readTail(logPath, config.outputTailBytes), id);
+    db.prepare("UPDATE runs SET status = ?, ended_at = ?, exit_code = ?, output = ?, error = ? WHERE id = ?")
+      .run(status, now(), code, readTail(logPath, config.outputTailBytes), code === null && !entry.killedBy ? "tmux session disappeared" : "", id);
     markDone();
   })();
 
   return getRun(id);
+}
+
+/** Current contents of an interactive run's terminal (last `lines` of scrollback + screen). */
+export async function screenOf(run: RunRow, lines = 200): Promise<{ text: string; alive: boolean }> {
+  const meta = JSON.parse(run.meta || "{}");
+  if (!meta.tmux) throw new ApiError(400, `run ${run.id} is not interactive`);
+  const cap = await tmux("capture-pane", "-p", "-J", "-t", meta.tmux, "-S", String(-lines));
+  if (cap.code !== 0) return { text: "", alive: false };
+  // TUIs pin their input box to the bottom of a 48-row pane; collapse the padding so the useful part fits on a phone.
+  return { text: cap.out.replace(/\n{3,}/g, "\n\n").replace(/\s+$/, ""), alive: run.status === "running" };
+}
+
+/** Type text and/or named keys (tmux names: Up, Down, Escape, C-c, Tab ...) into an interactive run's terminal, then optionally Enter. */
+export async function sendKeys(run: RunRow, text: string, keys: string[], enter: boolean): Promise<void> {
+  const meta = JSON.parse(run.meta || "{}");
+  if (!meta.tmux) throw new ApiError(400, `run ${run.id} is not interactive`);
+  if (run.status !== "running") throw new ApiError(409, `run ${run.id} is not running`);
+  if (text) {
+    const r = await tmux("send-keys", "-t", meta.tmux, "-l", "--", text);
+    if (r.code !== 0) throw new ApiError(500, `tmux send-keys failed: ${r.err}`);
+  }
+  for (const k of keys) {
+    if (!/^[A-Za-z0-9-]+$/.test(k)) throw new ApiError(400, `bad key name: ${k}`);
+    const r = await tmux("send-keys", "-t", meta.tmux, k);
+    if (r.code !== 0) throw new ApiError(400, `tmux did not accept key "${k}": ${r.err}`);
+  }
+  if (enter) await tmux("send-keys", "-t", meta.tmux, "Enter");
 }
 
 export async function killRun(id: number, force = false): Promise<RunRow> {
@@ -153,6 +251,13 @@ export async function killRun(id: number, force = false): Promise<RunRow> {
     // Orphan from a previous server instance: we can't await exit, so poll briefly.
     for (let i = 0; i < 20 && pidAlive(run.pid); i++) await Bun.sleep(100);
     if (!pidAlive(run.pid)) {
+      const meta = JSON.parse(run.meta || "{}");
+      if (meta.tmux) {
+        // Nobody is polling this session any more: save its screen and drop it, like the live path does.
+        const cap = await tmux("capture-pane", "-p", "-J", "-t", meta.tmux, "-S", "-2000");
+        if (cap.code === 0 && run.log_path) appendFileSync(run.log_path, cap.out.replace(/^Pane is dead.*$/m, "").replace(/\n{3,}/g, "\n\n").replace(/\s+$/, "") + "\n\n# agent-console: killed (orphan)\n");
+        await tmux("kill-session", "-t", meta.tmux);
+      }
       db.prepare("UPDATE runs SET status = 'killed', ended_at = ? WHERE id = ?").run(now(), id);
     }
   }
@@ -166,13 +271,14 @@ export async function restartRun(id: number): Promise<RunRow> {
     ? db.query<WorkflowRow, [number]>("SELECT * FROM workflows WHERE id = ?").get(run.workflow_id)
     : null;
   const type = getType(run.type_name);
-  const templateArgs: string[] = JSON.parse(type.args || "[]");
-  const finalArgs: string[] = JSON.parse(run.args || "[]");
-  const extraArgs = finalArgs.slice(templateArgs.length);
   const meta = JSON.parse(run.meta || "{}");
+  const finalArgs: string[] = JSON.parse(run.args || "[]");
+  const templateLen: number = meta.template_len ?? JSON.parse(type.args || "[]").length;
+  const extraArgs = finalArgs.slice(templateLen);
   return startRun({
     typeName: run.type_name, cwd: run.cwd, prompt: run.prompt, extraArgs,
     env: JSON.parse(run.env || "{}"), trigger: "restart", workflow: wf, timeoutSec: meta.timeout_sec ?? 0,
+    interactive: Boolean(meta.interactive),
   });
 }
 
@@ -216,6 +322,8 @@ export function reconcileRuns() {
       }
       continue;
     }
+    const meta = JSON.parse(r.meta || "{}");
+    if (meta.tmux) tmux("kill-session", "-t", meta.tmux).catch(() => {});
     db.prepare("UPDATE runs SET status = 'lost', ended_at = ?, error = ?, output = ? WHERE id = ?")
       .run(now(), "process disappeared while the console was not running", readTail(r.log_path, config.outputTailBytes), r.id);
   }

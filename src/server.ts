@@ -4,7 +4,7 @@ import { hostname, homedir } from "node:os";
 import { config } from "./config";
 import { db, now, hydrate, type ProcessTypeRow, type WorkflowRow, type RunRow, type SessionRow } from "./db";
 import { listOsProcesses, cwdOf, killTree, type OsProcess } from "./procs";
-import { ApiError, startRun, killRun, restartRun, getRun, getType, readLogFrom, isLive, buildCommand } from "./runner";
+import { ApiError, startRun, killRun, restartRun, getRun, getType, readLogFrom, isLive, buildCommand, screenOf, sendKeys, tmuxPath } from "./runner";
 import { startScheduler, refreshNextRun, runWorkflow, computeNext } from "./scheduler";
 import { validateCron } from "./cron";
 import { renderDocs, apiIndex } from "./docs";
@@ -190,7 +190,7 @@ route("GET", "/api/system", async () => {
   }
   return json({
     hostname: hostname(), platform: process.platform, pid: process.pid, bun: Bun.version,
-    host: config.host, port: config.port, data_dir: config.dataDir, auth_required: Boolean(config.authToken),
+    tmux: tmuxPath(), host: config.host, port: config.port, data_dir: config.dataDir, auth_required: Boolean(config.authToken),
     uptime_ms: now() - startedAt, addresses, tailscale, server_time: now(),
   });
 });
@@ -256,10 +256,11 @@ route("POST", "/api/process-types", async (req) => {
   if (detect) { try { new RegExp(detect); } catch (e: any) { throw new ApiError(400, `detect is not a valid regex: ${e.message}`); } }
   const kind = parseKind(b.kind, "app");
   const default_cwd = str(b.default_cwd, "default_cwd").trim();
+  const interactive_args = strArray(b.interactive_args, "interactive_args");
   const t = now();
   try {
-    db.prepare(`INSERT INTO process_types (name, description, command, args, env, detect, builtin, kind, default_cwd, created_at, updated_at) VALUES (?,?,?,?,?,?,0,?,?,?,?)`)
-      .run(name, str(b.description, "description"), command, JSON.stringify(args), JSON.stringify(env), detect, kind, default_cwd, t, t);
+    db.prepare(`INSERT INTO process_types (name, description, command, args, interactive_args, env, detect, builtin, kind, default_cwd, created_at, updated_at) VALUES (?,?,?,?,?,?,?,0,?,?,?,?)`)
+      .run(name, str(b.description, "description"), command, JSON.stringify(args), JSON.stringify(interactive_args), JSON.stringify(env), detect, kind, default_cwd, t, t);
   } catch (e: any) {
     if (String(e.message).includes("UNIQUE")) throw new ApiError(409, `process type "${name}" already exists`);
     throw e;
@@ -278,8 +279,9 @@ route("PUT", "/api/process-types/:name", async (req, p) => {
   const description = b.description === undefined ? cur.description : str(b.description, "description");
   const kind = b.kind === undefined ? cur.kind : parseKind(b.kind, cur.kind);
   const default_cwd = b.default_cwd === undefined ? cur.default_cwd : str(b.default_cwd, "default_cwd").trim();
-  db.prepare("UPDATE process_types SET description=?, command=?, args=?, env=?, detect=?, kind=?, default_cwd=?, updated_at=? WHERE id=?")
-    .run(description, command, JSON.stringify(args), JSON.stringify(env), detect, kind, default_cwd, now(), cur.id);
+  const interactive_args = b.interactive_args === undefined ? JSON.parse(cur.interactive_args || "[]") : strArray(b.interactive_args, "interactive_args");
+  db.prepare("UPDATE process_types SET description=?, command=?, args=?, interactive_args=?, env=?, detect=?, kind=?, default_cwd=?, updated_at=? WHERE id=?")
+    .run(description, command, JSON.stringify(args), JSON.stringify(interactive_args), JSON.stringify(env), detect, kind, default_cwd, now(), cur.id);
   return json(typeWithAvailability(getType(p.name)));
 });
 
@@ -306,6 +308,7 @@ route("POST", "/api/processes", async (req) => {
     extraArgs: strArray(b.extra_args, "extra_args"),
     env: strMap(b.env, "env"),
     timeoutSec: int(b.timeout_sec, "timeout_sec", 0),
+    interactive: bool(b.interactive, false),
     trigger: "manual",
   });
   return json(runOut(run), 201);
@@ -314,8 +317,9 @@ route("POST", "/api/processes", async (req) => {
 route("POST", "/api/processes/preview", async (req) => {
   const b = await body(req);
   const type = getType(str(b.type, "type", { required: true }));
-  const { command, args } = buildCommand(type, { cwd: str(b.cwd, "cwd") || type.default_cwd || ".", prompt: str(b.prompt, "prompt"), extraArgs: strArray(b.extra_args, "extra_args") });
-  return json({ command, args });
+  const interactive = bool(b.interactive, false);
+  const { command, args } = buildCommand(type, { cwd: str(b.cwd, "cwd") || type.default_cwd || ".", prompt: str(b.prompt, "prompt"), extraArgs: strArray(b.extra_args, "extra_args"), interactive });
+  return json({ command, args, interactive, tmux: interactive ? tmuxPath() : undefined });
 });
 
 route("DELETE", "/api/processes/:pid", async (_r, p, url) => {
@@ -429,6 +433,14 @@ route("GET", "/api/runs/:id/log", (_r, p, url) => {
 
 route("POST", "/api/runs/:id/kill", async (_r, p, url) => json(runOut(await killRun(Number(p.id), bool(url.searchParams.get("force"), false)))));
 route("POST", "/api/runs/:id/restart", async (_r, p) => json(runOut(await restartRun(Number(p.id))), 201));
+
+// ---- interactive runs (tmux): live screen + typing into it
+route("GET", "/api/runs/:id/screen", async (_r, p, url) => json(await screenOf(getRun(Number(p.id)), int(url.searchParams.get("lines"), "lines", 200) || 200)));
+route("POST", "/api/runs/:id/keys", async (req, p) => {
+  const b = await body(req);
+  await sendKeys(getRun(Number(p.id)), str(b.text, "text"), strArray(b.keys, "keys"), bool(b.enter, true));
+  return json({ ok: true });
+});
 
 // ---- sessions (reported by the agent's own hook; see scripts/claude-session-hook.sh)
 route("GET", "/api/runs/:id/sessions", (_r, p) => json(sessionsOf(getRun(Number(p.id)).id)));

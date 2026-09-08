@@ -126,8 +126,10 @@ function switchTab(name, push = true) {
 }
 
 // ---------------------------------------------------------------- system info
+let systemInfo = null;
 const loadSystem = guard(async () => {
   const s = await get("/system");
+  systemInfo = s;
   const addrs = Object.values(s.addresses).flat();
   const ts = s.tailscale;
   $("#sysinfo").replaceChildren(
@@ -162,7 +164,7 @@ const loadTypes = guard(async () => {
 function editType(t) {
   const f = $("#type-form");
   f.orig.value = t.name; f.name.value = t.name; f.name.disabled = true; f.kind.value = t.kind; f.command.value = t.command; f.default_cwd.value = t.default_cwd || "";
-  f.args.value = t.args.join("\n"); f.detect.value = t.detect; f.env.value = envText(t.env); f.description.value = t.description;
+  f.args.value = t.args.join("\n"); f.interactive_args.value = (t.interactive_args || []).join("\n"); f.detect.value = t.detect; f.env.value = envText(t.env); f.description.value = t.description;
   $("#type-panel-title").textContent = `Edit process type: ${t.name}`; $("#type-panel").open = true; f.command.focus();
 }
 function newType(kind) {
@@ -176,7 +178,7 @@ $("#add-app-btn").onclick = () => newType("app");
 $("#type-form").addEventListener("submit", guard(async (e) => {
   e.preventDefault();
   const f = e.target;
-  const body = { name: f.name.value.trim(), kind: f.kind.value, command: f.command.value.trim(), default_cwd: f.default_cwd.value.trim(), args: f.args.value.split("\n").filter((l) => l !== ""), detect: f.detect.value, env: parseEnv(f.env.value), description: f.description.value };
+  const body = { name: f.name.value.trim(), kind: f.kind.value, command: f.command.value.trim(), default_cwd: f.default_cwd.value.trim(), args: f.args.value.split("\n").filter((l) => l !== ""), interactive_args: f.interactive_args.value.split("\n").filter((l) => l !== ""), detect: f.detect.value, env: parseEnv(f.env.value), description: f.description.value };
   if (f.orig.value) await put(`/process-types/${f.orig.value}`, body); else await post("/process-types", body);
   toast("saved", true); resetTypeForm(); loadTypes();
 }));
@@ -249,7 +251,7 @@ function openStartDialog({ kind, type } = {}) {
   const allowed = type ? types.filter((t) => t.name === type) : types.filter((t) => !kind || t.kind === kind);
   sel.replaceChildren(...allowed.map((t) => h("option", { value: t.name }, `${t.name}` + (t.available ? "" : " · not found"))));
   sel.disabled = allowed.length <= 1;
-  sf.prompt.value = ""; sf.extra_args.value = ""; sf.timeout_sec.value = 0; $("#preview").textContent = "";
+  sf.prompt.value = ""; sf.extra_args.value = ""; sf.timeout_sec.value = 0; sf.interactive.checked = false; $("#preview").textContent = "";
   $("#start-title").textContent = type ? `Start ${type}` : kind === "agent" ? "Start an agent" : "Start a process";
   applyStartType();
   dlg.showModal();
@@ -257,16 +259,22 @@ function openStartDialog({ kind, type } = {}) {
 }
 function applyStartType() {
   const t = typeByName(sf.type.value);
-  const needsPrompt = t && (t.args.some((a) => a.includes("{prompt}")) || t.command.includes("{prompt}"));
-  $("#prompt-label").hidden = t && !needsPrompt && t.kind === "app";
+  const interactive = sf.interactive.checked;
+  const needsPrompt = t && (t.args.some((a) => a.includes("{prompt}")) || t.command.includes("{prompt}")) && !interactive;
+  $("#prompt-label").hidden = t && !needsPrompt && t.kind === "app" && !interactive;
+  sf.prompt.placeholder = interactive ? "Optional first message — or leave empty and drive it from the Claude app / the screen below" : "What should the agent do?";
+  $("#interactive-label").style.display = systemInfo?.tmux ? "" : "none";   // .row's display:flex would override `hidden`
+  $("#interactive-hint").textContent = t?.name === "claude" ? "— stays open in a tmux session; claude starts with Remote Control so it appears in the Claude app"
+    : t?.name === "codex" ? "— opens the Codex TUI in a tmux session that stays open" : "— runs in a tmux session that stays open; uses the type's interactive args";
   sf.cwd.value = t?.default_cwd || sf.cwd.value;
   sf.cwd.placeholder = t?.default_cwd ? t.default_cwd : "start typing to search";
   sf.extra_args.placeholder = t?.name === "claude" ? "--permission-mode acceptEdits" : t?.name === "codex" ? "--full-auto" : "";
 }
 sf.type.onchange = applyStartType;
+sf.interactive.onchange = applyStartType;
 $("#start-cancel").onclick = () => dlg.close();
 function startFormBody() {
-  return { type: sf.type.value, cwd: sf.cwd.value.trim(), prompt: sf.prompt.value, extra_args: sf.extra_args.value, timeout_sec: Number(sf.timeout_sec.value || 0) };
+  return { type: sf.type.value, cwd: sf.cwd.value.trim(), prompt: sf.prompt.value, extra_args: sf.extra_args.value, timeout_sec: Number(sf.timeout_sec.value || 0), interactive: sf.interactive.checked };
 }
 $("#preview-btn").onclick = guard(async () => {
   const r = await post("/processes/preview", startFormBody());
@@ -275,7 +283,8 @@ $("#preview-btn").onclick = guard(async () => {
 $("#start-submit").onclick = guard(async () => {
   const run = await post("/processes", startFormBody());
   toast(`started run #${run.id} (pid ${run.pid})`, true);
-  dlg.close(); refresh();
+  dlg.close();
+  if (run.meta?.interactive) openRun(run.id); else refresh();
 });
 sf.addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) $("#start-submit").click(); });
 
@@ -353,7 +362,7 @@ const refreshRunDetail = guard(async (full = false) => {
   const id = selectedRun.id;
   const r = await get(`/runs/${id}`);
   if (!selectedRun || selectedRun.id !== id) return;
-  const changed = full || r.status !== selectedRun.status;
+  const changed = full || r.status !== selectedRun.status || (r.meta?.remote_url && !selectedRun.meta?.remote_url);
   selectedRun = r;
   if (changed || !$("#run-log")) {
     $("#run-detail").replaceChildren(
@@ -365,6 +374,8 @@ const refreshRunDetail = guard(async (full = false) => {
         r.prompt ? h("dt", {}, "prompt") : "", r.prompt ? h("dd", { style: "white-space:pre-wrap" }, r.prompt) : "",
         h("dt", {}, "trigger"), h("dd", {}, r.trigger),
         h("dt", {}, "pid"), h("dd", {}, r.pid ?? "–", r.meta?.orphan ? " (started by a previous console instance)" : ""),
+        r.meta?.remote_url ? h("dt", {}, "remote") : "", r.meta?.remote_url ? h("dd", {}, h("a", { href: r.meta.remote_url, target: "_blank" }, r.meta.remote_url), h("span", { class: "muted" }, "  (same session in the Claude app)")) : "",
+        r.meta?.tmux ? h("dt", {}, "terminal") : "", r.meta?.tmux ? h("dd", {}, `tmux attach -t ${r.meta.tmux}`, r.status === "running" ? h("span", { class: "muted" }, "  (live screen below)") : h("span", { class: "muted" }, "  (ended; screen saved in the log)")) : "",
         h("dt", {}, "started"), h("dd", {}, new Date(r.started_at).toLocaleString()),
         h("dt", {}, "ended"), h("dd", {}, r.ended_at ? new Date(r.ended_at).toLocaleString() : "–"),
         h("dt", {}, "duration"), h("dd", {}, fmtDur(r.duration_ms / 1000)),
@@ -382,11 +393,32 @@ const refreshRunDetail = guard(async (full = false) => {
         r.status !== "running" ? h("button", { class: "small danger", onclick: () => confirmDo(`Delete run #${r.id} and its log?`, async () => { await del(`/runs/${r.id}`); toast("deleted", true); closeRun(); }) }, "Delete") : "",
         h("label", { class: "muted", style: "margin-left:auto;font-size:12px" }, h("input", { type: "checkbox", id: "autoscroll", checked: true }), " follow"),
       ),
-      h("pre", { id: "run-log" }, ""),
+      r.meta?.interactive && r.status === "running" ? h("form", { class: "row keys", onsubmit: (e) => { e.preventDefault(); sendKeysFromForm(r.id); } },
+        h("input", { name: "text", placeholder: "type into the terminal… (Enter sends it with ⏎)", autocomplete: "off", style: "flex:1" }),
+        h("button", { type: "submit", class: "small primary" }, "Send"),
+        h("button", { type: "button", class: "small", title: "send a bare Enter (confirm a dialog)", onclick: () => post(`/runs/${r.id}/keys`, { text: "", enter: true }) }, "⏎"),
+        h("button", { type: "button", class: "small", title: "send Escape", onclick: () => post(`/runs/${r.id}/keys`, { keys: ["Escape"], enter: false }) }, "Esc"),
+        h("button", { type: "button", class: "small", title: "arrow up", onclick: () => post(`/runs/${r.id}/keys`, { keys: ["Up"], enter: false }) }, "↑"),
+        h("button", { type: "button", class: "small", title: "arrow down", onclick: () => post(`/runs/${r.id}/keys`, { keys: ["Down"], enter: false }) }, "↓"),
+        h("button", { type: "button", class: "small", title: "send Ctrl-C", onclick: () => post(`/runs/${r.id}/keys`, { keys: ["C-c"], enter: false }) }, "^C"),
+      ) : "",
+      h("pre", { id: "run-log", class: r.meta?.interactive && r.status === "running" ? "screen" : "" }, ""),
     );
     logOffset = 0;
   }
-  await pollLog();
+  if (r.meta?.interactive && r.status === "running") await pollScreen(); else await pollLog();
+});
+
+async function pollScreen() {
+  if (!selectedRun) return;
+  const pre = $("#run-log"); if (!pre) return;
+  const { text } = await get(`/runs/${selectedRun.id}/screen?lines=300`);
+  if (pre.textContent !== text) { pre.textContent = text; if ($("#autoscroll")?.checked) pre.scrollTop = pre.scrollHeight; }
+}
+const sendKeysFromForm = guard(async (id) => {
+  const f = $("#run-detail form.keys"); const text = f.text.value;
+  await post(`/runs/${id}/keys`, { text, enter: true });
+  f.text.value = ""; setTimeout(pollScreen, 400);
 });
 
 // Agent sessions reported by the hook (scripts/claude-session-hook.sh): id, resume command, transcript link.

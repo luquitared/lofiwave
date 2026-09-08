@@ -103,6 +103,7 @@
         <label>Command (binary) <input name="command" required placeholder="claude"></label>
         <label>Default working directory <span class="pp"><input name="default_cwd" autocomplete="off" data-pathpicker placeholder="optional"></span></label>
         <label class="wide">Args (one per line; use {prompt} and {cwd}) <textarea name="args" rows="3"></textarea></label>
+        <label class="wide">Interactive args (used by interactive runs; blank = same as args) <textarea name="interactive_args" rows="2" placeholder="{prompt}&#10;--remote-control"></textarea></label>
         <label>Detect regex (matches OS command lines) <input name="detect" placeholder="(^|/|\s)mytool(\s|$)"></label>
         <label>Env (KEY=VALUE per line) <textarea name="env" rows="2"></textarea></label>
         <label class="wide">Description <input name="description"></label>
@@ -127,6 +128,7 @@
     <label class="wide" id="prompt-label">Prompt <textarea name="prompt" rows="4" placeholder="What should the agent do?"></textarea></label>
     <label>Extra args <input name="extra_args" placeholder="--permission-mode acceptEdits"></label>
     <label>Timeout (sec, 0 = none) <input name="timeout_sec" type="number" min="0" value="0"></label>
+    <label class="wide row" id="interactive-label"><input type="checkbox" name="interactive"> Interactive <span class="muted" id="interactive-hint">— stays open in a tmux session; claude starts with Remote Control so it appears in the Claude app</span></label>
     <code id="preview" class="wide muted"></code>
     <div class="wide row">
       <button type="button" class="primary" id="start-submit">Start</button>
