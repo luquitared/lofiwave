@@ -84,7 +84,13 @@ export async function startRun(opts: StartOptions): Promise<RunRow> {
   try {
     proc = Bun.spawn([command, ...args], {
       cwd,
-      env: { ...process.env, ...env, AGENT_CONSOLE_RUN_ID: String(id) },
+      env: {
+        ...process.env, ...env,
+        AGENT_CONSOLE_RUN_ID: String(id),
+        // Lets scripts/claude-session-hook.sh (a Claude Code SessionStart/SessionEnd hook) report the session back.
+        AGENT_CONSOLE_URL: `http://127.0.0.1:${config.port}`,
+        AGENT_CONSOLE_TOKEN: config.authToken,
+      },
       stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",

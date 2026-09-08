@@ -373,6 +373,7 @@ const refreshRunDetail = guard(async (full = false) => {
         Object.keys(r.env || {}).length ? h("dt", {}, "env") : "", Object.keys(r.env || {}).length ? h("dd", {}, envText(r.env)) : "",
         r.error ? h("dt", {}, "error") : "", r.error ? h("dd", { style: "color:var(--bad)" }, r.error) : "",
       ),
+      sessionsBlock(r),
       h("div", { class: "row" },
         r.status === "running" ? h("button", { class: "small danger", onclick: () => confirmDo(`Stop run #${r.id}?`, async () => { await post(`/runs/${r.id}/kill`); toast("stopped", true); refreshRunDetail(true); }) }, "Stop") : "",
         r.status === "running" ? h("button", { class: "small danger", onclick: () => confirmDo(`Force kill run #${r.id}?`, async () => { await post(`/runs/${r.id}/kill?force=1`); toast("killed", true); refreshRunDetail(true); }) }, "Kill") : "",
@@ -387,6 +388,27 @@ const refreshRunDetail = guard(async (full = false) => {
   }
   await pollLog();
 });
+
+// Agent sessions reported by the hook (scripts/claude-session-hook.sh): id, resume command, transcript link.
+function sessionsBlock(r) {
+  const list = r.sessions || [];
+  if (!list.length) return "";
+  const tokenQ = token ? `?token=${encodeURIComponent(token)}` : "";
+  return h("div", { class: "sessions" },
+    h("div", { class: "muted", style: "font-size:12px;margin-bottom:4px" }, list.length === 1 ? "session" : `${list.length} sessions`),
+    ...list.map((s) => {
+      const resume = `claude --resume ${s.session_id}`;
+      return h("div", { class: "session" },
+        h("code", { class: "mono", title: s.transcript_path || "" }, s.session_id),
+        h("span", { class: "muted" }, ` ${s.agent}${s.model ? ` · ${s.model}` : ""}${s.source && s.source !== "startup" ? ` · ${s.source}` : ""} · ${fmtRel(s.started_at)}${s.ended_at ? ` → ${fmtDur((s.ended_at - s.started_at) / 1000)}${s.end_reason ? ` (${s.end_reason})` : ""}` : r.status === "running" ? " · live" : ""}`),
+        h("span", { class: "row", style: "gap:6px;margin-left:auto" },
+          h("button", { class: "small", title: resume, onclick: () => navigator.clipboard?.writeText(resume).then(() => toast("copied resume command", true)) }, "Copy resume"),
+          s.transcript_path ? h("a", { href: `/api/runs/${r.id}/sessions/${encodeURIComponent(s.session_id)}/transcript${tokenQ}`, target: "_blank" }, h("button", { class: "small" }, "Transcript")) : "",
+        ),
+      );
+    }),
+  );
+}
 
 async function pollLog() {
   if (!selectedRun) return;

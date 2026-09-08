@@ -169,7 +169,27 @@ Restarting is done through the run: `POST /api/runs/:id/restart`.
 | `POST /api/runs/:id/restart` | start a new run with the same parameters (kills the old one first if it is running) → 201 |
 | `DELETE /api/runs/:id` | delete record + log (must not be running) |
 
-Run record fields: `id, workflow_id, workflow_name, type_name, cwd, command, args, prompt, env, trigger (manual|schedule|restart), status, pid, started_at, ended_at, exit_code, log_path, output, error, meta {timeout_sec, orphan}`.
+Run record fields: `id, workflow_id, workflow_name, type_name, cwd, command, args, prompt, env, trigger (manual|schedule|restart), status, pid, started_at, ended_at, exit_code, log_path, output, error, meta {timeout_sec, orphan}`. `GET /api/runs/:id` also includes `sessions` (below).
+
+### Sessions (linking a run to its Claude Code transcript)
+
+Every process the console starts gets `AGENT_CONSOLE_RUN_ID`, `AGENT_CONSOLE_URL` and `AGENT_CONSOLE_TOKEN` in its environment. `scripts/claude-session-hook.sh` is a Claude Code **SessionStart / SessionEnd hook** that, when those variables are present, reports the session back to the console; in any other Claude session it exits immediately. Install it once, globally, in `~/.claude/settings.json` (absolute path):
+
+```json
+{ "hooks": {
+    "SessionStart": [{ "hooks": [{ "type": "command", "command": "/ABS/PATH/agent-console/scripts/claude-session-hook.sh", "timeout": 5 }] }],
+    "SessionEnd":   [{ "hooks": [{ "type": "command", "command": "/ABS/PATH/agent-console/scripts/claude-session-hook.sh", "timeout": 5 }] }]
+} }
+```
+
+It works for `claude` started directly by the console *and* for claude processes started by a wrapper script the console launched (the environment is inherited). Each run then shows its session id(s) in the UI with a **Copy resume** button (`claude --resume <id>`) and a **Transcript** link.
+
+| | |
+|---|---|
+| `GET /api/runs/:id/sessions` | `[{session_id, agent, cwd, transcript_path, model, source, started_at, ended_at, end_reason}]` |
+| `POST /api/runs/:id/sessions` | register (upsert by `session_id`): `{session_id, agent?, cwd?, transcript_path?, model?, source?}` → 201 |
+| `PUT /api/runs/:id/sessions/:session_id` | `{ended: true, reason?, model?}` marks it ended |
+| `GET /api/runs/:id/sessions/:session_id/transcript` | the raw JSONL transcript (`text/plain`; only files under the home directory are served) |
 
 ### Examples
 
