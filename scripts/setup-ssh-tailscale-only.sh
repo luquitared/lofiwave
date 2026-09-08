@@ -35,6 +35,7 @@ MaxAuthTries 4
 # After copying a key here (ssh-copy-id $USER_NAME@$TS_IP from another device), harden with:
 #   PasswordAuthentication no
 CONF
+sudo mkdir -p -m 0755 /run/sshd   # sshd -t needs this even before the service has ever run
 sudo sshd -t   # validate config before touching the service
 
 echo "==> ufw: port 22 only via tailscale0"
