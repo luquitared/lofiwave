@@ -66,6 +66,10 @@ Optional: `sudo tailscale serve --bg 7770` publishes it as `https://<machine>.<t
 
 Because the console can kill processes and launch agents, set `AUTH_TOKEN` in `.env` if the machine is also on an untrusted LAN, or bind `HOST=127.0.0.1` and rely on `tailscale serve` (which proxies from the tailnet to localhost).
 
+## SSH over Tailscale only
+
+`scripts/setup-ssh-tailscale-only.sh` (needs sudo) installs OpenSSH server and restricts it to the tailnet in two layers: a ufw rule that only allows port 22 in on `tailscale0`, and an sshd `AllowUsers` rule limited to Tailscale address ranges. Other ports are untouched; run it with `STRICT=1` to also make ufw deny all other incoming traffic except loopback and Tailscale. It prints the `ssh user@100.x.y.z` command to use and how to switch to key-only auth.
+
 ## Concepts
 
 **Process type** – a reusable command definition with a `kind`: `agent` (shown on the *Agents* tab) or `app` (shown on the *Apps* tab; the default for types added via the API). Two agents are built in and can be edited (not deleted):
