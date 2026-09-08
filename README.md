@@ -92,6 +92,8 @@ curl -X POST localhost:7770/api/process-types -H 'content-type: application/json
 }'
 ```
 
+**Interactive runs** – `POST /api/processes` with `interactive: true` (or the *Interactive* checkbox in the Start dialog) starts the type inside a detached **tmux** session (`ac-<run id>`) that stays open until the program exits or you stop the run. This is how you start a normal `claude` or `codex` TUI from your phone: the built-in `claude` type's interactive template is `claude [prompt] --remote-control`, so the session shows up in the Claude app / claude.ai as soon as it is up (the console picks the `https://claude.ai/code/session_…` link off the screen and shows it on the run as `meta.remote_url`), and the `codex` type opens the Codex TUI. The prompt is optional. Requires `tmux` on PATH. While it runs, the run page shows the live terminal (`GET /api/runs/:id/screen`) and lets you type into it (`POST /api/runs/:id/keys`); on the machine itself `tmux attach -t ac-<id>` gives you the real terminal. When it ends, the screen and scrollback are saved as the run log. Each type has its own `interactive_args` template (Types tab); when it is empty the normal `args` are used.
+
 **Process** – an OS process that either matches a type's `detect` regex or was started by the console. Console-started processes are *managed*: they have a run record, a log, and can be restarted. Children of a managed process are attributed to the same run (`child: true`).
 
 **Run** – one execution of a type (ad-hoc, from a workflow, or a restart). Statuses: `running`, `success` (exit 0), `failed` (non-zero), `killed` (stopped via the console), `timeout`, `lost` (the console restarted and the process was gone), `error` (could not start). Killing a run kills its whole process tree.
@@ -131,8 +133,8 @@ If `AUTH_TOKEN` is set, send it as one of: `Authorization: Bearer <token>`, `X-A
 |---|---|
 | `GET /api/process-types` | list; each has `kind`, `default_cwd`, `available` (binary found on PATH) and `resolved` path |
 | `GET /api/process-types/:name` | one |
-| `POST /api/process-types` | create: `{name, command, args?, env?, detect?, description?, kind?: "agent"\|"app", default_cwd?}` → 201 |
-| `PUT /api/process-types/:name` | update any subset of `command, args, env, detect, description, kind, default_cwd` |
+| `POST /api/process-types` | create: `{name, command, args?, interactive_args?, env?, detect?, description?, kind?: "agent"\|"app", default_cwd?}` → 201 |
+| `PUT /api/process-types/:name` | update any subset of `command, args, interactive_args, env, detect, description, kind, default_cwd` |
 | `DELETE /api/process-types/:name` | delete (built-ins and types used by a workflow are refused) |
 
 ### Processes (live view)
@@ -140,7 +142,7 @@ If `AUTH_TOKEN` is set, send it as one of: `Authorization: Bearer <token>`, `X-A
 | | |
 |---|---|
 | `GET /api/processes?type=&kind=` | running processes matching any type (filter by type name or kind): `{pid, ppid, user, cmd, cwd, elapsedSec, rssKb, cpu, type, managed, child, run_id, workflow_name}` |
-| `POST /api/processes` | start one: `{type, cwd?, prompt?, extra_args?, env?, timeout_sec?}` → 201 with the run record. `cwd` falls back to the type's `default_cwd`. |
+| `POST /api/processes` | start one: `{type, cwd?, prompt?, extra_args?, env?, timeout_sec?, interactive?}` → 201 with the run record. `cwd` falls back to the type's `default_cwd`. `interactive: true` starts it in a tmux session that stays open (see Concepts). |
 | `POST /api/processes/preview` | same body; returns the `{command, args}` that would be executed, without running |
 | `DELETE /api/processes/:pid?force=1` | SIGTERM (or SIGKILL with `force`) the process **tree**. Works on unmanaged processes too. If the pid belongs to a run, the run is marked `killed`. |
 
@@ -167,9 +169,11 @@ Restarting is done through the run: `POST /api/runs/:id/restart`.
 | `GET /api/runs/:id/log?raw=1` | the whole log as `text/plain` |
 | `POST /api/runs/:id/kill?force=1` | stop (tree) → updated run |
 | `POST /api/runs/:id/restart` | start a new run with the same parameters (kills the old one first if it is running) → 201 |
+| `GET /api/runs/:id/screen?lines=200` | interactive runs: `{text, alive}` – the terminal's last `lines` lines (scrollback + screen) |
+| `POST /api/runs/:id/keys` | interactive runs: type into the terminal: `{text?, keys?: ["Down", "Escape", "C-c", ...], enter?: true}` (`keys` are tmux key names, sent after `text`) |
 | `DELETE /api/runs/:id` | delete record + log (must not be running) |
 
-Run record fields: `id, workflow_id, workflow_name, type_name, cwd, command, args, prompt, env, trigger (manual|schedule|restart), status, pid, started_at, ended_at, exit_code, log_path, output, error, meta {timeout_sec, orphan}`. `GET /api/runs/:id` also includes `sessions` (below).
+Run record fields: `id, workflow_id, workflow_name, type_name, cwd, command, args, prompt, env, trigger (manual|schedule|restart), status, pid, started_at, ended_at, exit_code, log_path, output, error, meta {timeout_sec, orphan, interactive, tmux}`. `GET /api/runs/:id` also includes `sessions` (below).
 
 ### Sessions (linking a run to its Claude Code transcript)
 
