@@ -4,7 +4,8 @@ import { hostname, homedir } from "node:os";
 import { config } from "./config";
 import { db, now, hydrate, type ProcessTypeRow, type WorkflowRow, type RunRow, type SessionRow } from "./db";
 import { listOsProcesses, cwdOf, killTree, type OsProcess } from "./procs";
-import { ApiError, startRun, killRun, restartRun, getRun, getType, readLogFrom, isLive, buildCommand, screenOf, sendKeys, tmuxPath } from "./runner";
+import { ApiError, startRun, killRun, restartRun, getRun, getType, readLogFrom, isLive, buildCommand, screenOf, sendKeys, tmuxPath, recordSession, resumeSession } from "./runner";
+import { describeSession, sessionForPid, type SessionInfo } from "./agents";
 import { startScheduler, refreshNextRun, runWorkflow, computeNext } from "./scheduler";
 import { validateCron } from "./cron";
 import { renderDocs, apiIndex } from "./docs";
@@ -91,9 +92,15 @@ function runOut(r: RunRow, { withOutput = true } = {}) {
   return out;
 }
 
-function sessionsOf(runId: number): SessionRow[] {
-  return db.query<SessionRow, [number]>("SELECT * FROM sessions WHERE run_id = ? ORDER BY started_at").all(runId);
+function sessionsOf(runId: number): (SessionRow & Omit<SessionInfo, "agent" | "session_id">)[] {
+  const run = db.query<RunRow, [number]>("SELECT * FROM runs WHERE id = ?").get(runId);
+  return db.query<SessionRow, [number]>("SELECT * FROM sessions WHERE run_id = ? ORDER BY started_at").all(runId).map((s) => {
+    const info = describeSession(s.agent, s.session_id, { cwd: s.cwd, transcript_path: s.transcript_path, model: s.model, pid: run?.status === "running" ? run.pid : null });
+    return { ...s, ...info, agent: s.agent, session_id: s.session_id, cwd: s.cwd || info.cwd, model: s.model || info.model, transcript_path: s.transcript_path || info.transcript_path };
+  });
 }
+/** Latest recorded session of a run (for the process list). */
+function latestSessionOf(runId: number) { const all = sessionsOf(runId); return all.length ? all[all.length - 1] : null; }
 function getSession(runId: number, sessionId: string): SessionRow {
   const s = db.query<SessionRow, [number, string]>("SELECT * FROM sessions WHERE run_id = ? AND session_id = ?").get(runId, sessionId);
   if (!s) throw new ApiError(404, `session ${sessionId} not found on run ${runId}`);
@@ -108,7 +115,7 @@ function getWorkflow(id: number): WorkflowRow {
 
 // ---------------------------------------------------------------- process listing
 
-type ConsoleProcess = OsProcess & { type: string | null; run_id: number | null; managed: boolean; child: boolean; workflow_name: string | null };
+type ConsoleProcess = OsProcess & { type: string | null; run_id: number | null; managed: boolean; child: boolean; workflow_name: string | null; session: SessionInfo | null };
 
 async function listConsoleProcesses(filterType?: string, filterKind?: string): Promise<ConsoleProcess[]> {
   const allTypes = db.query<ProcessTypeRow, []>("SELECT * FROM process_types").all();
@@ -120,7 +127,7 @@ async function listConsoleProcesses(filterType?: string, filterKind?: string): P
   const runningRuns = db.query<RunRow, []>("SELECT * FROM runs WHERE status = 'running' AND pid IS NOT NULL").all();
   const byPid = new Map(runningRuns.map((r) => [r.pid as number, r]));
   const self = process.pid;
-  const os = await listOsProcesses();
+  const os = (await listOsProcesses()).filter((p) => !/^tmux(\s|$)/.test(p.cmd));
   const parentOf = new Map(os.map((p) => [p.pid, p.ppid]));
   /** Walk up the tree: is this pid a descendant of a managed run? */
   const owningRun = (pid: number): RunRow | null => {
@@ -147,7 +154,10 @@ async function listConsoleProcesses(filterType?: string, filterKind?: string): P
     if (!type) continue;
     if (filterType && type !== filterType) continue;
     if (filterKind && kindOf.get(type) !== filterKind) continue;
-    out.push({ ...p, type, run_id: run?.id ?? null, managed: Boolean(run), child: Boolean(run && run.pid !== p.pid), workflow_name: run?.workflow_name ?? null });
+    const child = Boolean(run && run.pid !== p.pid);
+    // What the agent calls this session: Claude's own registry knows every running claude (managed or not); codex only via our run record.
+    const session = sessionForPid(p.pid) ?? (run && !child ? latestSessionOf(run.id) : null);
+    out.push({ ...p, type, run_id: run?.id ?? null, managed: Boolean(run), child, workflow_name: run?.workflow_name ?? null, session });
   }
   await Promise.all(out.map(async (p) => {
     p.cwd = byPid.get(p.pid)?.cwd ?? (await cwdOf(p.pid));
@@ -257,10 +267,11 @@ route("POST", "/api/process-types", async (req) => {
   const kind = parseKind(b.kind, "app");
   const default_cwd = str(b.default_cwd, "default_cwd").trim();
   const interactive_args = strArray(b.interactive_args, "interactive_args");
+  const resume_args = strArray(b.resume_args, "resume_args");
   const t = now();
   try {
-    db.prepare(`INSERT INTO process_types (name, description, command, args, interactive_args, env, detect, builtin, kind, default_cwd, created_at, updated_at) VALUES (?,?,?,?,?,?,?,0,?,?,?,?)`)
-      .run(name, str(b.description, "description"), command, JSON.stringify(args), JSON.stringify(interactive_args), JSON.stringify(env), detect, kind, default_cwd, t, t);
+    db.prepare(`INSERT INTO process_types (name, description, command, args, interactive_args, resume_args, env, detect, builtin, kind, default_cwd, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,0,?,?,?,?)`)
+      .run(name, str(b.description, "description"), command, JSON.stringify(args), JSON.stringify(interactive_args), JSON.stringify(resume_args), JSON.stringify(env), detect, kind, default_cwd, t, t);
   } catch (e: any) {
     if (String(e.message).includes("UNIQUE")) throw new ApiError(409, `process type "${name}" already exists`);
     throw e;
@@ -280,8 +291,9 @@ route("PUT", "/api/process-types/:name", async (req, p) => {
   const kind = b.kind === undefined ? cur.kind : parseKind(b.kind, cur.kind);
   const default_cwd = b.default_cwd === undefined ? cur.default_cwd : str(b.default_cwd, "default_cwd").trim();
   const interactive_args = b.interactive_args === undefined ? JSON.parse(cur.interactive_args || "[]") : strArray(b.interactive_args, "interactive_args");
-  db.prepare("UPDATE process_types SET description=?, command=?, args=?, interactive_args=?, env=?, detect=?, kind=?, default_cwd=?, updated_at=? WHERE id=?")
-    .run(description, command, JSON.stringify(args), JSON.stringify(interactive_args), JSON.stringify(env), detect, kind, default_cwd, now(), cur.id);
+  const resume_args = b.resume_args === undefined ? JSON.parse(cur.resume_args || "[]") : strArray(b.resume_args, "resume_args");
+  db.prepare("UPDATE process_types SET description=?, command=?, args=?, interactive_args=?, resume_args=?, env=?, detect=?, kind=?, default_cwd=?, updated_at=? WHERE id=?")
+    .run(description, command, JSON.stringify(args), JSON.stringify(interactive_args), JSON.stringify(resume_args), JSON.stringify(env), detect, kind, default_cwd, now(), cur.id);
   return json(typeWithAvailability(getType(p.name)));
 });
 
@@ -450,17 +462,7 @@ route("POST", "/api/runs/:id/sessions", async (req, p) => {
   const b = await body(req);
   const session_id = str(b.session_id, "session_id", { required: true }).trim();
   if (!/^[A-Za-z0-9_.-]+$/.test(session_id)) throw new ApiError(400, "session_id has unexpected characters");
-  const t = now();
-  db.prepare(
-    `INSERT INTO sessions (run_id, session_id, agent, cwd, transcript_path, model, source, started_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-     ON CONFLICT(session_id) DO UPDATE SET
-       cwd = CASE WHEN excluded.cwd != '' THEN excluded.cwd ELSE sessions.cwd END,
-       transcript_path = CASE WHEN excluded.transcript_path != '' THEN excluded.transcript_path ELSE sessions.transcript_path END,
-       model = CASE WHEN excluded.model != '' THEN excluded.model ELSE sessions.model END,
-       source = CASE WHEN excluded.source != '' THEN excluded.source ELSE sessions.source END`,
-  ).run(run.id, session_id, str(b.agent, "agent") || "claude", str(b.cwd, "cwd"), str(b.transcript_path, "transcript_path"),
-    str(b.model, "model"), str(b.source, "source"), t);
+  recordSession(run.id, { session_id, agent: str(b.agent, "agent") || "claude", cwd: str(b.cwd, "cwd"), transcript_path: str(b.transcript_path, "transcript_path"), model: str(b.model, "model"), source: str(b.source, "source") });
   return json(getSession(run.id, session_id), 201);
 });
 
@@ -474,9 +476,13 @@ route("PUT", "/api/runs/:id/sessions/:sid", async (req, p) => {
   return json(getSession(run.id, p.sid));
 });
 
-// The raw transcript (Claude Code writes JSONL under ~/.claude/projects/...). Only paths under the home dir are served.
+// Reopen a recorded session interactively (tmux; claude gets --remote-control so it also appears in the Claude app).
+route("POST", "/api/runs/:id/sessions/:sid/resume", async (_r, p) => json(runOut(await resumeSession(Number(p.id), p.sid)), 201));
+
+// The raw transcript (Claude Code writes JSONL under ~/.claude/projects/..., codex under ~/.codex/sessions/...). Only paths under the home dir are served.
 route("GET", "/api/runs/:id/sessions/:sid/transcript", (_r, p) => {
-  const s = getSession(getRun(Number(p.id)).id, p.sid);
+  const s = sessionsOf(getRun(Number(p.id)).id).find((x) => x.session_id === p.sid);
+  if (!s) throw new ApiError(404, `session ${p.sid} not found on run ${p.id}`);
   if (!s.transcript_path) throw new ApiError(404, "no transcript path recorded for this session");
   if (!s.transcript_path.startsWith(homedir() + "/")) throw new ApiError(403, "transcript path is outside the home directory");
   if (!existsSync(s.transcript_path)) throw new ApiError(404, `transcript not found on disk: ${s.transcript_path}`);

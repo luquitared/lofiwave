@@ -89,3 +89,9 @@ dialog form.grid { padding: 0; }
 .session code { font-family: var(--mono); font-size: 12px; }
 .detail pre.screen { white-space: pre; font-size: 11.5px; line-height: 1.25; }
 .detail form.keys input { min-width: 0; }
+.dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; background: #5a6070; vertical-align: middle; }
+.dot.idle { background: var(--ok); } .dot.working { background: var(--accent); box-shadow: 0 0 6px var(--accent); }
+.sess { line-height: 1.3; } .sess code { font-size: 11px; }
+.sesscell { max-width: 280px; min-width: 160px; }
+.sess > div:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sess > div + div { white-space: normal; }
