@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#171a21">
+<meta name="theme-color" content="#151816">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Agents">
@@ -11,26 +11,38 @@
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='13' font-size='13'>⚙️</text></svg>">
 <link rel="stylesheet" href="/style.css">
 </head>
-<body>
-<header>
-  <div class="brand">⚙ Agent Console</div>
-  <nav>
-    <button data-tab="agents" class="active">Agents</button>
-    <button data-tab="apps">Apps</button>
-    <button data-tab="workflows">Workflows</button>
-    <button data-tab="runs">Runs</button>
-    <button data-tab="types">Types</button>
+<body class="console">
+<a class="skip-link" href="#main">Skip to content</a>
+<header class="sidebar">
+  <a class="brand" href="#console" aria-label="Agent Console home"><span class="brand-mark" aria-hidden="true">a<span>·</span></span><span>Agent Console<small>Your local workspace</small></span></a>
+  <a href="/docs" class="mobile-docs" aria-label="API documentation">API ↗</a>
+  <div class="nav-label">WORKSPACE</div>
+  <nav aria-label="Main navigation">
+    <button data-tab="console" class="active"><span aria-hidden="true">▶</span>Console</button>
+    <button data-tab="agents"><span aria-hidden="true">✳</span>Agents</button>
+    <button data-tab="apps"><span aria-hidden="true">▦</span>Apps</button>
+    <button data-tab="workflows"><span aria-hidden="true">⌁</span>Workflows</button>
+    <button data-tab="runs"><span aria-hidden="true">◷</span>Runs</button>
+    <button data-tab="types"><span aria-hidden="true">☷</span>Types</button>
   </nav>
-  <a href="/docs" class="api-link" title="API documentation (give this URL to an agent)">API</a>
-  <div id="sysinfo" class="sysinfo"></div>
+  <div class="sidebar-bottom"><a href="/docs" class="api-link">API documentation <span aria-hidden="true">↗</span></a><div id="sysinfo" class="sysinfo"></div></div>
 </header>
+<main id="main">
+  <div class="page-top"><span class="breadcrumb">Workspace <span>/</span> <b id="page-location">Console</b></span><span class="connection" id="connection-status">Connecting…</span></div>
+  <div class="page-heading"><div><p class="eyebrow">YOUR WORK, IN MOTION</p><h1 id="page-title">Console</h1><p id="page-description">Your live sessions, and a terminal to talk to them.</p></div><button id="refresh-btn" aria-label="Refresh current view">↻ <span>Refresh</span></button></div>
 
-<main>
-  <section id="tab-agents" class="tab active">
+  <section id="tab-console" class="tab active">
+    <div class="console-view">
+      <aside class="rail" id="session-rail" aria-label="Live sessions"></aside>
+      <div class="pane" id="session-pane" role="region" aria-label="Session terminal" aria-live="off"></div>
+    </div>
+  </section>
+
+  <section id="tab-agents" class="tab">
     <div class="toolbar">
-      <button class="primary" id="start-agent-btn">▶ Start an agent</button>
+      <button class="primary" id="start-agent-btn">+ Start an agent</button>
       <span id="agent-count" class="muted"></span>
-      <label class="muted right"><input type="checkbox" id="hide-children"> hide child processes</label>
+      <label class="muted right"><input type="checkbox" id="hide-children" checked> Hide child processes</label>
     </div>
     <table class="proc-table" id="agent-table">
       <thead><tr><th>PID</th><th>Type</th><th>Session</th><th>Working dir</th><th>Command</th><th>Up</th><th>CPU</th><th>Mem</th><th>Run</th><th></th></tr></thead>
@@ -41,7 +53,7 @@
   <section id="tab-apps" class="tab">
     <div class="toolbar">
       <button class="primary" id="add-app-btn">+ Add app</button>
-      <span class="muted">Apps are process types registered through the API or the Types tab. <a href="/docs" target="_blank">See the API docs</a> for how an agent can add one.</span>
+      <span class="muted">Your services and tools, all in one place.</span>
     </div>
     <table id="app-table">
       <thead><tr><th>App</th><th>Command</th><th>Running</th><th>Last run</th><th></th></tr></thead>
@@ -83,9 +95,9 @@
 
   <section id="tab-runs" class="tab">
     <div class="toolbar">
-      <select id="runs-status"><option value="">any status</option><option>running</option><option>success</option><option>failed</option><option>killed</option><option>timeout</option><option>lost</option><option>error</option></select>
-      <select id="runs-type"><option value="">any type</option></select>
-      <select id="runs-workflow"><option value="">any workflow</option></select>
+      <select id="runs-status" aria-label="Filter by status"><option value="">All statuses</option><option>running</option><option>success</option><option>failed</option><option>killed</option><option>timeout</option><option>lost</option><option>error</option></select>
+      <select id="runs-type" aria-label="Filter by type"><option value="">All types</option></select>
+      <select id="runs-workflow" aria-label="Filter by workflow"><option value="">All workflows</option></select>
       <span id="runs-count" class="muted"></span>
     </div>
     <div class="split">
@@ -93,7 +105,7 @@
         <thead><tr><th>#</th><th>Workflow / type</th><th>Trigger</th><th>Status</th><th>Started</th><th>Duration</th><th>Exit</th></tr></thead>
         <tbody></tbody>
       </table>
-      <div id="run-detail" class="detail" hidden></div>
+      <div id="run-detail" class="detail" role="region" aria-label="Run details" tabindex="-1" hidden></div>
     </div>
   </section>
 
@@ -125,7 +137,7 @@
   </section>
 </main>
 
-<dialog id="start-dialog">
+<dialog id="start-dialog" aria-labelledby="start-title">
   <form id="start-form" class="grid" method="dialog">
     <h3 class="wide" id="start-title">Start</h3>
     <label>Type <select name="type"></select></label>
@@ -134,6 +146,7 @@
     <label>Extra args <input name="extra_args" placeholder="--permission-mode acceptEdits"></label>
     <label>Timeout (sec, 0 = none) <input name="timeout_sec" type="number" min="0" value="0"></label>
     <label class="wide row" id="interactive-label"><input type="checkbox" name="interactive"> Interactive <span class="muted" id="interactive-hint">— stays open in a tmux session; claude starts with Remote Control so it appears in the Claude app</span></label>
+    <div id="start-feedback" class="wide form-error" role="alert" hidden></div>
     <code id="preview" class="wide muted"></code>
     <div class="wide row">
       <button type="button" class="primary" id="start-submit">Start</button>
@@ -142,7 +155,7 @@
     </div>
   </form>
 </dialog>
-<div id="toast" hidden></div>
+<div id="toast" role="status" aria-live="polite" hidden></div>
 <script src="/app.js"></script>
 </body>
 </html>

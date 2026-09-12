@@ -115,7 +115,8 @@ function getWorkflow(id: number): WorkflowRow {
 
 // ---------------------------------------------------------------- process listing
 
-type ConsoleProcess = OsProcess & { type: string | null; run_id: number | null; managed: boolean; child: boolean; workflow_name: string | null; session: SessionInfo | null };
+/** `drivable`: this process is an interactive run of ours, so the console already has a terminal on it. */
+type ConsoleProcess = OsProcess & { type: string | null; run_id: number | null; managed: boolean; child: boolean; drivable: boolean; parent_cmd: string; workflow_name: string | null; session: SessionInfo | null };
 
 async function listConsoleProcesses(filterType?: string, filterKind?: string): Promise<ConsoleProcess[]> {
   const allTypes = db.query<ProcessTypeRow, []>("SELECT * FROM process_types").all();
@@ -129,6 +130,7 @@ async function listConsoleProcesses(filterType?: string, filterKind?: string): P
   const self = process.pid;
   const os = (await listOsProcesses()).filter((p) => !/^tmux(\s|$)/.test(p.cmd));
   const parentOf = new Map(os.map((p) => [p.pid, p.ppid]));
+  const cmdOf = new Map(os.map((p) => [p.pid, p.cmd]));
   /** Walk up the tree: is this pid a descendant of a managed run? */
   const owningRun = (pid: number): RunRow | null => {
     let cur = pid;
@@ -157,7 +159,7 @@ async function listConsoleProcesses(filterType?: string, filterKind?: string): P
     const child = Boolean(run && run.pid !== p.pid);
     // What the agent calls this session: Claude's own registry knows every running claude (managed or not); codex only via our run record.
     const session = sessionForPid(p.pid) ?? (run && !child ? latestSessionOf(run.id) : null);
-    out.push({ ...p, type, run_id: run?.id ?? null, managed: Boolean(run), child, workflow_name: run?.workflow_name ?? null, session });
+    out.push({ ...p, type, run_id: run?.id ?? null, managed: Boolean(run), child, drivable: Boolean(run && !child && JSON.parse(run.meta || "{}").interactive), parent_cmd: cmdOf.get(p.ppid) ?? "", workflow_name: run?.workflow_name ?? null, session });
   }
   await Promise.all(out.map(async (p) => {
     p.cwd = byPid.get(p.pid)?.cwd ?? (await cwdOf(p.pid));
@@ -324,6 +326,20 @@ route("POST", "/api/processes", async (req) => {
     trigger: "manual",
   });
   return json(runOut(run), 201);
+});
+
+// ---- console (the session-first working view): everything live, in one call
+route("GET", "/api/console", async () => {
+  const running = db.query<RunRow, []>("SELECT * FROM runs WHERE status = 'running' ORDER BY started_at DESC").all();
+  const withSessions = (r: RunRow) => ({ ...runOut(r, { withOutput: false }), sessions: sessionsOf(r.id) });
+  // live: interactive runs — the ones with a tmux pane you can actually type into.
+  const live = running.filter((r) => JSON.parse(r.meta || "{}").interactive).map(withSessions);
+  // headless: running but not drivable (a scheduled workflow, `claude -p`); shown so the view accounts for all activity.
+  const headless = running.filter((r) => !JSON.parse(r.meta || "{}").interactive).map(withSessions);
+  const liveRunIds = new Set(live.map((r) => r.id));
+  // adoptable: agent processes on this machine the console cannot drive (started in a terminal, or a headless run).
+  const adoptable = (await listConsoleProcesses(undefined, "agent")).filter((p) => !p.child && !(p.run_id && liveRunIds.has(p.run_id)));
+  return json({ live, headless, adoptable });
 });
 
 route("POST", "/api/processes/preview", async (req) => {

@@ -38,6 +38,8 @@ export type SessionInfo = {
   web_url: string;
   /** Command to reopen it in a terminal on this machine. */
   resume_cmd: string;
+  /** tmux target the session runs in, per the agent's own registry; '' when it is not in tmux at all. */
+  tmux: string;
 };
 
 // ---------------------------------------------------------------- claude: process registry
@@ -182,11 +184,11 @@ export function discoverCodexSession(startedAt: number, cwd: string): { session_
 // ---------------------------------------------------------------- unified
 
 export function describeSession(agent: string, sessionId: string, hint: { cwd?: string; transcript_path?: string; model?: string; pid?: number | null } = {}): SessionInfo {
-  const info: SessionInfo = { agent, session_id: sessionId, title: "", name: "", status: "", model: hint.model ?? "", cwd: hint.cwd ?? "", transcript_path: hint.transcript_path ?? "", web_url: "", resume_cmd: "" };
+  const info: SessionInfo = { agent, session_id: sessionId, title: "", name: "", status: "", model: hint.model ?? "", cwd: hint.cwd ?? "", transcript_path: hint.transcript_path ?? "", web_url: "", resume_cmd: "", tmux: "" };
   if (agent === "claude") {
     const reg = claudeRegistry();
     const r = (hint.pid && reg.byPid.get(hint.pid)) || reg.bySession.get(sessionId);
-    if (r) { info.name = r.name ?? ""; info.status = r.status ?? ""; info.cwd ||= r.cwd; info.web_url = claudeWebUrl(r.bridgeSessionId); }
+    if (r) { info.name = r.name ?? ""; info.status = r.status ?? ""; info.cwd ||= r.cwd; info.web_url = claudeWebUrl(r.bridgeSessionId); info.tmux = r.tmux ?? ""; }
     if (!info.transcript_path) info.transcript_path = claudeTranscriptPath(sessionId, info.cwd);
     const m = claudeTranscriptMeta(info.transcript_path);
     if (m) { info.title = m.title || info.title; info.model ||= m.model; info.web_url ||= claudeWebUrl(m.bridgeSessionId); if (!info.title && !info.name) info.title = m.firstPrompt; }
