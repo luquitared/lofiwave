@@ -84,6 +84,7 @@ CREATE INDEX IF NOT EXISTS sessions_run_idx ON sessions(run_id, started_at);
 const typeCols = new Set(db.query<{ name: string }, []>("PRAGMA table_info(process_types)").all().map((c) => c.name));
 if (!typeCols.has("kind")) db.exec("ALTER TABLE process_types ADD COLUMN kind TEXT NOT NULL DEFAULT 'app'");
 if (!typeCols.has("default_cwd")) db.exec("ALTER TABLE process_types ADD COLUMN default_cwd TEXT NOT NULL DEFAULT ''");
+if (!typeCols.has("url")) db.exec("ALTER TABLE process_types ADD COLUMN url TEXT NOT NULL DEFAULT ''"); // where the app's UI is; {host} = the console's own host
 if (!typeCols.has("interactive_args")) {
   // Args template used when a run is started with interactive=true (a tmux session that stays open).
   // '' means "same as args". Built-ins get templates that open the agent's own TUI.
@@ -120,7 +121,7 @@ export const now = () => Date.now();
 
 export type ProcessTypeRow = {
   id: number; name: string; description: string; command: string; args: string; env: string;
-  detect: string; builtin: number; kind: string; default_cwd: string; interactive_args: string; resume_args: string; created_at: number; updated_at: number;
+  detect: string; builtin: number; kind: string; default_cwd: string; url: string; interactive_args: string; resume_args: string; created_at: number; updated_at: number;
 };
 export type WorkflowRow = {
   id: number; name: string; type_name: string; cwd: string; prompt: string; extra_args: string; env: string;

@@ -166,6 +166,9 @@ const loadSystem = guard(async () => {
   );
 });
 
+/** An app's UI link as seen from this browser: {host} becomes the host the console was opened on (works over Tailscale too). */
+const appUrl = (t) => (t.url ? t.url.replace("{host}", location.hostname) : "");
+
 // ---------------------------------------------------------------- types
 const loadTypes = guard(async () => {
   types = await get("/process-types");
@@ -192,7 +195,7 @@ const loadTypes = guard(async () => {
 });
 function editType(t) {
   const f = $("#type-form");
-  f.orig.value = t.name; f.elements.namedItem("name").value = t.name; f.elements.namedItem("name").disabled = true; f.kind.value = t.kind; f.command.value = t.command; f.default_cwd.value = t.default_cwd || "";
+  f.orig.value = t.name; f.elements.namedItem("name").value = t.name; f.elements.namedItem("name").disabled = true; f.kind.value = t.kind; f.command.value = t.command; f.default_cwd.value = t.default_cwd || ""; f.url.value = t.url || "";
   f.args.value = t.args.join("\n"); f.interactive_args.value = Array.isArray(t.interactive_args) ? t.interactive_args.join("\n") : (t.interactive_args || ""); f.resume_args.value = Array.isArray(t.resume_args) ? t.resume_args.join("\n") : (t.resume_args || ""); f.detect.value = t.detect; f.env.value = envText(t.env); f.description.value = t.description;
   $("#type-panel-title").textContent = `Edit process type: ${t.name}`; $("#type-panel").open = true; f.command.focus();
 }
@@ -207,7 +210,7 @@ $("#add-app-btn").onclick = () => newType("app");
 $("#type-form").addEventListener("submit", guard(async (e) => {
   e.preventDefault();
   const f = e.target;
-  const body = { name: f.elements.namedItem("name").value.trim(), kind: f.kind.value, command: f.command.value.trim(), default_cwd: f.default_cwd.value.trim(), args: f.args.value.split("\n").filter((l) => l !== ""), interactive_args: f.interactive_args.value.split("\n").filter((l) => l !== ""), resume_args: f.resume_args.value.split("\n").filter((l) => l !== ""), detect: f.detect.value, env: parseEnv(f.env.value), description: f.description.value };
+  const body = { name: f.elements.namedItem("name").value.trim(), kind: f.kind.value, command: f.command.value.trim(), default_cwd: f.default_cwd.value.trim(), url: f.url.value.trim(), args: f.args.value.split("\n").filter((l) => l !== ""), interactive_args: f.interactive_args.value.split("\n").filter((l) => l !== ""), resume_args: f.resume_args.value.split("\n").filter((l) => l !== ""), detect: f.detect.value, env: parseEnv(f.env.value), description: f.description.value };
   if (f.orig.value) await put(`/process-types/${f.orig.value}`, body); else await post("/process-types", body);
   toast("saved", true); resetTypeForm(); loadTypes();
 }));
@@ -274,12 +277,14 @@ const loadApps = guard(async () => {
     const mine = procs.filter((p) => p.type === t.name && !p.child);
     const last = lastByType[t.name];
     return h("tr", {},
-      h("td", { class: "full" }, h("div", { class: "app-name" }, t.name, t.available ? "" : h("span", { class: "muted", title: "command not found on PATH" }, " ✗")), t.description ? h("div", { class: "app-desc" }, t.description) : ""),
+      h("td", { class: "full" }, h("div", { class: "app-name" }, t.name, t.available ? "" : h("span", { class: "muted", title: "command not found on PATH" }, " ✗")), t.description ? h("div", { class: "app-desc" }, t.description) : "",
+        appUrl(t) ? h("div", {}, h("a", { class: "link mono", href: appUrl(t), target: "_blank", rel: "noopener" }, appUrl(t))) : ""),
       h("td", { class: "mono full" }, quoteArgs([t.command, ...t.args]), t.default_cwd ? h("div", { class: "muted", title: t.default_cwd }, `in ${shortCwd(t.default_cwd)}`) : ""),
       h("td", {}, mine.length ? h("span", { class: "pill on" }, `${mine.length} running`) : h("span", { class: "pill" }, "stopped"), mine.length ? h("div", { class: "muted mono", style: "font-size:11.5px" }, `pid ${mine.map((p) => p.pid).join(", ")} · up ${fmtDur(Math.max(...mine.map((p) => p.elapsedSec ?? 0)))}`) : ""),
       h("td", { "data-l": "last run" }, last ? h("a", { class: "link", href: `#runs/${last.id}`, onclick: (e) => { e.preventDefault(); openRun(last.id); } }, badge(last.status), ` ${fmtRel(last.started_at)}`) : h("span", { class: "muted" }, "never")),
       h("td", { class: "row" },
-        h("button", { class: "small primary", onclick: () => openStartDialog({ type: t.name }) }, "Start"),
+        appUrl(t) ? h("a", { href: appUrl(t), target: "_blank", rel: "noopener" }, h("button", { class: "small primary", title: appUrl(t) }, "Open")) : "",
+        h("button", { class: "small" + (appUrl(t) ? "" : " primary"), onclick: () => openStartDialog({ type: t.name }) }, "Start"),
         mine.length ? h("button", { class: "small danger", onclick: () => confirmDo(`Stop all ${mine.length} ${t.name} process(es)?`, async () => { for (const p of mine) await del(`/processes/${p.pid}`); toast("stopped", true); refresh(); }) }, "Stop") : "",
         h("button", { class: "small", onclick: () => { $("#runs-type").value = t.name; switchTab("runs"); } }, "Runs"),
         h("button", { class: "small", onclick: () => { editType(t); switchTab("types"); } }, "Edit"),

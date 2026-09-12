@@ -83,6 +83,7 @@ Because the console can kill processes and launch agents, set `AUTH_TOKEN` in `.
 - `detect` is a regex tested against the command line of every OS process; matches show up in the Processes view even if the console did not start them. Leave it empty for types you only launch yourself.
 - `env` is a map of extra environment variables applied to every process of that type.
 - `default_cwd` lets `POST /api/processes` and workflows omit `cwd` (typical for apps that live in one folder).
+- `url` is where the app's own UI lives, if it has one; the Apps tab shows it as an **Open** link. Write `{host}` for this machine (`http://{host}:8765`): the page substitutes the host it was opened on, so the link works from localhost and over Tailscale alike. The app must listen on an address the client can reach (not only `127.0.0.1`).
 
 Add your own, e.g. a nightly test runner:
 
@@ -133,8 +134,8 @@ If `AUTH_TOKEN` is set, send it as one of: `Authorization: Bearer <token>`, `X-A
 |---|---|
 | `GET /api/process-types` | list; each has `kind`, `default_cwd`, `available` (binary found on PATH) and `resolved` path |
 | `GET /api/process-types/:name` | one |
-| `POST /api/process-types` | create: `{name, command, args?, interactive_args?, resume_args?, env?, detect?, description?, kind?: "agent"\|"app", default_cwd?}` → 201 |
-| `PUT /api/process-types/:name` | update any subset of `command, args, interactive_args, resume_args, env, detect, description, kind, default_cwd` |
+| `POST /api/process-types` | create: `{name, command, args?, interactive_args?, resume_args?, env?, detect?, description?, kind?: "agent"\|"app", default_cwd?, url?}` → 201 |
+| `PUT /api/process-types/:name` | update any subset of `command, args, interactive_args, resume_args, env, detect, description, kind, default_cwd, url` |
 | `DELETE /api/process-types/:name` | delete (built-ins and types used by a workflow are refused) |
 
 ### Processes (live view)

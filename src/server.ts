@@ -74,6 +74,13 @@ function parseKind(v: unknown, def: string): string {
   return v;
 }
 
+/** An app's UI address: http(s), may contain {host}, which the console's page replaces with the host it was opened on. */
+function parseUrl(v: unknown): string {
+  const s = str(v, "url").trim();
+  if (s && !/^https?:\/\/[^\s]+$/.test(s)) throw new ApiError(400, "url must start with http:// or https:// (use {host} for this machine, e.g. http://{host}:3000)");
+  return s;
+}
+
 function typeWithAvailability(t: ProcessTypeRow) {
   const h = hydrate(t);
   const cmd = t.command.includes("{") ? t.command.split(/\s|\{/)[0] : t.command;
@@ -270,10 +277,11 @@ route("POST", "/api/process-types", async (req) => {
   const default_cwd = str(b.default_cwd, "default_cwd").trim();
   const interactive_args = strArray(b.interactive_args, "interactive_args");
   const resume_args = strArray(b.resume_args, "resume_args");
+  const url = parseUrl(b.url);
   const t = now();
   try {
-    db.prepare(`INSERT INTO process_types (name, description, command, args, interactive_args, resume_args, env, detect, builtin, kind, default_cwd, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,0,?,?,?,?)`)
-      .run(name, str(b.description, "description"), command, JSON.stringify(args), JSON.stringify(interactive_args), JSON.stringify(resume_args), JSON.stringify(env), detect, kind, default_cwd, t, t);
+    db.prepare(`INSERT INTO process_types (name, description, command, args, interactive_args, resume_args, env, detect, builtin, kind, default_cwd, url, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,0,?,?,?,?,?)`)
+      .run(name, str(b.description, "description"), command, JSON.stringify(args), JSON.stringify(interactive_args), JSON.stringify(resume_args), JSON.stringify(env), detect, kind, default_cwd, url, t, t);
   } catch (e: any) {
     if (String(e.message).includes("UNIQUE")) throw new ApiError(409, `process type "${name}" already exists`);
     throw e;
@@ -294,8 +302,9 @@ route("PUT", "/api/process-types/:name", async (req, p) => {
   const default_cwd = b.default_cwd === undefined ? cur.default_cwd : str(b.default_cwd, "default_cwd").trim();
   const interactive_args = b.interactive_args === undefined ? JSON.parse(cur.interactive_args || "[]") : strArray(b.interactive_args, "interactive_args");
   const resume_args = b.resume_args === undefined ? JSON.parse(cur.resume_args || "[]") : strArray(b.resume_args, "resume_args");
-  db.prepare("UPDATE process_types SET description=?, command=?, args=?, interactive_args=?, resume_args=?, env=?, detect=?, kind=?, default_cwd=?, updated_at=? WHERE id=?")
-    .run(description, command, JSON.stringify(args), JSON.stringify(interactive_args), JSON.stringify(resume_args), JSON.stringify(env), detect, kind, default_cwd, now(), cur.id);
+  const url = b.url === undefined ? cur.url : parseUrl(b.url);
+  db.prepare("UPDATE process_types SET description=?, command=?, args=?, interactive_args=?, resume_args=?, env=?, detect=?, kind=?, default_cwd=?, url=?, updated_at=? WHERE id=?")
+    .run(description, command, JSON.stringify(args), JSON.stringify(interactive_args), JSON.stringify(resume_args), JSON.stringify(env), detect, kind, default_cwd, url, now(), cur.id);
   return json(typeWithAvailability(getType(p.name)));
 });
 

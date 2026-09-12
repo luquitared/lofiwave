@@ -48,11 +48,12 @@ curl -X POST ${api}/process-types -H 'content-type: application/json' -d '{
   "args": ["run", "server.ts"],
   "default_cwd": "/absolute/path/to/my-app",
   "detect": "bun run server\\\\.ts",
-  "env": {"PORT": "3000"}
+  "env": {"PORT": "3000"},
+  "url": "http://{host}:3000"
 }'
 \`\`\`
 
-   \`name\` is the identifier used in every other call (letters, digits, \`_ . -\`). \`detect\` is optional; without it only instances started through the console are shown. \`command\` must be on the console's PATH or an absolute path.
+   \`name\` is the identifier used in every other call (letters, digits, \`_ . -\`). \`detect\` is optional; without it only instances started through the console are shown. \`command\` must be on the console's PATH or an absolute path. \`url\` is optional: if the app has a web UI, the Apps tab links to it (\`{host}\` becomes the host the console was opened on, so the link also works over Tailscale; the app must listen on more than 127.0.0.1 for that).
 
 2. **Start it**: \`POST ${api}/processes\` with \`{"type": "my-app"}\` (add \`"cwd"\`, \`"prompt"\`, \`"extra_args"\`, \`"env"\`, \`"timeout_sec"\` to override). The response is a *run* record with \`id\` and \`pid\`.
 

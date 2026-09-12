@@ -118,6 +118,7 @@
         <label>Kind <select name="kind"><option value="app">app (Apps tab)</option><option value="agent">agent (Agents tab)</option></select></label>
         <label>Command (binary) <input name="command" required placeholder="claude"></label>
         <label>Default working directory <span class="pp"><input name="default_cwd" autocomplete="off" data-pathpicker placeholder="optional"></span></label>
+        <label>URL of its UI (optional; {host} = this machine) <input name="url" placeholder="http://{host}:3000"></label>
         <label class="wide">Args (one per line; use {prompt} and {cwd}) <textarea name="args" rows="3"></textarea></label>
         <label class="wide">Interactive args (used by interactive runs; blank = same as args) <textarea name="interactive_args" rows="2" placeholder="{prompt}&#10;--remote-control"></textarea></label>
         <label class="wide">Resume args (reopen a recorded session; use {session}) <textarea name="resume_args" rows="2" placeholder="--resume&#10;{session}&#10;--remote-control"></textarea></label>
