@@ -113,7 +113,48 @@ Still wanted: when two live runs share a session id, label them apart by the thi
 claude's own per-process name and the run id (`#25 · ent-scrub-tech-df` vs `#26 · ent-scrub-tech-dd`) — plus a
 banner on the pane naming the twin, with a jump to it.
 
-## 5. Smaller notes
+## 5. Restarts leave children behind — and the memory figure lies
+
+Noticed 2026-09-12 on the XPS, where `systemctl --user status agent-console` reported **`Memory: 8.3G`** for a
+console that had restarted three seconds earlier.
+
+**It was page cache, not usage.** `systemctl status` prints `memory.current`, which charges the cgroup for the
+page cache of every file its processes read:
+
+| | |
+|---|---|
+| `anon` (actual memory) | 245.73 MB |
+| `file` (page cache) | 8272.50 MB |
+| of which `inactive_file` (reclaimable, never re-touched) | 8019.46 MB |
+| pressure events (`low`/`high`/`max`/`oom`) | all 0 |
+
+Machine was 3.6 GB used / 11 GB available of 15 GB, with ~10 GB in `buff/cache` — the same cache seen from the
+other side. Real RSS: **bun server 47 MB**; a dashboard python in the same cgroup held 297 MB and had read
+**16.8 GB** off disk in 20 hours (the bun process: 0).
+
+Two gotchas worth keeping:
+
+- `/proc/<pid>/statm` field 1 is **VmSize, not RSS** — bun reserves ~1.7 GB of address space for its JS heap,
+  which reads as alarming and means nothing. Use `VmRSS` from `/proc/<pid>/status`.
+- A cgroup memory number is only meaningful split into `anon` vs `file` (`memory.stat`), against
+  `memory.events` for whether anything ever had to be reclaimed.
+
+**The real finding underneath:** that python was `run 34`, still `status: running` with `meta.orphan: true`. It
+survived `systemctl --user restart agent-console` and stayed inside the unit's cgroup, so its page cache is
+billed to the console forever.
+
+Ideas:
+
+- **Decide the policy, because right now it's accidental.** Either `KillMode=control-group` on the unit so a
+  restart takes children down with it, or a deliberate choice that long-lived apps outlive a console restart.
+- If children are *meant* to survive, start them in their own scope (`systemd-run --scope`) so their memory and
+  IO are accounted to themselves rather than to the console.
+- `reconcileRuns()` already flags these (`meta.orphan`). The UI could act on it: a run whose process outlived
+  the console should offer *adopt* or *stop*, instead of sitting at `running` indefinitely.
+- Unrelated but spotted on the way past: the yam dashboard reading 16.8 GB/day suggests it rescans recordings
+  on a timer rather than keeping an index.
+
+## 6. Smaller notes
 
 - **`ideas-fridge.md` is not a backlog.** If something here is actually next, it belongs in an issue.
 - Per-viewer auth tokens (see §2) are worth doing on their own, before any of the terminal work.
