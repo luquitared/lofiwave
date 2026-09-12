@@ -332,6 +332,7 @@ route("POST", "/api/processes", async (req) => {
     env: strMap(b.env, "env"),
     timeoutSec: int(b.timeout_sec, "timeout_sec", 0),
     interactive: bool(b.interactive, false),
+    terminal: str(b.terminal, "terminal"),
     trigger: "manual",
   });
   return json(runOut(run), 201);
@@ -509,7 +510,7 @@ route("POST", "/api/sessions/resume", async (req) => {
   const agent = str(b.agent, "agent", { required: true });
   const session_id = str(b.session_id, "session_id", { required: true }).trim();
   if (!/^[A-Za-z0-9_.-]+$/.test(session_id)) throw new ApiError(400, "session_id has unexpected characters");
-  return json(runOut(await resumeAgentSession({ agent, sessionId: session_id, cwd: str(b.cwd, "cwd") })), 201);
+  return json(runOut(await resumeAgentSession({ agent, sessionId: session_id, cwd: str(b.cwd, "cwd"), terminal: str(b.terminal, "terminal") })), 201);
 });
 
 // The raw transcript (Claude Code writes JSONL under ~/.claude/projects/..., codex under ~/.codex/sessions/...). Only paths under the home dir are served.

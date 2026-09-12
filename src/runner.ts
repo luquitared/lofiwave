@@ -8,6 +8,7 @@ import { db, now, hydrate, type ProcessTypeRow, type RunRow, type WorkflowRow } 
 import { config, logDir } from "./config";
 import { killTree, pidAlive } from "./procs";
 import { discoverCodexSession, codexRolloutPath } from "./agents";
+import { openTerminalForTmux } from "./terminal";
 
 export class ApiError extends Error {
   constructor(public status: number, message: string) { super(message); }
@@ -53,6 +54,8 @@ export type StartOptions = {
   interactive?: boolean;
   /** Reopen this recorded session (uses the type's `resume_args`; implies interactive). */
   resumeSession?: string;
+  /** Desktop terminal to attach to an interactive run: a name ("iterm", "kitty", ...), "auto", or "none". Defaults to $OPEN_TERMINAL. */
+  terminal?: string;
 };
 
 /** Record (or refresh) an agent session on a run. Keyed by (run, session id) so a resumed session can belong to several runs. */
@@ -166,6 +169,17 @@ export async function startRun(opts: StartOptions): Promise<RunRow> {
     const pid = Number(pane.out);
     if (!pid) await fail(`could not read the tmux pane pid: ${pane.err || pane.out}`);
     entry = { pid, tmux: sess, done };
+    // Show the session on this machine's desktop too. Failing to find a terminal is not fatal:
+    // the run keeps going in tmux, and the console's own screen view still works.
+    const term = await openTerminalForTmux(sess, { terminal: opts.terminal });
+    if (term.opened) {
+      meta.terminal = term.app;
+      sink.write(`# window: attached in ${term.app}\n`);
+    } else if (term.error) {
+      meta.terminal_error = term.error;
+      sink.write(`# window: no terminal window opened (${term.error}); attach with: tmux attach -t ${sess}\n`);
+    }
+    if (term.opened || term.error) { sink.flush(); db.prepare("UPDATE runs SET meta = ? WHERE id = ?").run(JSON.stringify(meta), id); }
     exited = (async () => {
       let ticks = 0;
       for (;;) {
@@ -339,12 +353,12 @@ export async function resumeSession(runId: number, sessionId: string): Promise<R
  * Reopen any agent session by id, whether or not the console started it (e.g. a claude session from a terminal, seen on the
  * Agents tab). If that session is still open elsewhere, claude forks a copy that continues the conversation under a new id.
  */
-export async function resumeAgentSession(o: { agent: string; sessionId: string; cwd?: string; typeName?: string; env?: Record<string, string> }): Promise<RawRun> {
+export async function resumeAgentSession(o: { agent: string; sessionId: string; cwd?: string; typeName?: string; env?: Record<string, string>; terminal?: string }): Promise<RawRun> {
   const typeName = o.typeName ?? o.agent;
   const type = getType(typeName);
   if (!JSON.parse(type.resume_args || "[]").length) throw new ApiError(400, `process type "${typeName}" has no resume_args template`);
   const cwd = o.cwd && existsSync(o.cwd) ? o.cwd : (type.default_cwd || process.env.HOME || "/");
-  const run = await startRun({ typeName, cwd, trigger: "resume", resumeSession: o.sessionId, env: o.env ?? {} });
+  const run = await startRun({ typeName, cwd, trigger: "resume", resumeSession: o.sessionId, env: o.env ?? {}, terminal: o.terminal });
   // Until the agent reports back (claude's hook, codex's rollout), remember what we asked it to reopen.
   recordSession(run.id, { session_id: o.sessionId, agent: o.agent, cwd, source: "resume" });
   return getRun(run.id);
