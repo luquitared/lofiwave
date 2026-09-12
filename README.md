@@ -36,6 +36,7 @@ Configuration is by environment variable (put them in `~/agent-console/.env` whe
 | `DATA_DIR` | `./data` | Where the SQLite database and logs live |
 | `SCHEDULER_INTERVAL_MS` | `15000` | How often scheduled workflows are checked |
 | `OUTPUT_TAIL_BYTES` | `65536` | How much of the end of each log is copied into the run record (`output`) |
+| `OPEN_TERMINAL` | `auto` | Desktop terminal window opened on an interactive run. `auto` = iTerm then Terminal.app on macOS, the first of wezterm/kitty/alacritty/ghostty/foot/gnome-terminal/konsole/tilix/xfce4-terminal/mate-terminal/terminator/urxvt/xterm found on Linux; `none` to keep runs headless; or name one (`iterm`, `terminal`, `kitty`, …). Ignored on a headless machine (no `DISPLAY`/`WAYLAND_DISPLAY`). |
 
 ## Run at boot (Linux, systemd user service)
 
@@ -93,7 +94,7 @@ curl -X POST localhost:7770/api/process-types -H 'content-type: application/json
 }'
 ```
 
-**Interactive runs** – `POST /api/processes` with `interactive: true` (or the *Interactive* checkbox in the Start dialog) starts the type inside a detached **tmux** session (`ac-<run id>`) that stays open until the program exits or you stop the run. This is how you start a normal `claude` or `codex` TUI from your phone: the built-in `claude` type's interactive template is `claude [prompt] --remote-control`, so the session shows up in the Claude app / claude.ai as soon as it is up (the console picks the `https://claude.ai/code/session_…` link off the screen and shows it on the run as `meta.remote_url`), and the `codex` type opens the Codex TUI. The prompt is optional. Requires `tmux` on PATH. While it runs, the run page shows the live terminal (`GET /api/runs/:id/screen`) and lets you type into it (`POST /api/runs/:id/keys`); on the machine itself `tmux attach -t ac-<id>` gives you the real terminal. When it ends, the screen and scrollback are saved as the run log. Each type has its own `interactive_args` template (Types tab); when it is empty the normal `args` are used.
+**Interactive runs** – `POST /api/processes` with `interactive: true` (or the *Interactive* checkbox in the Start dialog) starts the type inside a detached **tmux** session (`ac-<run id>`) that stays open until the program exits or you stop the run. This is how you start a normal `claude` or `codex` TUI from your phone: the built-in `claude` type's interactive template is `claude [prompt] --remote-control`, so the session shows up in the Claude app / claude.ai as soon as it is up (the console picks the `https://claude.ai/code/session_…` link off the screen and shows it on the run as `meta.remote_url`), and the `codex` type opens the Codex TUI. The prompt is optional. Requires `tmux` on PATH. If the console is running on a desktop, it also opens a **real terminal window** attached to that session (iTerm, else Terminal.app, on macOS; the first emulator it finds on Linux) so the session is in front of you on the machine as well as in the browser — set `OPEN_TERMINAL=none` (or `terminal: "none"` on the request) if you don't want that, or `OPEN_TERMINAL=<name>` to pick one. The window is just another tmux client: closing it leaves the run running, and `meta.terminal` records which app was used (`meta.terminal_error` says why none opened). While it runs, the run page shows the live terminal (`GET /api/runs/:id/screen`) and lets you type into it (`POST /api/runs/:id/keys`); on the machine itself `tmux attach -t ac-<id>` gives you the real terminal. When it ends, the screen and scrollback are saved as the run log. Each type has its own `interactive_args` template (Types tab); when it is empty the normal `args` are used.
 
 **Process** – an OS process that either matches a type's `detect` regex or was started by the console. Console-started processes are *managed*: they have a run record, a log, and can be restarted. Children of a managed process are attributed to the same run (`child: true`).
 
@@ -143,7 +144,7 @@ If `AUTH_TOKEN` is set, send it as one of: `Authorization: Bearer <token>`, `X-A
 | | |
 |---|---|
 | `GET /api/processes?type=&kind=` | running processes matching any type (filter by type name or kind): `{pid, ppid, user, cmd, cwd, elapsedSec, rssKb, cpu, type, managed, child, run_id, workflow_name, session}` – `session` is `{session_id, agent, title, name, status, model, web_url, resume_cmd, ...}` or null |
-| `POST /api/processes` | start one: `{type, cwd?, prompt?, extra_args?, env?, timeout_sec?, interactive?}` → 201 with the run record. `cwd` falls back to the type's `default_cwd`. `interactive: true` starts it in a tmux session that stays open (see Concepts). |
+| `POST /api/processes` | start one: `{type, cwd?, prompt?, extra_args?, env?, timeout_sec?, interactive?, terminal?}` → 201 with the run record. `cwd` falls back to the type's `default_cwd`. `interactive: true` starts it in a tmux session that stays open (see Concepts). |
 | `POST /api/processes/preview` | same body; returns the `{command, args}` that would be executed, without running |
 | `DELETE /api/processes/:pid?force=1` | SIGTERM (or SIGKILL with `force`) the process **tree**. Works on unmanaged processes too. If the pid belongs to a run, the run is marked `killed`. |
 
@@ -195,7 +196,7 @@ On top of the recorded id, the console reads what the agents themselves know: Cl
 |---|---|
 | `GET /api/runs/:id/sessions` | `[{session_id, agent, cwd, transcript_path, model, source, started_at, ended_at, end_reason, title, name, status, web_url, resume_cmd}]` |
 | `POST /api/runs/:id/sessions/:session_id/resume` | reopen the session interactively (tmux) → 201 with the new run |
-| `POST /api/sessions/resume` | same for a session the console did not start: `{agent: "claude"\|"codex", session_id, cwd?}` → 201. If the session is still open elsewhere, claude continues it as a copy under a new id. |
+| `POST /api/sessions/resume` | same for a session the console did not start: `{agent: "claude"\|"codex", session_id, cwd?, terminal?}` → 201. If the session is still open elsewhere, claude continues it as a copy under a new id. |
 | `POST /api/runs/:id/sessions` | register (upsert by `session_id`): `{session_id, agent?, cwd?, transcript_path?, model?, source?}` → 201 |
 | `PUT /api/runs/:id/sessions/:session_id` | `{ended: true, reason?, model?}` marks it ended |
 | `GET /api/runs/:id/sessions/:session_id/transcript` | the raw JSONL transcript (`text/plain`; only files under the home directory are served) |

@@ -320,8 +320,8 @@ function applyStartType() {
   $("#prompt-label").hidden = t && !needsPrompt && t.kind === "app" && !interactive;
   sf.prompt.placeholder = interactive ? "Optional first message — or leave empty and drive it from the Claude app / the screen below" : "What should the agent do?";
   $("#interactive-label").style.display = systemInfo?.tmux ? "" : "none";   // .row's display:flex would override `hidden`
-  $("#interactive-hint").textContent = t?.name === "claude" ? "— stays open in a tmux session; claude starts with Remote Control so it appears in the Claude app"
-    : t?.name === "codex" ? "— opens the Codex TUI in a tmux session that stays open" : "— runs in a tmux session that stays open; uses the type's interactive args";
+  $("#interactive-hint").textContent = t?.name === "claude" ? "— stays open in a tmux session and a terminal window on the machine; claude starts with Remote Control so it appears in the Claude app"
+    : t?.name === "codex" ? "— opens the Codex TUI in a tmux session, and a terminal window on the machine" : "— runs in a tmux session that stays open (and a terminal window on the machine); uses the type's interactive args";
   sf.cwd.value = t?.default_cwd || sf.cwd.value;
   sf.cwd.placeholder = t?.default_cwd ? t.default_cwd : "start typing to search";
   sf.extra_args.placeholder = t?.name === "claude" ? "--permission-mode acceptEdits" : t?.name === "codex" ? "--full-auto" : "";
@@ -447,6 +447,10 @@ const refreshRunDetail = guard(async (full = false) => {
         h("dt", {}, "pid"), h("dd", {}, r.pid ?? "–", r.meta?.orphan ? " (started by a previous console instance)" : ""),
         r.meta?.remote_url ? h("dt", {}, "remote") : "", r.meta?.remote_url ? h("dd", {}, h("a", { href: r.meta.remote_url, target: "_blank" }, r.meta.remote_url), h("span", { class: "muted" }, "  (same session in the Claude app)")) : "",
         r.meta?.tmux ? h("dt", {}, "terminal") : "", r.meta?.tmux ? h("dd", {}, `tmux attach -t ${r.meta.tmux}`, r.status === "running" ? h("span", { class: "muted" }, "  (live screen below)") : h("span", { class: "muted" }, "  (ended; screen saved in the log)")) : "",
+        r.meta?.tmux && (r.meta.terminal || r.meta.terminal_error) ? h("dt", {}, "window") : "",
+        r.meta?.tmux && (r.meta.terminal || r.meta.terminal_error)
+          ? h("dd", {}, r.meta.terminal ? `opened in ${r.meta.terminal} on this machine` : h("span", { class: "muted" }, `no window opened — ${r.meta.terminal_error}`))
+          : "",
         h("dt", {}, "started"), h("dd", {}, new Date(r.started_at).toLocaleString()),
         h("dt", {}, "ended"), h("dd", {}, r.ended_at ? new Date(r.ended_at).toLocaleString() : "–"),
         h("dt", {}, "duration"), h("dd", {}, fmtDur(r.duration_ms / 1000)),
