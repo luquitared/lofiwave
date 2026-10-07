@@ -767,6 +767,7 @@ function paneFor(r) {
         s?.web_url ? h("a", { href: s.web_url, target: "_blank" }, h("button", { class: "small" }, "Open on web ↗")) : remoteControlBtn(r.pid, s, true),
         h("button", { class: "small", title: "the full run record: command, env, log, sessions", onclick: () => openRun(r.id) }, "Details"),
         h("button", { class: "small danger", onclick: () => confirmDo(`Stop "${runLabel(r)}" (run #${r.id})?`, async () => { await post(`/runs/${r.id}/kill`); toast("stopped", true); consoleRun = null; railSig = paneSig = ""; loadConsole(); }) }, "Stop"),
+        termMode() ? h("button", { class: "small", id: "select-btn", title: "turn the mouse into a plain text selector: drag to select, it's copied when you let go; click again to give the mouse back to tmux", onclick: () => toggleSelect() }, selectLabel()) : "",
         termMode() ? h("button", { class: "small", id: "full-btn", title: "hide the sidebar and session list, terminal edge to edge (Ctrl+Shift+F)", onclick: () => toggleFull() }, fullLabel()) : "",
         h("button", { class: "small", title: termMode() ? "switch to the simple view: a polled screen and a text box (good on a phone or a flaky link)" : "switch to a real terminal in the browser", onclick: () => { setTermMode(!termMode()); paneSig = ""; renderPane(); } }, termMode() ? "Simple view" : "Terminal view"),
         termMode() ? "" : h("label", { class: "muted follow" }, h("input", { type: "checkbox", id: "console-follow", checked: true }), " follow"),
@@ -785,9 +786,27 @@ function paneFor(r) {
 // never sees the fn key, so the Terminal.app habit doesn't work here.
 const isMac = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
 function copyHint() {
-  return isMac
-    ? "Copy: hold ⌥ Option and drag to select — it's copied when you let go (⌘C also works). fn-drag doesn't work in a browser."
-    : "Copy: hold Shift and drag to select — it's copied when you let go. A plain drag selects inside tmux only.";
+  return `To copy: click "Select text", drag over what you want, let go — it's on your clipboard. Click "Done selecting" to give the mouse back to tmux (scrolling, clicking). Shortcut: ${isMac ? "⌥ Option" : "Shift"}-drag does the same without the button.`;
+}
+
+// Select mode: xterm stops reporting the mouse to tmux, so a plain drag is a normal text selection. We switch
+// mouse tracking off locally (never sent to tmux) and swallow tmux's attempts to turn it back on while the mode
+// is on; leaving the mode restores whatever tmux last asked for.
+const MOUSE_MODES = [9, 1000, 1002, 1003, 1005, 1006, 1015];
+let selectMode = false;
+const selectLabel = () => (selectMode ? "Done selecting" : "Select text");
+function setMouseTracking(term, on) {
+  const t = liveTerm;
+  let seq = MOUSE_MODES.map((m) => `\x1b[?${m}l`).join("");
+  if (on && t?.mouseModes?.size) seq += [...t.mouseModes].map((m) => `\x1b[?${m}h`).join("");
+  if (t) t.localWrites++; // our own sequences must not be mistaken for tmux's requests
+  term.write(seq, () => { if (t) t.localWrites--; });
+}
+function toggleSelect(on = !selectMode) {
+  selectMode = on;
+  const t = liveTerm;
+  if (t) { setMouseTracking(t.term, !on); if (!on) t.term.clearSelection(); t.term.focus(); }
+  const b = $("#select-btn"); if (b) { b.textContent = selectLabel(); b.classList.toggle("on", on); }
 }
 
 // ---------------------------------------------------------------- full screen (terminal only)
@@ -839,7 +858,7 @@ function openTerm(runId) {
   if (!el) return closeTerm();
   if (liveTerm && liveTerm.runId === runId && liveTerm.el === el) return;
   closeTerm();
-  const term = new Terminal({ cursorBlink: true, fontFamily: getComputedStyle(document.body).getPropertyValue("--mono") || "monospace", fontSize: 13, scrollback: 5000, macOptionClickForcesSelection: true, theme: { background: "#0d110e" } });
+  const term = new Terminal({ cursorBlink: true, fontFamily: getComputedStyle(document.body).getPropertyValue("--mono") || "monospace", fontSize: 13, scrollback: 5000, macOptionClickForcesSelection: true, altClickMovesCursor: false, theme: { background: "#0d110e" } });
   const fit = new FitAddon.FitAddon();
   term.loadAddon(fit);
   term.open(el);
@@ -852,6 +871,17 @@ function openTerm(runId) {
     return true;
   });
   term.onData((d) => { if (!isBareMotion(d)) send({ t: "i", d }); });
+  // Remember which mouse modes tmux turned on, so leaving select mode can restore them; while selecting, swallow them.
+  t.mouseModes = new Set(); t.localWrites = 0;
+  const trackModes = (on) => (params) => {
+    const ms = params.flat().filter((m) => MOUSE_MODES.includes(m));
+    if (!ms.length || t.localWrites) return false;
+    ms.forEach((m) => (on ? t.mouseModes.add(m) : t.mouseModes.delete(m)));
+    return on && selectMode; // true = handled (dropped) while in select mode
+  };
+  term.parser.registerCsiHandler({ prefix: "?", final: "h" }, trackModes(true));
+  term.parser.registerCsiHandler({ prefix: "?", final: "l" }, trackModes(false));
+  if (selectMode) setMouseTracking(term, false);
   // Copy on select: the forced (Option/Shift) selection goes straight to the clipboard on mouse-up.
   el.addEventListener("mouseup", () => {
     const sel = term.hasSelection() && term.getSelection();
