@@ -9,6 +9,7 @@
 <meta name="apple-mobile-web-app-title" content="Agents">
 <title>Agent Console</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='13' font-size='13'>⚙️</text></svg>">
+<link rel="stylesheet" href="/vendor/xterm.css">
 <link rel="stylesheet" href="/style.css">
 </head>
 <body class="console">
@@ -28,7 +29,7 @@
   <div class="sidebar-bottom"><a href="/docs" class="api-link">API documentation <span aria-hidden="true">↗</span></a><div id="sysinfo" class="sysinfo"></div></div>
 </header>
 <main id="main">
-  <div class="page-top"><span class="breadcrumb">Workspace <span>/</span> <b id="page-location">Console</b></span><span class="connection" id="connection-status">Connecting…</span></div>
+  <div class="page-top"><span class="breadcrumb">Workspace <span>/</span> <b id="page-location">Console</b></span><span class="page-top-right"><span id="people" class="people" hidden></span><span class="connection" id="connection-status">Connecting…</span></span></div>
   <div class="page-heading"><div><p class="eyebrow">YOUR WORK, IN MOTION</p><h1 id="page-title">Console</h1><p id="page-description">Your live sessions, and a terminal to talk to them.</p></div><button id="refresh-btn" aria-label="Refresh current view">↻ <span>Refresh</span></button></div>
 
   <section id="tab-console" class="tab active">
@@ -156,7 +157,19 @@
     </div>
   </form>
 </dialog>
+<dialog id="login-dialog" class="login" aria-labelledby="login-title">
+  <form id="login-form" class="grid" method="dialog">
+    <h3 id="login-title" class="wide">Sign in</h3>
+    <p class="wide muted">Everyone signs in with the team password. Your name shows on the runs you start and in who's online.</p>
+    <label class="wide">Your name <input name="name" autocomplete="username" maxlength="32" required></label>
+    <label class="wide">Team password <input name="password" type="password" autocomplete="current-password" required></label>
+    <p id="login-error" class="wide" style="color:var(--bad)" hidden></p>
+    <div class="wide row"><button type="submit" class="primary">Sign in</button></div>
+  </form>
+</dialog>
 <div id="toast" role="status" aria-live="polite" hidden></div>
+<script src="/vendor/xterm.js"></script>
+<script src="/vendor/addon-fit.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>

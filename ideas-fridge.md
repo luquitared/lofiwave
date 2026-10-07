@@ -7,6 +7,8 @@ already been verified, and what the catch is.
 
 ## 1. Real terminal instead of virtual buttons
 
+**Done (2026-10):** `src/tty.ts` — xterm.js ⟷ WebSocket ⟷ `tmux attach` on a pty from Bun's own `Bun.spawn({ terminal })` (no node-pty). The resize hack stays for the simple view only, and is skipped while a real terminal is attached. Notes below kept for context.
+
 Today an interactive run is driven by polling `GET /api/runs/:id/screen` (tmux `capture-pane`) and posting
 `POST /api/runs/:id/keys` (tmux `send-keys`), with on-screen ⏎ / Esc / ⇥ / ↑ / ↓ / ^C buttons standing in for
 keys a text field can't send.

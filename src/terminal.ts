@@ -103,7 +103,7 @@ function openLinux(argvCmd: string[], shellCmd: string, want: string): TerminalR
 
 /** Attach a desktop terminal window to `session`. Never throws: a missing terminal is reported, not fatal. */
 export async function openTerminalForTmux(session: string, opts: { terminal?: string } = {}): Promise<TerminalResult> {
-  const want = (opts.terminal ?? preference).trim().toLowerCase() || "auto";
+  const want = (opts.terminal || preference).trim().toLowerCase() || "auto";
   if (want === "none" || want === "off" || want === "false" || want === "0") return { opened: false, app: "", error: "" };
   const tmuxBin = Bun.which("tmux") ?? "tmux";
   const argvCmd = [tmuxBin, "attach-session", "-t", session];

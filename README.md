@@ -70,6 +70,18 @@ Or set `HOST=0.0.0.0` in `.env` and use `http://<machine>:7770` over the tailnet
 
 Linux helpers: `scripts/install-tailscale-linux.sh` installs Tailscale and prints the address; `scripts/setup-ssh-tailscale-only.sh` (sudo) restricts SSH to the tailnet (ufw + sshd `AllowUsers`; `STRICT=1` also denies all other incoming traffic).
 
+## Team login
+
+For a console several people share (e.g. on a VM), set `PASSWORD` in `.env`. The UI then asks for **your name and the team password** instead of the token, and keeps you signed in for 30 days (an HttpOnly, SameSite=Strict cookie; `Secure` behind HTTPS). It's multiplayer:
+
+- every run records who started it (`meta.started_by`: the name, or `api` for token calls; scheduled runs have none), shown on the session rail, the runs list and the run page;
+- the header shows who else is here (anyone who used the console in the last ~45 s);
+- interactive sessions are shared: anyone can watch and type into any live terminal.
+
+Wrong passwords are throttled (10 per address per 10 minutes; behind a reverse proxy on the same machine, the `X-Forwarded-For` address). Changing `PASSWORD` signs everyone out. Serve it over HTTPS, e.g. with Caddy in front (`reverse_proxy 127.0.0.1:7770`).
+
+API: `GET /api/auth` → `{password_login}` (public), `POST /api/login {name, password}` (public, sets the cookie), `POST /api/logout`, `GET /api/me` → `{name, password_login, online: [{name, last_seen}]}`.
+
 ## Configuration
 
 Environment variables, or `KEY=VALUE` lines in `.env`:
@@ -79,6 +91,8 @@ Environment variables, or `KEY=VALUE` lines in `.env`:
 | `PORT` | `7770` | Listen port |
 | `HOST` | `127.0.0.1` | Bind address. `0.0.0.0` makes it reachable from other machines. |
 | `AUTH_TOKEN` | *(generated)* | The access token. Unset: generated once into `data/auth-token`. |
+| `PASSWORD` | *(unset)* | Team password. Set: people sign in with a name and this password (see *Team login*); the token keeps working for agents and scripts. |
+| `GIT_AUTHORS` | *(unset)* | Git identity per signed-in person: `"lucas=Lucas N <lucas@x.com>, seth=Seth N <seth@x.com>"` (key = first word of the sign-in name, any case). Runs they start get `GIT_AUTHOR_*`/`GIT_COMMITTER_*` set, so commits carry their name; everyone else uses git's own config. |
 | `DATA_DIR` | `./data` | SQLite database, run logs, generated token |
 | `SCHEDULER_INTERVAL_MS` | `15000` | How often scheduled workflows are checked |
 | `OUTPUT_TAIL_BYTES` | `65536` | How much of the end of each log is copied into the run record (`output`) |
@@ -115,7 +129,7 @@ curl -H "authorization: Bearer $TOKEN" -X POST localhost:7770/api/process-types 
 }'
 ```
 
-**Interactive runs** – `POST /api/processes` with `interactive: true` (or the *Interactive* checkbox in the Start dialog) starts the type inside a detached **tmux** session (`ac-<run id>`) that stays open until the program exits or you stop the run. This is how you start a normal `claude` or `codex` TUI from your phone: the built-in `claude` type's interactive template is `claude [prompt] --remote-control`, so the session shows up in the Claude app / claude.ai as soon as it is up (the console picks the `https://claude.ai/code/session_…` link off the screen and shows it on the run as `meta.remote_url`), and the `codex` type opens the Codex TUI. The prompt is optional. Requires `tmux` on PATH. If the console is running on a desktop, it also opens a **real terminal window** attached to that session (iTerm, else Terminal.app, on macOS; the first emulator it finds on Linux) so the session is in front of you on the machine as well as in the browser — set `OPEN_TERMINAL=none` (or `terminal: "none"` on the request) if you don't want that, or `OPEN_TERMINAL=<name>` to pick one. The window is just another tmux client: closing it leaves the run running, and `meta.terminal` records which app was used (`meta.terminal_error` says why none opened). While it runs, the run page shows the live terminal (`GET /api/runs/:id/screen`) and lets you type into it (`POST /api/runs/:id/keys`); on the machine itself `tmux attach -t ac-<id>` gives you the real terminal. When it ends, the screen and scrollback are saved as the run log. Each type has its own `interactive_args` template (Types tab); when it is empty the normal `args` are used.
+**Interactive runs** – `POST /api/processes` with `interactive: true` (or the *Interactive* checkbox in the Start dialog) starts the type inside a detached **tmux** session (`ac-<run id>`) that stays open until the program exits or you stop the run. This is how you start a normal `claude` or `codex` TUI from your phone: the built-in `claude` type's interactive template is `claude [prompt] --remote-control`, so the session shows up in the Claude app / claude.ai as soon as it is up (the console picks the `https://claude.ai/code/session_…` link off the screen and shows it on the run as `meta.remote_url`), and the `codex` type opens the Codex TUI. The prompt is optional. Requires `tmux` on PATH. If the console is running on a desktop, it also opens a **real terminal window** attached to that session (iTerm, else Terminal.app, on macOS; the first emulator it finds on Linux) so the session is in front of you on the machine as well as in the browser — set `OPEN_TERMINAL=none` (or `terminal: "none"` on the request) if you don't want that, or `OPEN_TERMINAL=<name>` to pick one. The window is just another tmux client: closing it leaves the run running, and `meta.terminal` records which app was used (`meta.terminal_error` says why none opened). While it runs, the Console tab shows it as a **real terminal** in the browser (xterm.js over a WebSocket, `GET /api/runs/:id/tty`, to its own `tmux attach` on a pty): colours, full-screen TUIs, Ctrl-keys, paste and mouse-wheel scrolling all work, and several people can watch and type into the same session at once (the window follows whoever typed last). The **Simple view** button (the default on phones) switches to a polled screen (`GET /api/runs/:id/screen`) and a text box (`POST /api/runs/:id/keys`) with buttons for Esc, Tab, arrows and Ctrl-C — better on a flaky link; on the machine itself `tmux attach -t ac-<id>` gives you the real terminal. When it ends, the screen and scrollback are saved as the run log. Each type has its own `interactive_args` template (Types tab); when it is empty the normal `args` are used.
 
 **Process** – an OS process that either matches a type's `detect` regex or was started by the console. Console-started processes are *managed*: they have a run record, a log, and can be restarted. Children of a managed process are attributed to the same run (`child: true`).
 

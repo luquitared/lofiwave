@@ -1,7 +1,6 @@
 import { join, dirname, basename } from "node:path";
 import { readdirSync, existsSync } from "node:fs";
 import { hostname, homedir } from "node:os";
-import { timingSafeEqual } from "node:crypto";
 import { config } from "./config";
 import { db, now, hydrate, type ProcessTypeRow, type WorkflowRow, type RunRow, type SessionRow } from "./db";
 import { listOsProcesses, cwdOf, killTree, type OsProcess } from "./procs";
@@ -10,6 +9,8 @@ import { describeSession, sessionForPid, type SessionInfo } from "./agents";
 import { startScheduler, refreshNextRun, runWorkflow, computeNext } from "./scheduler";
 import { validateCron } from "./cron";
 import { renderDocs, apiIndex } from "./docs";
+import { ttyFor, ttySocket, type TtyData } from "./tty";
+import { actor, identify, touch, online, passwordMatches, cleanName, makeSession, sessionCookie, loginBlocked, loginFailed, TOKEN_ACTOR } from "./auth";
 
 const PUBLIC_DIR = join(config.root, "public");
 const startedAt = now();
@@ -214,6 +215,33 @@ route("GET", "/api/system", async () => {
     uptime_ms: now() - startedAt, addresses, tailscale, server_time: now(),
   });
 });
+
+// ---- people (with PASSWORD set: name + shared password login, and who's online)
+route("GET", "/api/auth", () => json({ password_login: Boolean(config.password) }));
+
+route("POST", "/api/login", async (req) => {
+  const ip = clientIp(req);
+  if (!config.password) throw new ApiError(400, "password login is off (set PASSWORD); use the API token");
+  if (loginBlocked(ip)) throw new ApiError(429, "too many failed attempts; try again in a few minutes");
+  const b = await body(req);
+  const name = cleanName(b.name);
+  if (!name) throw new ApiError(400, "name is required");
+  if (name === TOKEN_ACTOR) throw new ApiError(400, `"${TOKEN_ACTOR}" is reserved; pick another name`);
+  if (!passwordMatches(b.password)) { loginFailed(ip); throw new ApiError(401, "wrong password"); }
+  const { value, maxAge } = makeSession(name);
+  touch(name);
+  const res = json({ ok: true, name });
+  res.headers.set("set-cookie", sessionCookie(req, value, maxAge));
+  return res;
+});
+
+route("POST", "/api/logout", (req) => {
+  const res = json({ ok: true });
+  res.headers.set("set-cookie", sessionCookie(req, "", 0));
+  return res;
+});
+
+route("GET", "/api/me", () => json({ name: actor.getStore() ?? null, password_login: Boolean(config.password), online: online() }));
 
 // ---- paths (recent working directories + filesystem completion, for the UI's path picker)
 route("GET", "/api/paths", async (_r, _p, url) => {
@@ -549,21 +577,7 @@ function baseUrl(req: Request): string {
   return `${proto}://${host}`;
 }
 
-const PUBLIC_API = new Set(["/api", "/api/", "/api/docs"]);
-const tokenBuf = Buffer.from(config.authToken);
-const tokenMatches = (t: string | null | undefined) => {
-  if (!t) return false;
-  const b = Buffer.from(t);
-  return b.length === tokenBuf.length && timingSafeEqual(b, tokenBuf);
-};
-function authorized(req: Request, url: URL): boolean {
-  if (PUBLIC_API.has(url.pathname) && req.method === "GET") return true;
-  const h = req.headers.get("authorization") ?? "";
-  if (h.toLowerCase().startsWith("bearer ") && tokenMatches(h.slice(7).trim())) return true;
-  if (tokenMatches(req.headers.get("x-auth-token"))) return true;
-  if (tokenMatches(url.searchParams.get("token"))) return true;
-  return false;
-}
+const PUBLIC_API = new Set(["GET /api", "GET /api/", "GET /api/docs", "GET /api/auth", "POST /api/login", "POST /api/logout"]);
 
 /** On every response: no framing (clickjacking a console that kills processes), and no Referer, since links can carry ?token=. */
 function harden(res: Response): Response {
@@ -582,17 +596,56 @@ async function serveStatic(pathname: string): Promise<Response> {
   return new Response(file, { headers: { "cache-control": "no-cache" } });
 }
 
-const server = Bun.serve({
+/** The socket peer of each request, for login throttling. */
+const peers = new WeakMap<Request, string>();
+/** The client's address: the socket peer, or, behind a reverse proxy on this machine (Caddy), the X-Forwarded-For it set. */
+function clientIp(req: Request): string {
+  const peer = peers.get(req) ?? "";
+  const fwd = req.headers.get("x-forwarded-for");
+  if (fwd && /^(127\.|::1$|::ffff:127\.)/.test(peer)) return fwd.split(",").at(-1)!.trim();
+  return peer;
+}
+
+const server = Bun.serve<TtyData>({
   hostname: config.host,
   port: config.port,
-  async fetch(req) { return harden(await handle(req)); },
+  async fetch(req, srv) {
+    peers.set(req, srv.requestIP(req)?.address ?? "");
+    const tty = new URL(req.url).pathname.match(/^\/api\/runs\/(\d+)\/tty$/);
+    if (tty && req.headers.get("upgrade")?.toLowerCase() === "websocket") {
+      const r = upgradeTty(req, srv, Number(tty[1]));
+      return r ? harden(r) : undefined;
+    }
+    return harden(await handle(req));
+  },
+  websocket: ttySocket,
 });
+
+/** GET /api/runs/:id/tty (WebSocket): a live terminal on an interactive run (see src/tty.ts). Returns a Response only on failure. */
+function upgradeTty(req: Request, srv: Bun.Server<TtyData>, runId: number): Response | undefined {
+  const url = new URL(req.url);
+  const who = identify(req, url);
+  if (!who) return json({ error: "unauthorized" }, 401);
+  // Browsers send Origin on every WebSocket and don't apply CORS to it: refuse other sites' pages outright.
+  const origin = req.headers.get("origin");
+  if (origin) { try { if (new URL(origin).host !== req.headers.get("host")) return json({ error: "cross-origin terminal refused" }, 403); } catch { return json({ error: "bad origin" }, 403); } }
+  touch(who);
+  let data: TtyData;
+  try { data = ttyFor(runId, url, who); } catch (e: any) { return json({ error: e.message }, e instanceof ApiError ? e.status : 500); }
+  return srv.upgrade(req, { data }) ? undefined : json({ error: "websocket upgrade failed" }, 400);
+}
 
 async function handle(req: Request): Promise<Response> {
   const url = new URL(req.url);
   if (url.pathname === "/docs") return serveStatic("/docs.html");
   if (!url.pathname.startsWith("/api")) return serveStatic(url.pathname);
-  if (!authorized(req, url)) return json({ error: "unauthorized" }, 401);
+  const who = identify(req, url);
+  if (!who && !PUBLIC_API.has(`${req.method} ${url.pathname}`)) return json({ error: "unauthorized" }, 401);
+  if (who) touch(who);
+  return who ? actor.run(who, () => dispatch(req, url)) : dispatch(req, url);
+}
+
+async function dispatch(req: Request, url: URL): Promise<Response> {
   try {
     for (const r of routes) {
       if (r.method !== req.method) continue;
@@ -621,6 +674,7 @@ if (config.tokenGenerated) {
   console.log(`access token: ${config.tokenFile}`);
 }
 if (!["127.0.0.1", "::1", "localhost"].includes(config.host)) console.log(`note: HOST=${config.host} — reachable from other machines on this network (token required)`);
+if (config.password) console.log("password login: on (name + PASSWORD)");
 
 for (const sig of ["SIGINT", "SIGTERM"] as const) {
   process.on(sig, () => { console.log(`\n${sig} received, shutting down (managed processes keep running)`); server.stop(true); process.exit(0); });

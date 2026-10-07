@@ -24,7 +24,8 @@ async function api(method, path, body) {
     if (connection) { connection.textContent = "Offline · retrying"; connection.classList.remove("online"); }
     throw error;
   }
-  if (res.status === 401) {
+  if (res.status === 401 && path !== "/login") {
+    if (await passwordLogin()) return api(method, path, body);
     const t = prompt("Access token (AUTH_TOKEN in .env, or the one the server generated in data/auth-token):");
     if (t) { token = t; localStorage.setItem("ac_token", t); return api(method, path, body); }
     throw new Error("unauthorized");
@@ -34,6 +35,37 @@ async function api(method, path, body) {
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || `${res.status} ${res.statusText}`);
   return data;
+}
+/**
+ * With a team password on the server, a 401 opens the sign-in dialog (name + password → session cookie) instead of
+ * asking for the token. Every request that hits a 401 meanwhile waits on the same dialog.
+ */
+let loginWait = null;
+function passwordLogin() {
+  return (loginWait ??= (async () => {
+    const info = await fetch("/api/auth").then((r) => r.json()).catch(() => ({}));
+    if (!info.password_login) return false;
+    if (token) { token = ""; localStorage.removeItem("ac_token"); }
+    const dlg = $("#login-dialog"), form = $("#login-form"), err = $("#login-error");
+    form.elements.name.value = localStorage.getItem("ac_name") || "";
+    return new Promise((resolve) => {
+      form.onsubmit = async (e) => {
+        e.preventDefault();
+        const name = form.elements.name.value.trim();
+        const res = await fetch("/api/login", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name, password: form.elements.password.value }) });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) { err.textContent = data.error || "sign-in failed"; err.hidden = false; return; }
+        localStorage.setItem("ac_name", name);
+        form.elements.password.value = ""; err.hidden = true;
+        dlg.oncancel = null; dlg.close(); loginWait = null;
+        resolve(true);
+        loadMe();
+      };
+      dlg.oncancel = (e) => e.preventDefault();
+      if (!dlg.open) dlg.showModal();
+      (form.elements.name.value ? form.elements.password : form.elements.name).focus();
+    });
+  })());
 }
 const get = (p) => api("GET", p);
 const post = (p, b) => api("POST", p, b ?? {});
@@ -140,6 +172,7 @@ const typeByName = (n) => types.find((t) => t.name === n);
 $$("nav button").forEach((b) => b.addEventListener("click", () => switchTab(b.dataset.tab)));
 function switchTab(name, push = true) {
   if (name !== "runs" && selectedRun) closeRun(false);
+  if (name !== "console") { closeTerm(); syncFull(false); }
   activeTab = name;
   const pages = {
     console: ["Console", "Your live sessions, and a terminal to talk to them."],
@@ -161,6 +194,23 @@ function switchTab(name, push = true) {
   if (push && location.hash) history.replaceState(null, "", location.pathname);
   refresh();
 }
+
+// ---------------------------------------------------------------- people (signed-in name + who's online)
+const loadMe = guard(async () => {
+  const me = await get("/me");
+  const el = $("#people");
+  if (!me.password_login) { el.hidden = true; return; }
+  const others = me.online.map((p) => p.name).filter((n) => n !== me.name);
+  el.replaceChildren(
+    "you: ", h("b", {}, me.name || "?"),
+    others.length ? ` · here too: ${others.join(", ")}` : " · nobody else here",
+    me.name && me.name !== "api" ? h("button", { class: "small", onclick: guard(async () => { await post("/logout"); location.reload(); }) }, "Sign out") : "",
+  );
+  el.title = me.online.map((p) => `${p.name} · seen ${fmtRel(p.last_seen)}`).join("\n");
+  el.hidden = false;
+});
+/** " · by lucas" for a run someone started (blank for scheduled runs and older ones). */
+const byWho = (r) => (r.meta?.started_by ? ` · by ${r.meta.started_by}` : "");
 
 // ---------------------------------------------------------------- system info
 let systemInfo = null;
@@ -415,7 +465,7 @@ const loadRuns = guard(async () => {
   $("#runs-table tbody").replaceChildren(...runs.map((r) => h("tr", { class: `clickable ${selectedRun?.id === r.id ? "selected" : ""}`, tabindex: "0", "aria-label": `Open run ${r.id}, ${r.workflow_name || r.type_name}, ${r.status}`, onkeydown: (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openRun(r.id); } }, onclick: () => openRun(r.id) },
     h("td", { class: "mono" }, "#", r.id),
     h("td", { class: "full" }, r.workflow_name ? h("b", {}, r.workflow_name) : h("span", { class: "muted" }, "ad-hoc"), h("div", { class: "muted", style: "font-size:12px" }, `${r.type_name} · ${shortCwd(r.cwd)}`)),
-    h("td", { "data-l": "trigger" }, r.trigger),
+    h("td", { "data-l": "trigger" }, r.trigger, r.meta?.started_by ? h("div", { class: "by", style: "font-size:12px" }, r.meta.started_by) : ""),
     h("td", { class: "status" }, badge(r.status)),
     h("td", { "data-l": "started", title: new Date(r.started_at).toLocaleString() }, fmtRel(r.started_at)),
     h("td", { "data-l": "took" }, fmtDur(r.duration_ms / 1000)),
@@ -455,7 +505,7 @@ const refreshRunDetail = guard(async (full = false) => {
         h("dt", {}, "cwd"), h("dd", {}, r.cwd),
         h("dt", {}, "command"), h("dd", {}, quoteArgs([r.command, ...r.args])),
         r.prompt ? h("dt", {}, "prompt") : "", r.prompt ? h("dd", { style: "white-space:pre-wrap" }, r.prompt) : "",
-        h("dt", {}, "trigger"), h("dd", {}, r.trigger),
+        h("dt", {}, "trigger"), h("dd", {}, r.trigger, r.meta?.started_by ? ` by ${r.meta.started_by}` : ""),
         h("dt", {}, "pid"), h("dd", {}, r.pid ?? "–", r.meta?.orphan ? " (started by a previous console instance)" : ""),
         r.meta?.remote_url ? h("dt", {}, "remote") : "", r.meta?.remote_url ? h("dd", {}, h("a", { href: r.meta.remote_url, target: "_blank" }, r.meta.remote_url), h("span", { class: "muted" }, "  (same session in the Claude app)")) : "",
         r.meta?.tmux ? h("dt", {}, "terminal") : "", r.meta?.tmux ? h("dd", {}, `tmux attach -t ${r.meta.tmux}`, r.status === "running" ? h("span", { class: "muted" }, "  (live screen below)") : h("span", { class: "muted" }, "  (ended; screen saved in the log)")) : "",
@@ -597,7 +647,7 @@ function renderRail() {
       const s = sessOf(r);
       return h("button", { class: `rail-item ${consoleRun?.id === r.id ? "active" : ""}`, "data-run": r.id, "aria-current": consoleRun?.id === r.id ? "true" : "false", onclick: () => selectConsoleRun(r) },
         h("div", { class: "rail-title" }, h("span", { class: `dot ${s?.status || ""}`, title: s?.status || "" }), runLabel(r)),
-        h("div", { class: "rail-sub" }, `${r.type_name} · ${shortCwd(r.cwd)}`),
+        h("div", { class: "rail-sub" }, `${r.type_name} · ${shortCwd(r.cwd)}${byWho(r)}`),
         h("div", { class: "rail-sub dim rail-up" }, railUp(r)),
       );
     }),
@@ -683,6 +733,7 @@ function enableRemote(pid, s, inPane) {
 
 function renderPane() {
   const r = consoleRun;
+  if (!r || !termMode()) { closeTerm(); syncFull(false); }
   // Rebuild only when the run or its session changes: a rebuild would drop whatever is half-typed in the keys field,
   // and idle/working flips constantly. Everything volatile is patched in place below.
   const sig = r ? JSON.stringify([r.id, r.status, r.meta?.remote_url || "", sessOf(r)?.session_id || "", sessOf(r)?.web_url || ""]) : `empty:${consoleData.live.length}:${consoleData.adoptable.length}`;
@@ -695,7 +746,9 @@ function renderPane() {
   const dot = $("#pane-dot"); if (dot) { dot.className = `dot ${s?.status || ""}`; dot.title = s?.status || ""; }
   const label = $("#pane-label"); if (label && label.textContent !== runLabel(r)) label.textContent = runLabel(r);
   const up = $("#pane-up"); if (up) up.textContent = `up ${fmtDur((Date.now() - r.started_at) / 1000)}`;
-  pollScreenInto($("#console-screen"), r.id, $("#console-follow")?.checked !== false);
+  syncFull(termMode());
+  if (termMode()) openTerm(r.id);
+  else pollScreenInto($("#console-screen"), r.id, $("#console-follow")?.checked !== false);
 }
 
 function paneFor(r) {
@@ -705,7 +758,7 @@ function paneFor(r) {
       h("div", { class: "pane-id" },
         h("h2", {}, h("span", { id: "pane-dot", class: `dot ${s?.status || ""}`, title: s?.status || "" }), h("span", { id: "pane-label" }, runLabel(r))),
         h("div", { class: "pane-meta muted" },
-          `${r.type_name} · ${shortCwd(r.cwd)} · `, h("span", { id: "pane-up" }, `up ${fmtDur((Date.now() - r.started_at) / 1000)}`),
+          `${r.type_name} · ${shortCwd(r.cwd)}${byWho(r)} · `, h("span", { id: "pane-up" }, `up ${fmtDur((Date.now() - r.started_at) / 1000)}`),
           s?.model ? ` · ${s.model}` : "",
           s?.session_id ? h("code", { class: "mono", title: s.session_id }, shortId(s.session_id)) : "",
         ),
@@ -714,13 +767,90 @@ function paneFor(r) {
         s?.web_url ? h("a", { href: s.web_url, target: "_blank" }, h("button", { class: "small" }, "Open on web ↗")) : remoteControlBtn(r.pid, s, true),
         h("button", { class: "small", title: "the full run record: command, env, log, sessions", onclick: () => openRun(r.id) }, "Details"),
         h("button", { class: "small danger", onclick: () => confirmDo(`Stop "${runLabel(r)}" (run #${r.id})?`, async () => { await post(`/runs/${r.id}/kill`); toast("stopped", true); consoleRun = null; railSig = paneSig = ""; loadConsole(); }) }, "Stop"),
-        h("label", { class: "muted follow" }, h("input", { type: "checkbox", id: "console-follow", checked: true }), " follow"),
+        termMode() ? h("button", { class: "small", id: "full-btn", title: "hide the sidebar and session list, terminal edge to edge (Ctrl+Shift+F)", onclick: () => toggleFull() }, fullLabel()) : "",
+        h("button", { class: "small", title: termMode() ? "switch to the simple view: a polled screen and a text box (good on a phone or a flaky link)" : "switch to a real terminal in the browser", onclick: () => { setTermMode(!termMode()); paneSig = ""; renderPane(); } }, termMode() ? "Simple view" : "Terminal view"),
+        termMode() ? "" : h("label", { class: "muted follow" }, h("input", { type: "checkbox", id: "console-follow", checked: true }), " follow"),
       ),
     ),
-    h("pre", { id: "console-screen", class: "screen" }, "connecting to the terminal…"),
-    keysForm(r.id, () => pollScreenInto($("#console-screen"), r.id, true)),
+    ...(termMode()
+      ? [h("div", { id: "console-term", class: "term" }, h("span", { class: "term-status" }, "connecting…"))]
+      : [h("pre", { id: "console-screen", class: "screen" }, "connecting to the terminal…"), keysForm(r.id, () => pollScreenInto($("#console-screen"), r.id, true))]),
     h("div", { class: "pane-foot muted mono" }, `tmux attach -t ${r.meta?.tmux || "?"}`),
   ];
+}
+
+// ---------------------------------------------------------------- full screen (terminal only)
+const fullLabel = () => (document.body.classList.contains("term-full") ? "⤡ Exit full screen" : "⤢ Full screen");
+function toggleFull(on = !document.body.classList.contains("term-full")) {
+  document.body.classList.toggle("term-full", on);
+  try { localStorage.setItem("ac_term_full", on ? "1" : ""); } catch {}
+  const b = $("#full-btn"); if (b) b.textContent = fullLabel();
+  liveTerm?.term.focus();
+}
+// Full screen only makes sense with a terminal on screen: drop it when there isn't one, restore it when there is.
+function syncFull(hasTerm) {
+  let want = false; try { want = localStorage.getItem("ac_term_full") === "1"; } catch {}
+  document.body.classList.toggle("term-full", hasTerm && want);
+  const b = $("#full-btn"); if (b) b.textContent = fullLabel();
+}
+
+// ---------------------------------------------------------------- live terminal (xterm.js ⟷ websocket ⟷ tmux attach)
+/** Terminal view by default where it works well; the simple view on phones (no keys for Esc/Tab/arrows) or if xterm didn't load. */
+function termMode() {
+  if (!window.Terminal || !window.FitAddon) return false;
+  const saved = localStorage.getItem("ac_term_mode");
+  return saved ? saved === "terminal" : !matchMedia("(max-width: 700px)").matches;
+}
+function setTermMode(on) { localStorage.setItem("ac_term_mode", on ? "terminal" : "simple"); }
+
+let liveTerm = null; // { runId, el, term, fit, ws, ro, retry, closed }
+function closeTerm() {
+  if (!liveTerm) return;
+  const t = liveTerm; liveTerm = null;
+  t.closed = true; clearTimeout(t.retry); t.ro?.disconnect();
+  try { t.ws?.close(); } catch {}
+  t.term.dispose();
+}
+/** Attach the pane's #console-term to run `runId` (no-op if it already is). Reconnects while the run is live. */
+function openTerm(runId) {
+  const el = $("#console-term");
+  if (!el) return closeTerm();
+  if (liveTerm && liveTerm.runId === runId && liveTerm.el === el) return;
+  closeTerm();
+  const term = new Terminal({ cursorBlink: true, fontFamily: getComputedStyle(document.body).getPropertyValue("--mono") || "monospace", fontSize: 13, scrollback: 5000, macOptionClickForcesSelection: true, theme: { background: "#0d110e" } });
+  const fit = new FitAddon.FitAddon();
+  term.loadAddon(fit);
+  term.open(el);
+  const t = { runId, el, term, fit, ws: null, ro: null, retry: null, closed: false };
+  liveTerm = t;
+  const status = (msg) => { const s = $(".term-status", el); if (s) s.textContent = msg; };
+  const send = (obj) => { if (t.ws?.readyState === 1) t.ws.send(JSON.stringify(obj)); };
+  term.attachCustomKeyEventHandler((e) => {
+    if (e.type === "keydown" && e.ctrlKey && e.shiftKey && (e.key === "F" || e.key === "f")) { e.preventDefault(); toggleFull(); return false; }
+    return true;
+  });
+  term.onData((d) => send({ t: "i", d }));
+  term.onResize(({ cols, rows }) => send({ t: "r", cols, rows }));
+  t.ro = new ResizeObserver(() => { try { fit.fit(); } catch {} });
+  t.ro.observe(el);
+  const connect = () => {
+    if (t.closed) return;
+    try { fit.fit(); } catch {}
+    const q = new URLSearchParams({ cols: term.cols, rows: term.rows });
+    if (token) q.set("token", token);
+    const ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/api/runs/${runId}/tty?${q}`);
+    ws.binaryType = "arraybuffer";
+    t.ws = ws;
+    ws.onopen = () => { status(""); term.focus(); };
+    ws.onmessage = (e) => term.write(typeof e.data === "string" ? e.data : new Uint8Array(e.data));
+    ws.onclose = (e) => {
+      if (t.closed || t.ws !== ws) return;
+      if (e.reason === "session ended") { status("session ended"); loadConsole(); return; }
+      status("disconnected · reconnecting…");
+      t.retry = setTimeout(connect, 2000);
+    };
+  };
+  connect();
 }
 
 function emptyPane() {
@@ -745,10 +875,11 @@ function refresh() {
 }
 setInterval(refresh, 3000);
 setInterval(loadSystem, 30000);
+setInterval(() => !document.hidden && loadMe(), 10000);
 document.addEventListener("visibilitychange", () => !document.hidden && refresh());
 
 (async () => {
-  await Promise.all([loadSystem(), loadTypes(), loadWorkflows()]);
+  await Promise.all([loadSystem(), loadTypes(), loadWorkflows(), loadMe()]);
   const m = location.hash.match(/^#(\w+)(?:\/(\w+))?/);
   if (m && m[1] === "runs" && m[2]) openRun(Number(m[2]));
   else if (m && m[1] === "console" && /^\d+$/.test(m[2] || "")) { selectConsoleRunId(Number(m[2])); switchTab("console", false); }
