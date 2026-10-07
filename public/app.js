@@ -417,6 +417,64 @@ $("#start-submit").onclick = guard(async () => {
 });
 sf.addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) $("#start-submit").click(); });
 
+// ---------------------------------------------------------------- resume dialog
+// Paste a session id (or the whole `claude --resume <id>` / `codex resume <id>` line); the server finds its transcript,
+// which tells us the agent and the folder it ran in — claude only finds a session when started from that folder.
+const rdlg = $("#resume-dialog"), rf = $("#resume-form");
+let resumeLookup = 0, resumeCwdTouched = false, resumeAgentPicked = false, resumeTimer;
+function parseSessionInput(text) {
+  const s = text.trim();
+  const agent = /^codex\b/.test(s) ? "codex" : /^claude\b/.test(s) ? "claude" : "";
+  const uuid = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i.exec(s);
+  return { id: uuid ? uuid[0] : s.split(/\s+/).pop() || "", agent };
+}
+function openResumeDialog() {
+  rf.reset(); resumeCwdTouched = false; resumeAgentPicked = false;
+  $("#resume-found").textContent = ""; $("#resume-feedback").hidden = true;
+  rdlg.showModal();
+  rf.session_id.focus();
+}
+async function lookUpResume() {
+  const { id, agent: typed } = parseSessionInput(rf.session_id.value);
+  const agent = typed || (resumeAgentPicked ? rf.agent.value : "");
+  rf.agent.value = agent;
+  const seq = ++resumeLookup;
+  const found = $("#resume-found");
+  if (!id) { found.textContent = ""; return; }
+  found.textContent = "Looking it up…";
+  try {
+    const s = await get(`/sessions/${encodeURIComponent(id)}${agent ? `?agent=${agent}` : ""}`);
+    if (seq !== resumeLookup) return;
+    rf.agent.value = s.agent;
+    if (!resumeCwdTouched && s.cwd) rf.cwd.value = s.cwd;
+    const title = (s.title || s.name).replace(/\s+/g, " ").trim();
+    found.textContent = `Found: ${s.agent}${title ? ` · ${title.length > 80 ? title.slice(0, 80) + "…" : title}` : ""}${s.cwd ? ` · ${shortCwd(s.cwd)}` : ""}${s.status ? ` · open now (${s.status})` : ""}`;
+  } catch (e) {
+    if (seq === resumeLookup) found.textContent = e.message;
+  }
+}
+rf.session_id.addEventListener("input", () => { clearTimeout(resumeTimer); resumeTimer = setTimeout(lookUpResume, 250); });
+rf.agent.onchange = () => { resumeAgentPicked = Boolean(rf.agent.value); lookUpResume(); };
+rf.cwd.addEventListener("input", () => { resumeCwdTouched = true; });
+$("#resume-cancel").onclick = () => rdlg.close();
+let resuming = false;
+$("#resume-submit").onclick = async () => {
+  if (resuming || !rf.reportValidity()) return;
+  resuming = true;
+  const btn = $("#resume-submit"), fb = $("#resume-feedback");
+  btn.disabled = true; btn.textContent = "Resuming…"; fb.hidden = true;
+  try {
+    const { id } = parseSessionInput(rf.session_id.value);
+    const run = await post("/sessions/resume", { session_id: id, agent: rf.agent.value, cwd: rf.cwd.value.trim() });
+    toast(`resumed as run #${run.id}`, true);
+    rdlg.close();
+    selectConsoleRunId(run.id); switchTab("console"); loadConsole();
+  } catch (e) { fb.textContent = e.message; fb.hidden = false; }
+  finally { resuming = false; btn.disabled = false; btn.textContent = "Resume"; }
+};
+rf.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.isComposing && e.target.tagName === "INPUT" && e.target.name === "session_id") { e.preventDefault(); $("#resume-submit").click(); } });
+$("#resume-agent-btn").onclick = openResumeDialog;
+
 // ---------------------------------------------------------------- workflows
 const loadWorkflows = guard(async () => {
   workflows = await get("/workflows");
@@ -641,7 +699,10 @@ function renderRail() {
   $("#session-rail").replaceChildren(
     h("div", { class: "rail-head" },
       h("span", {}, live.length ? `${live.length} live session${live.length === 1 ? "" : "s"}` : "No live sessions"),
-      h("button", { class: "small primary", onclick: () => openStartDialog({ kind: "agent", interactive: true }) }, "+ New"),
+      h("span", { class: "row" },
+        h("button", { class: "small", title: "Reopen a claude or codex session from its id", onclick: openResumeDialog }, "Resume"),
+        h("button", { class: "small primary", onclick: () => openStartDialog({ kind: "agent", interactive: true }) }, "+ New"),
+      ),
     ),
     ...live.map((r) => {
       const s = sessOf(r);
@@ -924,7 +985,7 @@ function emptyPane() {
   return h("div", { class: "pane-empty" },
     h("h2", {}, "No live session"),
     h("p", { class: "muted" }, "An interactive run keeps a terminal open that you can type into from here — the agent also shows up in the Claude app."),
-    h("div", { class: "row" }, h("button", { class: "primary", onclick: () => openStartDialog({ kind: "agent", interactive: true }) }, "+ Start an agent")),
+    h("div", { class: "row" }, h("button", { class: "primary", onclick: () => openStartDialog({ kind: "agent", interactive: true }) }, "+ Start an agent"), h("button", { onclick: openResumeDialog }, "Resume by ID")),
     n ? h("p", { class: "muted" }, `${n} agent session${n === 1 ? "" : "s"} on this machine started outside the console, so there is no pane to type into. Take one over from the list to open one.`) : "",
   );
 }

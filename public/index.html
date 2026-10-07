@@ -42,6 +42,7 @@
   <section id="tab-agents" class="tab">
     <div class="toolbar">
       <button class="primary" id="start-agent-btn">+ Start an agent</button>
+      <button id="resume-agent-btn">Resume by ID</button>
       <span id="agent-count" class="muted"></span>
       <label class="muted right"><input type="checkbox" id="hide-children" checked> Hide child processes</label>
     </div>
@@ -157,6 +158,22 @@
     </div>
   </form>
 </dialog>
+<dialog id="resume-dialog" aria-labelledby="resume-title">
+  <form id="resume-form" class="grid" method="dialog">
+    <h3 class="wide" id="resume-title">Resume a session</h3>
+    <label class="wide">Session ID <input name="session_id" required autocomplete="off" spellcheck="false" placeholder="paste the id, or the whole claude --resume … / codex resume … command"></label>
+    <div id="resume-found" class="wide muted" aria-live="polite"></div>
+    <label>Agent <select name="agent"><option value="">Detect from the id</option><option>claude</option><option>codex</option></select></label>
+    <label>Working directory <span class="pp"><input name="cwd" placeholder="where the session ran" autocomplete="off" data-pathpicker></span></label>
+    <p class="wide muted">Reopens it here in a tmux session (claude with Remote Control on). If it is still open somewhere else, claude continues it as a copy under a new id.</p>
+    <div id="resume-feedback" class="wide form-error" role="alert" hidden></div>
+    <div class="wide row">
+      <button type="button" class="primary" id="resume-submit">Resume</button>
+      <button type="button" id="resume-cancel" style="margin-left:auto">Cancel</button>
+    </div>
+  </form>
+</dialog>
+
 <dialog id="login-dialog" class="login" aria-labelledby="login-title">
   <form id="login-form" class="grid" method="dialog">
     <h3 id="login-title" class="wide">Sign in</h3>

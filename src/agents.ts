@@ -92,7 +92,7 @@ export function claudeTranscriptPath(sessionId: string, cwd: string): string {
   return "";
 }
 
-type TranscriptMeta = { title: string; customTitle: string; aiTitle: string; bridgeSessionId: string; model: string; firstPrompt: string };
+type TranscriptMeta = { title: string; customTitle: string; aiTitle: string; bridgeSessionId: string; model: string; firstPrompt: string; cwd: string };
 const transcriptCache = new Map<string, { key: string; meta: TranscriptMeta }>();
 
 export function claudeTranscriptMeta(path: string): TranscriptMeta | null {
@@ -101,10 +101,11 @@ export function claudeTranscriptMeta(path: string): TranscriptMeta | null {
   const key = `${st.size}:${st.mtimeMs}`;
   const hit = transcriptCache.get(path);
   if (hit && hit.key === key) return hit.meta;
-  const meta: TranscriptMeta = { title: "", customTitle: "", aiTitle: "", bridgeSessionId: "", model: "", firstPrompt: "" };
+  const meta: TranscriptMeta = { title: "", customTitle: "", aiTitle: "", bridgeSessionId: "", model: "", firstPrompt: "", cwd: "" };
   // Titles and bridge ids are tiny lines; scan line by line without parsing every message.
   const text = readFileSync(path, "utf8");
   for (const line of text.split("\n")) {
+    if (!meta.cwd) { const m = /"cwd":("(?:[^"\\]|\\.)*")/.exec(line); if (m) try { meta.cwd = JSON.parse(m[1]); } catch {} }
     if (line.startsWith('{"type":"ai-title"')) { try { meta.aiTitle = JSON.parse(line).aiTitle ?? meta.aiTitle; } catch {} }
     else if (line.startsWith('{"type":"custom-title"')) { try { meta.customTitle = JSON.parse(line).customTitle ?? meta.customTitle; } catch {} }
     else if (line.startsWith('{"type":"bridge-session"')) { try { meta.bridgeSessionId = JSON.parse(line).bridgeSessionId ?? meta.bridgeSessionId; } catch {} }
@@ -200,6 +201,22 @@ export function describeSession(agent: string, sessionId: string, hint: { cwd?: 
     info.resume_cmd = `codex resume ${sessionId}`;
   }
   return info;
+}
+
+/**
+ * A session id pasted in by hand: which agent it belongs to and the folder it ran in (claude only finds a session
+ * from that folder), from the transcript on disk. `agent` narrows the search; null when nothing on disk matches.
+ */
+export function locateSession(sessionId: string, agent?: string): SessionInfo | null {
+  if (!agent || agent === "claude") {
+    const path = claudeTranscriptPath(sessionId, "");
+    if (path) return describeSession("claude", sessionId, { cwd: claudeTranscriptMeta(path)?.cwd ?? "", transcript_path: path });
+  }
+  if (!agent || agent === "codex") {
+    const path = codexRolloutPath(sessionId);
+    if (path) return describeSession("codex", sessionId, { transcript_path: path });
+  }
+  return null;
 }
 
 /** For the live process list: what we can tell about a running claude process without the console having started it. */

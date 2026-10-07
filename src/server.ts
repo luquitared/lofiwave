@@ -5,7 +5,7 @@ import { config } from "./config";
 import { db, now, hydrate, type ProcessTypeRow, type WorkflowRow, type RunRow, type SessionRow } from "./db";
 import { listOsProcesses, cwdOf, killTree, type OsProcess } from "./procs";
 import { ApiError, startRun, killRun, restartRun, getRun, getType, readLogFrom, isLive, buildCommand, screenOf, sendKeys, tmuxPath, recordSession, resumeSession, resumeAgentSession, enableRemoteControl } from "./runner";
-import { describeSession, sessionForPid, type SessionInfo } from "./agents";
+import { describeSession, sessionForPid, locateSession, type SessionInfo } from "./agents";
 import { startScheduler, refreshNextRun, runWorkflow, computeNext } from "./scheduler";
 import { validateCron } from "./cron";
 import { renderDocs, apiIndex } from "./docs";
@@ -114,6 +114,12 @@ function getSession(runId: number, sessionId: string): SessionRow {
   const s = db.query<SessionRow, [number, string]>("SELECT * FROM sessions WHERE run_id = ? AND session_id = ?").get(runId, sessionId);
   if (!s) throw new ApiError(404, `session ${sessionId} not found on run ${runId}`);
   return s;
+}
+/** A session id from a request: it ends up in a file path lookup and on a command line, so only id characters. */
+function sessionIdOf(v: unknown): string {
+  const id = str(v, "session_id", { required: true }).trim();
+  if (!/^[A-Za-z0-9_.-]+$/.test(id) || id.includes("..")) throw new ApiError(400, "session_id has unexpected characters");
+  return id;
 }
 
 function getWorkflow(id: number): WorkflowRow {
@@ -542,13 +548,26 @@ route("PUT", "/api/runs/:id/sessions/:sid", async (req, p) => {
 
 // Reopen a recorded session interactively (tmux, with the type's resume_args: claude gets --remote-control so it appears in the Claude app).
 route("POST", "/api/runs/:id/sessions/:sid/resume", async (_r, p) => json(runOut(await resumeSession(Number(p.id), p.sid)), 201));
-// Same, for a session the console did not start (e.g. a claude session seen on the Agents tab): {agent, session_id, cwd?}.
+// Same, for a session the console did not start (e.g. a claude session seen on the Agents tab, or an id pasted in):
+// {session_id, agent?, cwd?}. Without agent/cwd they come from the transcript on disk.
 route("POST", "/api/sessions/resume", async (req) => {
   const b = await body(req);
-  const agent = str(b.agent, "agent", { required: true });
-  const session_id = str(b.session_id, "session_id", { required: true }).trim();
-  if (!/^[A-Za-z0-9_.-]+$/.test(session_id)) throw new ApiError(400, "session_id has unexpected characters");
-  return json(runOut(await resumeAgentSession({ agent, sessionId: session_id, cwd: str(b.cwd, "cwd"), terminal: str(b.terminal, "terminal") })), 201);
+  const session_id = sessionIdOf(b.session_id);
+  let agent = str(b.agent, "agent"), cwd = str(b.cwd, "cwd");
+  const found = !agent || !cwd ? locateSession(session_id, agent || undefined) : null;
+  if (!agent) {
+    if (!found) throw new ApiError(404, `no claude or codex session ${session_id} on this machine`);
+    agent = found.agent;
+  }
+  cwd ||= found?.cwd ?? "";
+  return json(runOut(await resumeAgentSession({ agent, sessionId: session_id, cwd, terminal: str(b.terminal, "terminal") })), 201);
+});
+// What a pasted session id points to (agent, folder, title), before resuming it. ?agent= narrows the search.
+route("GET", "/api/sessions/:sid", (_r, p, url) => {
+  const sid = sessionIdOf(p.sid);
+  const found = locateSession(sid, url.searchParams.get("agent") || undefined);
+  if (!found) throw new ApiError(404, `no claude or codex session ${sid} on this machine`);
+  return json(found);
 });
 
 // The raw transcript (Claude Code writes JSONL under ~/.claude/projects/..., codex under ~/.codex/sessions/...). Only paths under the home dir are served.
