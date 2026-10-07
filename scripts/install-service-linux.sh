@@ -17,3 +17,8 @@ echo
 echo "Logs:   journalctl --user -u agent-console -f"
 echo "Stop:   systemctl --user stop agent-console"
 echo "Remove: systemctl --user disable --now agent-console"
+ROOT="$(cd "$HERE/.." && pwd)"
+if [ -f "$ROOT/data/auth-token" ]; then
+  PORT_="$(grep -E '^PORT=' "$ROOT/.env" 2>/dev/null | cut -d= -f2 || true)"
+  echo "Open:   http://127.0.0.1:${PORT_:-7770}/#token=$(cat "$ROOT/data/auth-token")"
+fi

@@ -1,10 +1,11 @@
 import { join, dirname, basename } from "node:path";
 import { readdirSync, existsSync } from "node:fs";
 import { hostname, homedir } from "node:os";
+import { timingSafeEqual } from "node:crypto";
 import { config } from "./config";
 import { db, now, hydrate, type ProcessTypeRow, type WorkflowRow, type RunRow, type SessionRow } from "./db";
 import { listOsProcesses, cwdOf, killTree, type OsProcess } from "./procs";
-import { ApiError, startRun, killRun, restartRun, getRun, getType, readLogFrom, isLive, buildCommand, screenOf, sendKeys, tmuxPath, recordSession, resumeSession, resumeAgentSession } from "./runner";
+import { ApiError, startRun, killRun, restartRun, getRun, getType, readLogFrom, isLive, buildCommand, screenOf, sendKeys, tmuxPath, recordSession, resumeSession, resumeAgentSession, enableRemoteControl } from "./runner";
 import { describeSession, sessionForPid, type SessionInfo } from "./agents";
 import { startScheduler, refreshNextRun, runWorkflow, computeNext } from "./scheduler";
 import { validateCron } from "./cron";
@@ -187,7 +188,7 @@ function route(method: string, path: string, handler: Handler) {
 
 route("GET", "/api", (req) => json(apiIndex(baseUrl(req))));
 route("GET", "/api/docs", (req) =>
-  new Response(renderDocs(baseUrl(req), Boolean(config.authToken)), { headers: { "content-type": "text/markdown; charset=utf-8", "access-control-allow-origin": "*" } }));
+  new Response(renderDocs(baseUrl(req), true), { headers: { "content-type": "text/markdown; charset=utf-8", "access-control-allow-origin": "*" } }));
 
 route("GET", "/api/health", () => json({ ok: true, uptime_ms: now() - startedAt }));
 
@@ -209,7 +210,7 @@ route("GET", "/api/system", async () => {
   }
   return json({
     hostname: hostname(), platform: process.platform, pid: process.pid, bun: Bun.version,
-    tmux: tmuxPath(), host: config.host, port: config.port, data_dir: config.dataDir, auth_required: Boolean(config.authToken),
+    tmux: tmuxPath(), host: config.host, port: config.port, data_dir: config.dataDir, auth_required: true,
     uptime_ms: now() - startedAt, addresses, tailscale, server_time: now(),
   });
 });
@@ -375,6 +376,15 @@ route("DELETE", "/api/processes/:pid", async (_r, p, url) => {
   return json({ ok: true, pid, signal: force ? "SIGKILL" : "SIGTERM" });
 });
 
+// Turn on Remote Control in a running claude session: typed into its tmux pane, or (replace: true) by reopening it here.
+route("POST", "/api/processes/:pid/remote-control", async (req, p) => {
+  const pid = Number(p.pid);
+  if (!Number.isInteger(pid) || pid <= 1) throw new ApiError(400, "invalid pid");
+  const b = await body(req);
+  const r = await enableRemoteControl(pid, { replace: bool(b.replace, false), terminal: str(b.terminal, "terminal") });
+  return json({ ...r, run: r.run ? runOut(r.run) : undefined }, r.run ? 201 : 200);
+});
+
 // ---- workflows
 function parseWorkflowBody(b: any, cur?: WorkflowRow) {
   const pick = <T,>(key: string, parse: (v: unknown) => T, def: T): T => (b[key] === undefined ? def : parse(b[key]));
@@ -502,7 +512,7 @@ route("PUT", "/api/runs/:id/sessions/:sid", async (req, p) => {
   return json(getSession(run.id, p.sid));
 });
 
-// Reopen a recorded session interactively (tmux; claude gets --remote-control so it also appears in the Claude app).
+// Reopen a recorded session interactively (tmux, with the type's resume_args: claude gets --remote-control so it appears in the Claude app).
 route("POST", "/api/runs/:id/sessions/:sid/resume", async (_r, p) => json(runOut(await resumeSession(Number(p.id), p.sid)), 201));
 // Same, for a session the console did not start (e.g. a claude session seen on the Agents tab): {agent, session_id, cwd?}.
 route("POST", "/api/sessions/resume", async (req) => {
@@ -540,14 +550,28 @@ function baseUrl(req: Request): string {
 }
 
 const PUBLIC_API = new Set(["/api", "/api/", "/api/docs"]);
+const tokenBuf = Buffer.from(config.authToken);
+const tokenMatches = (t: string | null | undefined) => {
+  if (!t) return false;
+  const b = Buffer.from(t);
+  return b.length === tokenBuf.length && timingSafeEqual(b, tokenBuf);
+};
 function authorized(req: Request, url: URL): boolean {
-  if (!config.authToken) return true;
   if (PUBLIC_API.has(url.pathname) && req.method === "GET") return true;
   const h = req.headers.get("authorization") ?? "";
-  if (h.toLowerCase().startsWith("bearer ") && h.slice(7).trim() === config.authToken) return true;
-  if (req.headers.get("x-auth-token") === config.authToken) return true;
-  if (url.searchParams.get("token") === config.authToken) return true;
+  if (h.toLowerCase().startsWith("bearer ") && tokenMatches(h.slice(7).trim())) return true;
+  if (tokenMatches(req.headers.get("x-auth-token"))) return true;
+  if (tokenMatches(url.searchParams.get("token"))) return true;
   return false;
+}
+
+/** On every response: no framing (clickjacking a console that kills processes), and no Referer, since links can carry ?token=. */
+function harden(res: Response): Response {
+  res.headers.set("x-frame-options", "DENY");
+  res.headers.set("content-security-policy", "frame-ancestors 'none'");
+  res.headers.set("referrer-policy", "no-referrer");
+  res.headers.set("x-content-type-options", "nosniff");
+  return res;
 }
 
 async function serveStatic(pathname: string): Promise<Response> {
@@ -561,31 +585,42 @@ async function serveStatic(pathname: string): Promise<Response> {
 const server = Bun.serve({
   hostname: config.host,
   port: config.port,
-  async fetch(req) {
-    const url = new URL(req.url);
-    if (url.pathname === "/docs") return serveStatic("/docs.html");
-    if (!url.pathname.startsWith("/api")) return serveStatic(url.pathname);
-    if (!authorized(req, url)) return json({ error: "unauthorized" }, 401);
-    try {
-      for (const r of routes) {
-        if (r.method !== req.method) continue;
-        const m = url.pathname.match(r.pattern);
-        if (!m) continue;
-        const params: Record<string, string> = {};
-        r.keys.forEach((k, i) => (params[k] = decodeURIComponent(m[i + 1])));
-        return await r.handler(req, params, url);
-      }
-      return json({ error: `no route for ${req.method} ${url.pathname}` }, 404);
-    } catch (e: any) {
-      if (e instanceof ApiError) return json({ error: e.message }, e.status);
-      console.error(`[api] ${req.method} ${url.pathname}`, e);
-      return json({ error: e?.message ?? "internal error" }, 500);
-    }
-  },
+  async fetch(req) { return harden(await handle(req)); },
 });
 
+async function handle(req: Request): Promise<Response> {
+  const url = new URL(req.url);
+  if (url.pathname === "/docs") return serveStatic("/docs.html");
+  if (!url.pathname.startsWith("/api")) return serveStatic(url.pathname);
+  if (!authorized(req, url)) return json({ error: "unauthorized" }, 401);
+  try {
+    for (const r of routes) {
+      if (r.method !== req.method) continue;
+      const m = url.pathname.match(r.pattern);
+      if (!m) continue;
+      const params: Record<string, string> = {};
+      r.keys.forEach((k, i) => (params[k] = decodeURIComponent(m[i + 1])));
+      return await r.handler(req, params, url);
+    }
+    return json({ error: `no route for ${req.method} ${url.pathname}` }, 404);
+  } catch (e: any) {
+    if (e instanceof ApiError) return json({ error: e.message }, e.status);
+    console.error(`[api] ${req.method} ${url.pathname}`, e);
+    return json({ error: e?.message ?? "internal error" }, 500);
+  }
+}
+
 startScheduler();
-console.log(`agent-console listening on http://${server.hostname}:${server.port}  (data: ${config.dataDir}${config.authToken ? ", auth token required" : ""})`);
+console.log(`agent-console listening on http://${server.hostname}:${server.port}  (data: ${config.dataDir})`);
+if (config.tokenGenerated) {
+  // First start: hand the person a link that logs the browser in (the UI keeps the token and drops it from the URL).
+  // Only this once, since service logs may be readable by others; later starts just say where the token is.
+  const host = ["0.0.0.0", "::"].includes(config.host) ? "127.0.0.1" : config.host;
+  console.log(`generated an access token (kept in ${config.tokenFile}); open:\n  http://${host}:${config.port}/#token=${config.authToken}`);
+} else if (config.tokenFile) {
+  console.log(`access token: ${config.tokenFile}`);
+}
+if (!["127.0.0.1", "::1", "localhost"].includes(config.host)) console.log(`note: HOST=${config.host} — reachable from other machines on this network (token required)`);
 
 for (const sig of ["SIGINT", "SIGTERM"] as const) {
   process.on(sig, () => { console.log(`\n${sig} received, shutting down (managed processes keep running)`); server.stop(true); process.exit(0); });

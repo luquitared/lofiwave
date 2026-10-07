@@ -7,7 +7,7 @@ import { existsSync, statSync, openSync, readSync, closeSync, appendFileSync } f
 import { db, now, hydrate, type ProcessTypeRow, type RunRow, type WorkflowRow } from "./db";
 import { config, logDir } from "./config";
 import { killTree, pidAlive } from "./procs";
-import { discoverCodexSession, codexRolloutPath } from "./agents";
+import { discoverCodexSession, codexRolloutPath, claudeRegistry, claudeWebUrl, claudeTranscriptPath } from "./agents";
 import { openTerminalForTmux } from "./terminal";
 
 export class ApiError extends Error {
@@ -364,6 +364,65 @@ export async function resumeAgentSession(o: { agent: string; sessionId: string; 
   return getRun(run.id);
 }
 type RawRun = RunRow;
+
+/**
+ * Turn Remote Control on for a claude session that is already running, so it shows up in the Claude app.
+ *
+ * - In a tmux pane (an interactive run of ours, or any claude whose registry entry names a pane): type `/remote-control`
+ *   into it. Whatever was half-typed is cleared first with Ctrl+U, which claude keeps for Ctrl+Y.
+ * - Anywhere else (a plain terminal window, a headless run) there is nothing to type into. With `replace`, stop that
+ *   process and reopen the same conversation here in tmux with the type's resume_args (which carry --remote-control).
+ */
+export async function enableRemoteControl(pid: number, o: { replace?: boolean; terminal?: string } = {}): Promise<{ status: "already" | "enabled" | "pending" | "replaced"; web_url: string; run?: RunRow }> {
+  const entry = claudeRegistry(true).byPid.get(pid);
+  if (!entry) throw new ApiError(404, `pid ${pid} is not a running claude session (nothing in ~/.claude/sessions for it)`);
+  if (entry.bridgeSessionId) return { status: "already", web_url: claudeWebUrl(entry.bridgeSessionId) };
+  const run = db.query<RunRow, [number]>("SELECT * FROM runs WHERE pid = ? AND status = 'running'").get(pid);
+  const meta = run ? JSON.parse(run.meta || "{}") : {};
+
+  // The pane to type into: our own run's tmux session, else the pane claude says it is in — if that pane really is this pid.
+  let target: string = meta.tmux ?? "";
+  if (!target && entry.tmux) {
+    const pane = entry.tmux.split(".").pop() ?? "";
+    const q = pane.startsWith("%") ? await tmux("display-message", "-p", "-t", pane, "#{pane_pid}") : null;
+    if (q?.code === 0 && Number(q.out) === pid) target = pane;
+  }
+
+  if (target) {
+    if (entry.status === "busy") throw new ApiError(409, "the session is working right now; enable Remote Control once it is idle");
+    for (const keys of [["C-u"], ["-l", "--", "/remote-control"]]) {
+      const r = await tmux("send-keys", "-t", target, ...keys);
+      if (r.code !== 0) throw new ApiError(500, `tmux send-keys failed: ${r.err}`);
+    }
+    await Bun.sleep(300);                                 // let the slash-command menu catch up before Enter picks it
+    await tmux("send-keys", "-t", target, "Enter");
+    for (let i = 0; i < 30; i++) {
+      await Bun.sleep(500);
+      const bridge = claudeRegistry(true).byPid.get(pid)?.bridgeSessionId;
+      if (bridge) {
+        const web_url = claudeWebUrl(bridge);
+        if (run) { meta.remote_url = web_url; db.prepare("UPDATE runs SET meta = ? WHERE id = ?").run(JSON.stringify(meta), run.id); }
+        return { status: "enabled", web_url };
+      }
+    }
+    return { status: "pending", web_url: "" };
+  }
+
+  if (!o.replace) throw new ApiError(409, `pid ${pid} is not in a tmux pane the console can type into. Pass replace: true to stop it and reopen the conversation here with Remote Control.`);
+  if (run) await killRun(run.id, false);
+  else await killTree(pid, false);
+  for (let i = 0; i < 50 && pidAlive(pid); i++) await Bun.sleep(200);
+  if (pidAlive(pid)) throw new ApiError(500, `pid ${pid} did not exit after SIGTERM; not reopening the session alongside it`);
+  const own = run ? getType(run.type_name) : null;
+  const typeName = own && basename(own.command) === "claude" ? own.name : "claude";
+  const env = run ? JSON.parse(run.env || "{}") : {};
+  const cwd = entry.cwd || run?.cwd || "";
+  // A session nobody has typed into yet has no transcript, and `claude --resume` refuses it: start a fresh one there instead.
+  const resumed = claudeTranscriptPath(entry.sessionId, cwd)
+    ? await resumeAgentSession({ agent: "claude", sessionId: entry.sessionId, cwd, terminal: o.terminal, typeName, env })
+    : await startRun({ typeName, cwd: existsSync(cwd) ? cwd : getType(typeName).default_cwd || process.env.HOME || "/", env, interactive: true, terminal: o.terminal, trigger: "manual" });
+  return { status: "replaced", web_url: "", run: resumed };
+}
 
 export function readTail(path: string | null, bytes: number): string {
   if (!path || !existsSync(path)) return "";

@@ -158,7 +158,7 @@ export function hydrate<T extends Record<string, any>>(row: T): T {
 const BUILTIN_TYPES = [
   {
     name: "claude",
-    description: "Claude Code (headless). Prompt is passed with -p. Add e.g. --permission-mode acceptEdits or --dangerously-skip-permissions via extra args.",
+    description: "Claude Code. Prompt is passed with -p (headless) or as the first message (interactive); interactive sessions get Remote Control. Permission prompts are on: add e.g. --permission-mode acceptEdits (or --dangerously-skip-permissions) to its args to let it run unattended.",
     command: "claude",
     args: ["-p", "{prompt}"],
     interactive_args: ["{prompt}", "--remote-control"],
