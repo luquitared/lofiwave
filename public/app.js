@@ -803,6 +803,17 @@ function termMode() {
 }
 function setTermMode(on) { localStorage.setItem("ac_term_mode", on ? "terminal" : "simple"); }
 
+/**
+ * A mouse report for pointer movement with no button held. tmux treats any input as activity and sizes the shared
+ * window to the most active viewer, so passing these on would let whoever merely hovers over their tab take it.
+ * SGR form: ESC [ < b ; x ; y M, X10 form: ESC [ M b x y; motion = +32, no button = 3.
+ */
+function isBareMotion(d) {
+  const sgr = d.match(/^\x1b\[<(\d+);\d+;\d+[Mm]$/);
+  if (sgr) return (Number(sgr[1]) & 35) === 35;
+  return d.length === 6 && d.startsWith("\x1b[M") && ((d.charCodeAt(3) - 32) & 35) === 35;
+}
+
 let liveTerm = null; // { runId, el, term, fit, ws, ro, retry, closed }
 function closeTerm() {
   if (!liveTerm) return;
@@ -829,7 +840,7 @@ function openTerm(runId) {
     if (e.type === "keydown" && e.ctrlKey && e.shiftKey && (e.key === "F" || e.key === "f")) { e.preventDefault(); toggleFull(); return false; }
     return true;
   });
-  term.onData((d) => send({ t: "i", d }));
+  term.onData((d) => { if (!isBareMotion(d)) send({ t: "i", d }); });
   term.onResize(({ cols, rows }) => send({ t: "r", cols, rows }));
   t.ro = new ResizeObserver(() => { try { fit.fit(); } catch {} });
   t.ro.observe(el);
@@ -844,14 +855,23 @@ function openTerm(runId) {
     ws.onopen = () => { status(""); term.focus(); };
     ws.onmessage = (e) => term.write(typeof e.data === "string" ? e.data : new Uint8Array(e.data));
     ws.onclose = (e) => {
-      if (t.closed || t.ws !== ws) return;
+      if (t.closed || t.ws !== ws || document.hidden) return;
       if (e.reason === "session ended") { status("session ended"); loadConsole(); return; }
       status("disconnected · reconnecting…");
       t.retry = setTimeout(connect, 2000);
     };
   };
+  t.connect = connect;
   connect();
 }
+// A background tab drops its terminal (it would otherwise keep a tmux client competing for the window size) and
+// reattaches when it comes back.
+document.addEventListener("visibilitychange", () => {
+  const t = liveTerm;
+  if (!t) return;
+  if (document.hidden) { clearTimeout(t.retry); const ws = t.ws; t.ws = null; try { ws?.close(); } catch {} }
+  else if (!t.ws || t.ws.readyState > 1) t.connect();
+});
 
 function emptyPane() {
   const n = consoleData.adoptable.length;

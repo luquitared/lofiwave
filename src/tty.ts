@@ -1,7 +1,9 @@
 /**
  * A real terminal for an interactive run: each WebSocket gets its own `tmux attach` on a pty (Bun's built-in
  * `terminal` spawn option), raw bytes both ways. Every viewer is a separate tmux client on the same session, so
- * several people can watch and type at once; the window follows whoever typed last (tmux `window-size latest`).
+ * several people can watch and type at once. The window follows the viewer with the latest input (tmux
+ * `window-size latest`); the browser keeps that meaningful by not sending bare mouse motion (hovering over a tab
+ * must not steal the size) and by reporting focus (focus-events), so clicking into a terminal claims it.
  *
  * Wire protocol: server → client binary frames are terminal output. Client → server text frames are JSON:
  * {"t":"i","d":"<input>"} for keystrokes/paste, {"t":"r","cols":N,"rows":N} for a resize.
@@ -39,6 +41,8 @@ export const ttySocket = {
     // The simple (polling) view resizes the window by hand, which pins it to "manual"; give sizing back to tmux.
     await Bun.spawn(["tmux", "set-option", "-t", d.session, "window-size", "latest"], { stdout: "ignore", stderr: "ignore" }).exited;
     await Bun.spawn(["tmux", "set-option", "-t", d.session, "mouse", "on"], { stdout: "ignore", stderr: "ignore" }).exited;
+    // Ask clients for focus in/out reports: focusing a viewer then counts as its activity.
+    await Bun.spawn(["tmux", "set-option", "-s", "focus-events", "on"], { stdout: "ignore", stderr: "ignore" }).exited;
     // Viewers bigger than the window (someone else typed last, so the window is their size) see tmux's filler there:
     // blank, rather than the default dot pattern.
     await Bun.spawn(["tmux", "set-option", "-w", "-t", d.session, "fill-character", " "], { stdout: "ignore", stderr: "ignore" }).exited;
