@@ -289,6 +289,19 @@ export async function screenOf(run: RunRow, lines = 200, cols = 0): Promise<{ te
   return { text: cap.out.replace(/\n{3,}/g, "\n\n").replace(/\s+$/, ""), alive: run.status === "running", cols: width };
 }
 
+/**
+ * The pane's scrollback plus screen with colors (escape sequences kept, wrapped lines joined), for a viewer's
+ * private scrolled-back view. Read-only: unlike scrolling inside tmux (copy-mode, shared by every viewer of the
+ * pane), this moves nobody else's screen.
+ */
+export async function historyOf(run: RunRow, lines = 5000): Promise<{ text: string }> {
+  const meta = JSON.parse(run.meta || "{}");
+  if (!meta.tmux) throw new ApiError(400, `run ${run.id} is not interactive`);
+  const cap = await tmux("capture-pane", "-p", "-e", "-J", "-t", meta.tmux, "-S", String(-lines));
+  if (cap.code !== 0) throw new ApiError(409, `run ${run.id} has no terminal`);
+  return { text: cap.out.replace(/(\n(\x1b\[[0-9;]*m|\s)*)+$/, "") };
+}
+
 /** Type text and/or named keys (tmux names: Up, Down, Escape, C-c, Tab ...) into an interactive run's terminal, then optionally Enter. */
 export async function sendKeys(run: RunRow, text: string, keys: string[], enter: boolean): Promise<void> {
   const meta = JSON.parse(run.meta || "{}");

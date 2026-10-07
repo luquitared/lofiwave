@@ -4,7 +4,7 @@ import { hostname, homedir } from "node:os";
 import { config } from "./config";
 import { db, now, hydrate, type ProcessTypeRow, type WorkflowRow, type RunRow, type SessionRow } from "./db";
 import { listOsProcesses, cwdOf, killTree, type OsProcess } from "./procs";
-import { ApiError, startRun, killRun, restartRun, getRun, getType, readLogFrom, isLive, buildCommand, screenOf, sendKeys, tmuxPath, recordSession, resumeSession, resumeAgentSession, enableRemoteControl } from "./runner";
+import { ApiError, startRun, killRun, restartRun, getRun, getType, readLogFrom, isLive, buildCommand, screenOf, historyOf, sendKeys, tmuxPath, recordSession, resumeSession, resumeAgentSession, enableRemoteControl } from "./runner";
 import { describeSession, sessionForPid, locateSession, type SessionInfo } from "./agents";
 import { startScheduler, refreshNextRun, runWorkflow, computeNext } from "./scheduler";
 import { validateCron } from "./cron";
@@ -518,6 +518,7 @@ route("POST", "/api/runs/:id/restart", async (_r, p) => json(runOut(await restar
 
 // ---- interactive runs (tmux): live screen + typing into it
 route("GET", "/api/runs/:id/screen", async (_r, p, url) => json(await screenOf(getRun(Number(p.id)), int(url.searchParams.get("lines"), "lines", 200) || 200, int(url.searchParams.get("cols"), "cols", 0))));
+route("GET", "/api/runs/:id/history", async (_r, p, url) => json(await historyOf(getRun(Number(p.id)), int(url.searchParams.get("lines"), "lines", 5000) || 5000)));
 route("POST", "/api/runs/:id/keys", async (req, p) => {
   const b = await body(req);
   await sendKeys(getRun(Number(p.id)), str(b.text, "text"), strArray(b.keys, "keys"), bool(b.enter, true));

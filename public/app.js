@@ -847,7 +847,7 @@ function paneFor(r) {
 // never sees the fn key, so the Terminal.app habit doesn't work here.
 const isMac = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
 function copyHint() {
-  return `To copy: click "Select text", drag over what you want, let go — it's on your clipboard. Click "Done selecting" to give the mouse back to tmux (scrolling, clicking). Shortcut: ${isMac ? "⌥ Option" : "Shift"}-drag does the same without the button.`;
+  return `To copy: click "Select text", drag over what you want, let go — it's on your clipboard. Click "Done selecting" to give the mouse back to tmux. Scrolling up shows the history to you only; scroll back down or press Esc to return to the live screen. Shortcut: ${isMac ? "⌥ Option" : "Shift"}-drag does the same without the button.`;
 }
 
 // Select mode: xterm stops reporting the mouse to tmux, so a plain drag is a normal text selection. We switch
@@ -905,10 +905,73 @@ function isBareMotion(d) {
   return d.length === 6 && d.startsWith("\x1b[M") && ((d.charCodeAt(3) - 32) & 35) === 35;
 }
 
-let liveTerm = null; // { runId, el, term, fit, ws, ro, retry, closed }
+const termOptions = (extra) => ({ fontFamily: getComputedStyle(document.body).getPropertyValue("--mono") || "monospace", fontSize: 13, macOptionClickForcesSelection: true, altClickMovesCursor: false, theme: { background: "#0d110e" }, ...extra });
+
+// ---------------------------------------------------------------- private scrollback
+// Scrolling inside tmux (copy-mode) belongs to the pane, so one viewer scrolling moved everyone's screen. Instead the
+// wheel never reaches tmux: scrolling up opens a read-only snapshot of the pane's history over the live terminal, in
+// this browser only. Scrolling past the bottom, Esc or clicking the bar returns to the live view; typing returns too,
+// and the keys go to the session.
+async function openHistory(t, lines) {
+  if (t.hist) return;
+  t.histLines = (t.histLoading ? t.histLines : 0) + lines; // keep counting while the snapshot loads
+  if (t.histLoading) return;
+  t.histLoading = true;
+  let text;
+  try { ({ text } = await api("GET", `/runs/${t.runId}/history`)); }
+  catch (e) { toast(`couldn't load the history: ${e.message}`); return; }
+  finally { t.histLoading = false; }
+  if (t.closed || liveTerm !== t || t.hist) return;
+  const body = h("div", { class: "term-history-body" });
+  const box = h("div", { class: "term-history" },
+    h("div", { class: "term-history-bar", title: "back to the live screen", onclick: () => closeHistory(t) }, "Scrolled back · only you see this · snapshot, the session keeps running · scroll down or Esc to return"),
+    body);
+  t.el.append(box);
+  const term = new Terminal(termOptions({ scrollback: 10000, cursorBlink: false, cursorInactiveStyle: "none" }));
+  const fit = new FitAddon.FitAddon();
+  term.loadAddon(fit);
+  term.open(body);
+  try { fit.fit(); } catch {}
+  t.hist = { box, term, fit };
+  term.attachCustomKeyEventHandler((e) => {
+    if (e.type !== "keydown") return true;
+    if (e.key === "Escape") { e.preventDefault(); closeHistory(t); return false; }
+    if (e.ctrlKey && e.shiftKey && (e.key === "F" || e.key === "f")) { e.preventDefault(); toggleFull(); return false; }
+    return true;
+  });
+  term.onData((d) => { closeHistory(t); if (t.ws?.readyState === 1) t.ws.send(JSON.stringify({ t: "i", d })); });
+  term.write("\x1b[?25l" + text.replace(/\n/g, "\r\n"), () => { term.scrollToBottom(); term.scrollLines(-t.histLines); });
+  term.focus();
+}
+function closeHistory(t) {
+  if (!t.hist) return;
+  const { box, term } = t.hist; t.hist = null;
+  term.dispose(); box.remove();
+  if (!t.closed) t.term.focus();
+}
+/**
+ * Capture-phase wheel handler on the terminal box. The wheel never reaches tmux: on the live terminal, scrolling up
+ * opens the private history; in the history we scroll by whole lines ourselves (xterm's own wheel handling crawls
+ * on pixel deltas), and scrolling down past the bottom closes it.
+ */
+function onTermWheel(t, e) {
+  e.preventDefault(); e.stopPropagation();
+  const px = t.term.element ? t.term.element.clientHeight / t.term.rows : 16; // one line, in pixels
+  t.wheelAcc = (t.wheelAcc || 0) + (e.deltaMode === 1 ? e.deltaY : e.deltaMode === 2 ? e.deltaY * t.term.rows : e.deltaY / px);
+  const lines = Math.trunc(t.wheelAcc);
+  if (!lines) return;
+  t.wheelAcc -= lines;
+  if (!t.hist) { if (lines < 0) openHistory(t, -lines); return; }
+  const b = t.hist.term.buffer.active;
+  if (lines > 0 && b.viewportY >= b.baseY) closeHistory(t);
+  else t.hist.term.scrollLines(lines);
+}
+
+let liveTerm = null; // { runId, el, term, fit, ws, ro, retry, closed, hist }
 function closeTerm() {
   if (!liveTerm) return;
   const t = liveTerm; liveTerm = null;
+  closeHistory(t);
   t.closed = true; clearTimeout(t.retry); t.ro?.disconnect();
   try { t.ws?.close(); } catch {}
   t.term.dispose();
@@ -919,7 +982,7 @@ function openTerm(runId) {
   if (!el) return closeTerm();
   if (liveTerm && liveTerm.runId === runId && liveTerm.el === el) return;
   closeTerm();
-  const term = new Terminal({ cursorBlink: true, fontFamily: getComputedStyle(document.body).getPropertyValue("--mono") || "monospace", fontSize: 13, scrollback: 5000, macOptionClickForcesSelection: true, altClickMovesCursor: false, theme: { background: "#0d110e" } });
+  const term = new Terminal(termOptions({ cursorBlink: true, scrollback: 5000 }));
   const fit = new FitAddon.FitAddon();
   term.loadAddon(fit);
   term.open(el);
@@ -943,13 +1006,15 @@ function openTerm(runId) {
   term.parser.registerCsiHandler({ prefix: "?", final: "h" }, trackModes(true));
   term.parser.registerCsiHandler({ prefix: "?", final: "l" }, trackModes(false));
   if (selectMode) setMouseTracking(term, false);
-  // Copy on select: the forced (Option/Shift) selection goes straight to the clipboard on mouse-up.
+  el.addEventListener("wheel", (e) => onTermWheel(t, e), { capture: true, passive: false });
+  // Copy on select: the forced (Option/Shift) selection, or one in the history view, goes to the clipboard on mouse-up.
   el.addEventListener("mouseup", () => {
-    const sel = term.hasSelection() && term.getSelection();
+    const from = t.hist?.term ?? term;
+    const sel = from.hasSelection() && from.getSelection();
     if (sel) navigator.clipboard?.writeText(sel).then(() => toast(`copied ${sel.length} chars`, true), () => {});
   });
   term.onResize(({ cols, rows }) => send({ t: "r", cols, rows }));
-  t.ro = new ResizeObserver(() => { try { fit.fit(); } catch {} });
+  t.ro = new ResizeObserver(() => { try { fit.fit(); t.hist?.fit.fit(); } catch {} });
   t.ro.observe(el);
   const connect = () => {
     if (t.closed) return;

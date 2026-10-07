@@ -332,6 +332,10 @@ dialog.login { width:min(420px, calc(100vw - 32px)); }
 .pane .term .xterm { height:100%; }
 .pane .term-status { position:absolute; top:8px; right:12px; z-index:5; font-size:11px; color:var(--muted); background:#0d110ecc; padding:2px 8px; border-radius:6px; }
 .pane .term-status:empty { display:none; }
+.pane .term-history { position:absolute; inset:0; z-index:4; display:flex; flex-direction:column; gap:4px; padding:8px; background:#0d110e; }
+.pane .term-history-bar { flex:none; align-self:flex-start; font-size:11px; color:var(--muted); background:#1b231d; border:1px solid var(--line); padding:2px 8px; border-radius:6px; cursor:pointer; }
+.pane .term-history-body { flex:1; min-height:0; }
+.pane .term-history-body .xterm { height:100%; }
 
 /* full-screen terminal: just the session, edge to edge */
 body.term-full .sidebar, body.term-full .page-top, body.term-full .page-heading, body.term-full .rail, body.term-full .pane-foot { display:none; }
