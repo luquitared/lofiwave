@@ -81,7 +81,7 @@ export function apiIndex(base: string) {
       system: [`GET ${api}/health`, `GET ${api}/system`, `GET ${api}/paths?q=`],
       process_types: [`GET ${api}/process-types`, `POST ${api}/process-types`, `GET|PUT|DELETE ${api}/process-types/:name`],
       console: [`GET ${api}/console`],
-      processes: [`GET ${api}/processes?type=&kind=`, `POST ${api}/processes`, `POST ${api}/processes/preview`, `DELETE ${api}/processes/:pid?force=1`],
+      processes: [`GET ${api}/processes?type=&kind=`, `POST ${api}/processes`, `POST ${api}/processes/preview`, `DELETE ${api}/processes/:pid?force=1`, `POST ${api}/processes/:pid/remote-control {replace?}`],
       workflows: [`GET|POST ${api}/workflows`, `GET|PUT|DELETE ${api}/workflows/:id`, `POST ${api}/workflows/:id/run`],
       runs: [`GET ${api}/runs?workflow_id=&status=&type=&limit=&offset=`, `GET|DELETE ${api}/runs/:id`, `GET ${api}/runs/:id/log?offset=|raw=1`, `POST ${api}/runs/:id/kill?force=1`, `POST ${api}/runs/:id/restart`],
       interactive: [`POST ${api}/processes {interactive: true}`, `GET ${api}/runs/:id/screen?lines=200`, `POST ${api}/runs/:id/keys {text, keys, enter}`],

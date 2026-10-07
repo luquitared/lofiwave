@@ -1,75 +1,96 @@
 # Agent Console
 
-A small local web app + REST API for managing coding-agent processes on a machine:
+A small web console for the coding agents running on your machine: Claude Code, Codex, or any command you describe.
 
-- **See** running Claude Code and Codex processes (and any custom process type you define), including ones you started from a terminal.
-- **Stop / force-kill / restart** them, or **start new ones** from a chosen folder with a prompt.
-- **Schedule workflows** (cron) that launch an agent in a specific folder, and keep a **history of runs** with status, exit code, duration and full logs.
-- Everything is stored in **SQLite** (`data/agent-console.sqlite`) with per-run log files in `data/logs/`.
-- Runs on **Bun** (Linux primary; macOS/Windows best-effort), no other runtime dependencies.
-- Designed to run as a boot-time service and be reached from other devices over **Tailscale**. The UI is responsive: on a phone the tabs move to a bottom bar, tables become cards, a run opens full-screen, and an interactive run's terminal is resized to the phone's width so the agent's TUI reflows.
+- **See** every agent process on the machine, including ones you started in a terminal: its session name, status (working / idle), model, and its claude.ai link.
+- **Start, stop and restart** agents in a chosen folder, headless (`claude -p`) or **interactive**: the real TUI in a tmux session you can watch and type into from the browser, and with Claude Code's Remote Control on, in the Claude app too.
+- **Turn on Remote Control** for a Claude Code session that is already running.
+- **Schedule workflows** (cron) that launch an agent in a folder, with a **history of runs**: status, exit code, duration, full logs.
+- A REST API for all of it, documented at `/api/docs`, so other agents can drive it too.
 
-```
-~/agent-console
-├── src/            server.ts (HTTP + API), db.ts, runner.ts, scheduler.ts, cron.ts, procs.ts
-├── public/         the single-page UI
-├── scripts/        start.sh, systemd unit + installer, tailscale installer, macOS plist
-├── data/           sqlite db + logs (created at first start, git-ignored)
-└── README.md
-```
+It runs on [Bun](https://bun.sh) with SQLite and no other dependencies. Linux and macOS are the main targets; Windows is best-effort (no interactive runs).
 
-## Quick start
+## Requirements
+
+- [Bun](https://bun.sh) 1.1+
+- [tmux](https://github.com/tmux/tmux), for interactive runs (`brew install tmux` / `apt install tmux`)
+- The agents you want to drive, on `PATH`: [Claude Code](https://docs.claude.com/en/docs/claude-code) (`claude`), [Codex](https://github.com/openai/codex) (`codex`), …
+
+## Install
 
 ```bash
-cd ~/agent-console
-bun run src/server.ts            # or: bun start   /   bun dev (auto-reload)
-# → http://localhost:7770
+git clone https://github.com/synjuku/agent-console.git
+cd agent-console
+bun start
 ```
 
-Configuration is by environment variable (put them in `~/agent-console/.env` when using the service; `scripts/start.sh` loads it):
+On first start it generates an access token and prints a link that logs your browser in:
+
+```
+agent-console listening on http://127.0.0.1:7770
+generated an access token (kept in …/agent-console/data/auth-token); open:
+  http://127.0.0.1:7770/#token=…
+```
+
+Lost the link? The token is in `data/auth-token`; the UI asks for it when it needs it.
+
+### Run it as a service
+
+```bash
+scripts/install-service-macos.sh    # launchd agent: starts at login, logs to data/server.log
+scripts/install-service-linux.sh    # systemd user service: starts at boot (journalctl --user -u agent-console -f)
+```
+
+Both use `scripts/start.sh`, which puts the usual tool folders (`~/.bun/bin`, `~/.local/bin`, Homebrew, nvm's node) on `PATH` so the service can find the agents, and loads `.env`.
+
+### Link sessions to their transcripts (optional)
+
+Add `scripts/claude-session-hook.sh` as a Claude Code `SessionStart` and `SessionEnd` hook in `~/.claude/settings.json` (the snippet is at the top of the script). Claude sessions the console starts then report their session id back, which gives runs their transcript, title and a *Resume* button. For any other Claude session the hook exits immediately.
+
+## Security
+
+The console starts agents and kills processes, so treat its token like a password.
+
+- **Local only by default.** It listens on `127.0.0.1`. Set `HOST` to make it reachable from other machines (see *Remote access*).
+- **Always a token.** Every API call needs it, on localhost too: any web page open in a browser on this machine can send requests to `127.0.0.1`. It comes from `AUTH_TOKEN`, or is generated into `data/auth-token` (mode 600).
+- **Agents ask before acting.** The built-in `claude` type keeps Claude Code's permission prompts. In an interactive run you answer them in the browser or the Claude app; a headless `claude -p` run can't, so tools that need permission are refused. To let runs go unattended, add `--permission-mode acceptEdits` (or `--dangerously-skip-permissions`, if you understand what that allows) to the type's args on the *Types* tab, or per run as extra args.
+- `data/` (database, run logs, which include agent output) is created owner-only.
+- Agents started by the console get `AGENT_CONSOLE_URL` and `AGENT_CONSOLE_TOKEN` in their environment (that's how the session hook reports back), so an agent the console started can use the console's API.
+
+## Remote access
+
+To use it from your phone or another computer, put it on a private network rather than the internet. With [Tailscale](https://tailscale.com):
+
+```bash
+# keep the default HOST=127.0.0.1 and let tailscale proxy to it, with HTTPS, reachable only from your tailnet:
+sudo tailscale serve --bg 7770      # → https://<machine>.<tailnet>.ts.net
+```
+
+Or set `HOST=0.0.0.0` in `.env` and use `http://<machine>:7770` over the tailnet; that also exposes it to your LAN, still behind the token. On a new device, open the link with `#token=…` once, or paste the token when asked. The UI is responsive: on a phone the tabs move to a bottom bar, a run opens full screen, and an interactive run's terminal is resized to the phone's width.
+
+Linux helpers: `scripts/install-tailscale-linux.sh` installs Tailscale and prints the address; `scripts/setup-ssh-tailscale-only.sh` (sudo) restricts SSH to the tailnet (ufw + sshd `AllowUsers`; `STRICT=1` also denies all other incoming traffic).
+
+## Configuration
+
+Environment variables, or `KEY=VALUE` lines in `.env`:
 
 | Variable | Default | Meaning |
 |---|---|---|
 | `PORT` | `7770` | Listen port |
-| `HOST` | `0.0.0.0` | Bind address. Use `127.0.0.1` to make it local-only. |
-| `AUTH_TOKEN` | *(empty)* | If set, every `/api/*` request must carry it (see Auth). The UI asks for it once and stores it in `localStorage`. |
-| `DATA_DIR` | `./data` | Where the SQLite database and logs live |
+| `HOST` | `127.0.0.1` | Bind address. `0.0.0.0` makes it reachable from other machines. |
+| `AUTH_TOKEN` | *(generated)* | The access token. Unset: generated once into `data/auth-token`. |
+| `DATA_DIR` | `./data` | SQLite database, run logs, generated token |
 | `SCHEDULER_INTERVAL_MS` | `15000` | How often scheduled workflows are checked |
 | `OUTPUT_TAIL_BYTES` | `65536` | How much of the end of each log is copied into the run record (`output`) |
 | `OPEN_TERMINAL` | `auto` | Desktop terminal window opened on an interactive run. `auto` = iTerm then Terminal.app on macOS, the first of wezterm/kitty/alacritty/ghostty/foot/gnome-terminal/konsole/tilix/xfce4-terminal/mate-terminal/terminator/urxvt/xterm found on Linux; `none` to keep runs headless; or name one (`iterm`, `terminal`, `kitty`, …). Ignored on a headless machine (no `DISPLAY`/`WAYLAND_DISPLAY`). |
 
-## Run at boot (Linux, systemd user service)
-
-```bash
-~/agent-console/scripts/install-service-linux.sh
 ```
-
-This installs `~/.config/systemd/user/agent-console.service`, enables it, starts it, and turns on *lingering* so it starts at boot without anyone logging in. The unit runs `scripts/start.sh`, which puts `~/.bun/bin`, `~/.local/bin` (Claude Code) and nvm's `node` on `PATH` so the agents can be found.
-
-```bash
-systemctl --user status agent-console       # is it up?
-journalctl --user -u agent-console -f       # server log
-systemctl --user restart agent-console      # after editing code or .env
+agent-console/
+├── src/       server.ts (HTTP + API), db.ts, runner.ts, scheduler.ts, cron.ts, procs.ts, agents.ts, terminal.ts
+├── public/    the single-page UI
+├── scripts/   start.sh, service installers, Claude Code session hook, Tailscale helpers
+└── data/      database, logs, token (created on first start, git-ignored)
 ```
-
-macOS: edit the path in `scripts/com.agent-console.plist`, copy it to `~/Library/LaunchAgents/` and `launchctl load -w` it.
-Windows: create a Task Scheduler task "At log on" running `bun run C:\path\agent-console\src\server.ts`.
-
-## Reaching it over Tailscale
-
-The app binds `0.0.0.0`, so once Tailscale is up on this machine it is reachable from any device on your tailnet at `http://<machine-name>:7770` (MagicDNS) or `http://100.x.y.z:7770`.
-
-```bash
-~/agent-console/scripts/install-tailscale-linux.sh   # installs tailscale, `sudo tailscale up`, prints the IP
-```
-
-Optional: `sudo tailscale serve --bg 7770` publishes it as `https://<machine>.<tailnet>.ts.net` with a real certificate (tailnet-only). The header of the UI shows the tailscale name/IP when it is installed.
-
-Because the console can kill processes and launch agents, set `AUTH_TOKEN` in `.env` if the machine is also on an untrusted LAN, or bind `HOST=127.0.0.1` and rely on `tailscale serve` (which proxies from the tailnet to localhost).
-
-## SSH over Tailscale only
-
-`scripts/setup-ssh-tailscale-only.sh` (needs sudo) installs OpenSSH server and restricts it to the tailnet in two layers: a ufw rule that only allows port 22 in on `tailscale0`, and an sshd `AllowUsers` rule limited to Tailscale address ranges. Other ports are untouched; run it with `STRICT=1` to also make ufw deny all other incoming traffic except loopback and Tailscale. It prints the `ssh user@100.x.y.z` command to use and how to switch to key-only auth.
 
 ## Concepts
 
@@ -89,7 +110,7 @@ Because the console can kill processes and launch agents, set `AUTH_TOKEN` in `.
 Add your own, e.g. a nightly test runner:
 
 ```bash
-curl -X POST localhost:7770/api/process-types -H 'content-type: application/json' -d '{
+curl -H "authorization: Bearer $TOKEN" -X POST localhost:7770/api/process-types -H 'content-type: application/json' -d '{
   "name": "pytest", "command": "pytest", "args": ["-q", "{cwd}"], "detect": "pytest"
 }'
 ```
@@ -104,7 +125,9 @@ curl -X POST localhost:7770/api/process-types -H 'content-type: application/json
 
 Cron: 5 fields `min hour day-of-month month day-of-week`, with `*`, lists, ranges, steps and month/day names, plus `@hourly @daily @weekly @monthly @yearly`.
 
-Useful extra args: Claude Code `--permission-mode acceptEdits`, `--dangerously-skip-permissions`, `--output-format json`, `--model ...`; Codex `--full-auto`, `--skip-git-repo-check`, `-m ...`.
+The built-in `claude` type keeps Claude Code's permission prompts (see *Security*). A headless run has nobody to answer them, so give it `--permission-mode acceptEdits` (or `--dangerously-skip-permissions`) as extra args, or add it to the type's args on the *Types* tab.
+
+Useful extra args: Claude Code `--output-format json`, `--model ...`; Codex `--full-auto`, `--skip-git-repo-check`, `-m ...`.
 
 ## API
 
@@ -114,7 +137,7 @@ Base URL `http://host:7770/api`. All bodies and responses are JSON. Errors are `
 
 ### Auth
 
-If `AUTH_TOKEN` is set, send it as one of: `Authorization: Bearer <token>`, `X-Auth-Token: <token>`, or `?token=<token>`. Static files never require it.
+Every `/api/*` call needs the token (`AUTH_TOKEN`, or the generated one in `data/auth-token`), as one of: `Authorization: Bearer <token>`, `X-Auth-Token: <token>`, or `?token=<token>`. `GET /api` and `GET /api/docs` are public; so are the UI's static files.
 
 ### System
 
@@ -147,6 +170,7 @@ If `AUTH_TOKEN` is set, send it as one of: `Authorization: Bearer <token>`, `X-A
 | `POST /api/processes` | start one: `{type, cwd?, prompt?, extra_args?, env?, timeout_sec?, interactive?, terminal?}` → 201 with the run record. `cwd` falls back to the type's `default_cwd`. `interactive: true` starts it in a tmux session that stays open (see Concepts). |
 | `POST /api/processes/preview` | same body; returns the `{command, args}` that would be executed, without running |
 | `DELETE /api/processes/:pid?force=1` | SIGTERM (or SIGKILL with `force`) the process **tree**. Works on unmanaged processes too. If the pid belongs to a run, the run is marked `killed`. |
+| `POST /api/processes/:pid/remote-control` | Turn on Remote Control for a claude session that is already running, so it shows up in the Claude app. If it is in a tmux pane (an interactive run, or any claude started inside tmux) the console clears its input box (Ctrl+Y brings a draft back) and types `/remote-control`; it refuses while the session is working. → `{status: "enabled"\|"pending"\|"already", web_url}`. Anywhere else there is nothing to type into: `{replace: true, terminal?}` stops the process and reopens the same conversation here in tmux with the type's `resume_args` → 201 `{status: "replaced", run}`; without `replace` it answers 409. |
 
 Restarting is done through the run: `POST /api/runs/:id/restart`.
 
@@ -190,7 +214,7 @@ Every process the console starts gets `AGENT_CONSOLE_RUN_ID`, `AGENT_CONSOLE_URL
 
 It works for `claude` started directly by the console *and* for claude processes started by a wrapper script the console launched (the environment is inherited). Codex needs no hook: the console reads the `session id:` that `codex exec` prints, or finds the rollout file a Codex TUI creates under `~/.codex/sessions`.
 
-On top of the recorded id, the console reads what the agents themselves know: Claude Code's per-process registry (`~/.claude/sessions/<pid>.json`: the **name** it gave the session – what the Claude app shows – its idle/working **status** and its Remote Control bridge) and the transcript (auto **title**, `/rename` title, model). That is also how the Agents tab labels claude processes you started from a terminal. Each session in the UI shows title/name, id, model, and offers **Open on web** (the same session on claude.ai, when it has Remote Control), **Resume here** (reopens it in a tmux session on this machine using the type's `resume_args`; for claude that is `claude --resume <id> --remote-control`, so it appears in the Claude app too), **Copy resume** (the terminal command) and **Transcript**.
+On top of the recorded id, the console reads what the agents themselves know: Claude Code's per-process registry (`~/.claude/sessions/<pid>.json`: the **name** it gave the session – what the Claude app shows – its idle/working **status** and its Remote Control bridge) and the transcript (auto **title**, `/rename` title, model). That is also how the Agents tab labels claude processes you started from a terminal. Each session in the UI shows title/name, id, model, and offers **Open on web** (the same session on claude.ai, when it has Remote Control), **Resume here** (reopens it in a tmux session on this machine using the type's `resume_args`; for claude that is `claude --resume <id> --dangerously-skip-permissions --remote-control`, so it appears in the Claude app too), **Copy resume** (the terminal command) and **Transcript**.
 
 | | |
 |---|---|
@@ -204,23 +228,25 @@ On top of the recorded id, the console reads what the agents themselves know: Cl
 ### Examples
 
 ```bash
+TOKEN=$(cat data/auth-token)   # or your AUTH_TOKEN
+
 # Start Claude Code headlessly in a repo, auto-accepting edits, with a 30 min cap
-curl -X POST localhost:7770/api/processes -H 'content-type: application/json' -d '{
-  "type": "claude", "cwd": "/home/lucas/robot/i2rt",
+curl -H "authorization: Bearer $TOKEN" -X POST localhost:7770/api/processes -H 'content-type: application/json' -d '{
+  "type": "claude", "cwd": "/path/to/repo",
   "prompt": "Run the test suite and fix any failures.",
   "extra_args": "--permission-mode acceptEdits", "timeout_sec": 1800 }'
 
 # Nightly Codex review at 02:00 on weekdays
-curl -X POST localhost:7770/api/workflows -H 'content-type: application/json' -d '{
-  "name": "nightly-review", "type": "codex", "cwd": "/home/lucas/robot/ent-scrub-tech",
+curl -H "authorization: Bearer $TOKEN" -X POST localhost:7770/api/workflows -H 'content-type: application/json' -d '{
+  "name": "nightly-review", "type": "codex", "cwd": "/path/to/other-repo",
   "prompt": "Review yesterday'"'"'s commits and write findings to REVIEW.md",
   "extra_args": ["--full-auto"], "schedule": "0 2 * * 1-5", "timeout_sec": 3600 }'
 
 # Tail a running log
-curl 'localhost:7770/api/runs/12/log?offset=0'
+curl -H "authorization: Bearer $TOKEN" 'localhost:7770/api/runs/12/log?offset=0'
 
 # Stop a Claude session you started in a terminal
-curl -X DELETE localhost:7770/api/processes/41617
+curl -H "authorization: Bearer $TOKEN" -X DELETE localhost:7770/api/processes/41617
 ```
 
 ## Notes
@@ -228,3 +254,7 @@ curl -X DELETE localhost:7770/api/processes/41617
 - Processes launched by the console keep running if the console itself restarts; on startup it re-attaches to those that are still alive (marked *orphan*; log capture is not possible for them) and marks vanished ones `lost`.
 - Agents are launched with the console's environment plus the type's and workflow's `env`, and `AGENT_CONSOLE_RUN_ID` set to the run id.
 - Process discovery uses `ps` on Linux/macOS and `Get-CimInstance Win32_Process` on Windows; working directories come from `/proc` (Linux) or `lsof` (macOS).
+
+## License
+
+MIT. See [LICENSE](LICENSE).

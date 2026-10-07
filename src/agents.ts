@@ -46,9 +46,9 @@ export type SessionInfo = {
 
 let registryCache: { at: number; byPid: Map<number, ClaudeRegistryEntry>; bySession: Map<string, ClaudeRegistryEntry> } | null = null;
 
-export function claudeRegistry(): { byPid: Map<number, ClaudeRegistryEntry>; bySession: Map<string, ClaudeRegistryEntry> } {
+export function claudeRegistry(fresh = false): { byPid: Map<number, ClaudeRegistryEntry>; bySession: Map<string, ClaudeRegistryEntry> } {
   const t = Date.now();
-  if (registryCache && t - registryCache.at < 2000) return registryCache;
+  if (!fresh && registryCache && t - registryCache.at < 2000) return registryCache;
   const byPid = new Map<number, ClaudeRegistryEntry>();
   const bySession = new Map<string, ClaudeRegistryEntry>();
   if (existsSync(CLAUDE_SESSIONS)) {

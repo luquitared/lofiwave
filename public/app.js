@@ -4,6 +4,15 @@ const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 
 // ---------------------------------------------------------------- api client
 let token = localStorage.getItem("ac_token") || "";
+// The server prints a link with #token=… on start: keep the token, and take it out of the address bar and history.
+{
+  const m = location.hash.match(/^#token=([^&]+)/);
+  if (m) {
+    token = decodeURIComponent(m[1]);
+    localStorage.setItem("ac_token", token);
+    history.replaceState(null, "", location.pathname + location.search);
+  }
+}
 async function api(method, path, body) {
   const headers = { accept: "application/json" };
   if (body !== undefined) headers["content-type"] = "application/json";
@@ -16,7 +25,7 @@ async function api(method, path, body) {
     throw error;
   }
   if (res.status === 401) {
-    const t = prompt("This console requires an access token (AUTH_TOKEN):");
+    const t = prompt("Access token (AUTH_TOKEN in .env, or the one the server generated in data/auth-token):");
     if (t) { token = t; localStorage.setItem("ac_token", t); return api(method, path, body); }
     throw new Error("unauthorized");
   }
@@ -231,6 +240,7 @@ function renderProcRows(tbody, procs) {
       p.session?.session_id && !p.child && p.drivable
         ? h("button", { class: "small primary", title: "this session already has a terminal here", onclick: () => { selectConsoleRunId(p.run_id); switchTab("console"); loadConsole(); } }, "Open terminal")
         : p.session?.session_id && !p.child ? h("button", { class: "small", title: `${p.session.resume_cmd} — in a tmux session managed here`, onclick: () => takeOver(p) }, "Take over here") : "",
+      !p.child ? remoteControlBtn(p.pid, p.session, p.drivable || Boolean(p.session?.tmux)) : "",
       p.run_id && !p.child ? h("button", { class: "small", onclick: () => guard(async () => { const r = await post(`/runs/${p.run_id}/restart`); toast(`restarted as run #${r.id}`, true); refresh(); })() }, "Restart") : "",
       h("button", { class: "small danger", onclick: () => confirmDo(`Stop pid ${p.pid} (${p.type})?`, async () => { await del(`/processes/${p.pid}`); toast("SIGTERM sent", true); refresh(); }) }, "Stop"),
       h("button", { class: "small danger", title: "SIGKILL", onclick: () => confirmDo(`Force kill pid ${p.pid}?`, async () => { await del(`/processes/${p.pid}?force=1`); toast("SIGKILL sent", true); refresh(); }) }, "Kill"),
@@ -320,7 +330,9 @@ function applyStartType() {
   $("#prompt-label").hidden = t && !needsPrompt && t.kind === "app" && !interactive;
   sf.prompt.placeholder = interactive ? "Optional first message — or leave empty and drive it from the Claude app / the screen below" : "What should the agent do?";
   $("#interactive-label").style.display = systemInfo?.tmux ? "" : "none";   // .row's display:flex would override `hidden`
-  $("#interactive-hint").textContent = t?.name === "claude" ? "— stays open in a tmux session and a terminal window on the machine; claude starts with Remote Control so it appears in the Claude app"
+  const iargs = Array.isArray(t?.interactive_args) && t.interactive_args.length ? t.interactive_args : t?.args || [];
+  const perms = iargs.includes("--dangerously-skip-permissions") ? "permissions bypassed and " : "";
+  $("#interactive-hint").textContent = t?.name === "claude" ? `— stays open in a tmux session and a terminal window on the machine; claude starts with ${perms}Remote Control on, so it appears in the Claude app`
     : t?.name === "codex" ? "— opens the Codex TUI in a tmux session, and a terminal window on the machine" : "— runs in a tmux session that stays open (and a terminal window on the machine); uses the type's interactive args";
   sf.cwd.value = t?.default_cwd || sf.cwd.value;
   sf.cwd.placeholder = t?.default_cwd ? t.default_cwd : "start typing to search";
@@ -526,7 +538,7 @@ function sessionsBlock(r) {
         ),
         h("span", { class: "row", style: "gap:6px;flex-wrap:wrap" },
           s.web_url ? h("a", { href: s.web_url, target: "_blank" }, h("button", { class: "small" }, "Open on web")) : "",
-          !live ? h("button", { class: "small primary", title: `${s.resume_cmd} — in a tmux session here; claude also gets --remote-control`, onclick: () => guard(async () => { const n = await post(`/runs/${r.id}/sessions/${encodeURIComponent(s.session_id)}/resume`); toast(`resumed as run #${n.id}`, true); openRun(n.id); })() }, "Resume here") : "",
+          !live ? h("button", { class: "small primary", title: `${s.resume_cmd} — in a tmux session here, with the type's resume args (claude: --remote-control)`, onclick: () => guard(async () => { const n = await post(`/runs/${r.id}/sessions/${encodeURIComponent(s.session_id)}/resume`); toast(`resumed as run #${n.id}`, true); openRun(n.id); })() }, "Resume here") : "",
           h("button", { class: "small", title: s.resume_cmd, onclick: () => navigator.clipboard?.writeText(s.resume_cmd).then(() => toast("copied: " + s.resume_cmd, true)) }, "Copy resume"),
           s.transcript_path ? h("a", { href: `/api/runs/${r.id}/sessions/${encodeURIComponent(s.session_id)}/transcript${tokenQ}`, target: "_blank" }, h("button", { class: "small" }, "Transcript")) : "",
         ),
@@ -573,7 +585,7 @@ function selectConsoleRun(run) {
 
 function renderRail() {
   const { live, headless, adoptable } = consoleData;
-  const sig = JSON.stringify([live.map((r) => [r.id, runLabel(r)]), headless.map((r) => [r.id, runLabel(r)]), adoptable.map((p) => [p.pid, p.session?.session_id || ""])]);
+  const sig = JSON.stringify([live.map((r) => [r.id, runLabel(r)]), headless.map((r) => [r.id, runLabel(r)]), adoptable.map((p) => [p.pid, p.session?.session_id || "", p.session?.web_url || ""])]);
   if (sig === railSig) return patchRail();
   railSig = sig;
   $("#session-rail").replaceChildren(
@@ -600,7 +612,9 @@ function renderRail() {
       h("div", { class: "rail-sub" }, `${p.type} · ${shortCwd(p.cwd) || "?"}`),
       h("div", { class: "rail-sub dim" }, `pid ${p.pid} · ${originOf(p)}`, p.session?.web_url ? h("a", { href: p.session.web_url, target: "_blank", style: "margin-left:8px" }, "web ↗") : ""),
       p.session?.session_id
-        ? h("button", { class: "small", title: "reopen this session in a tmux pane here, so it can be driven from the browser", onclick: () => takeOver(p) }, "Take over here")
+        ? h("div", { class: "row", style: "gap:6px" },
+            h("button", { class: "small", title: "reopen this session in a tmux pane here, so it can be driven from the browser", onclick: () => takeOver(p) }, "Take over here"),
+            remoteControlBtn(p.pid, p.session, Boolean(p.session.tmux)))
         : h("div", { class: "rail-sub dim" }, "no session id — can't take over"),
     )),
   );
@@ -646,11 +660,32 @@ function takeOver(p) {
   })();
 }
 
+/**
+ * Turn Remote Control on for a claude session that is already running. In a tmux pane the console types /remote-control
+ * into it; anywhere else there is nothing to type into, so the only way is to stop it and reopen the conversation here.
+ */
+function remoteControlBtn(pid, s, inPane) {
+  if (!pid || s?.agent !== "claude" || s.web_url) return "";
+  const title = inPane ? "type /remote-control into its terminal, so it shows up in the Claude app" : "stop it and reopen the conversation here with Remote Control on";
+  return h("button", { class: "small", title, onclick: () => enableRemote(pid, s, inPane) }, "Remote Control");
+}
+function enableRemote(pid, s, inPane) {
+  const label = s.title || s.name || `pid ${pid}`;
+  if (!inPane && !confirm(`"${label}" is not in a terminal the console can type into.\n\nStop it and reopen the same conversation here, with Remote Control on? Anything it is doing right now is interrupted.`)) return;
+  return guard(async () => {
+    toast(inPane ? "turning on Remote Control…" : "reopening with Remote Control…", true);
+    const r = await post(`/processes/${pid}/remote-control`, inPane ? {} : { replace: true });
+    if (r.run) { toast(`reopened as run #${r.run.id}`, true); selectConsoleRunId(r.run.id); switchTab("console"); loadConsole(); return; }
+    toast(r.web_url ? "Remote Control is on — the session is in the Claude app" : "sent /remote-control; the web link appears once it connects", true);
+    refresh();
+  })();
+}
+
 function renderPane() {
   const r = consoleRun;
   // Rebuild only when the run or its session changes: a rebuild would drop whatever is half-typed in the keys field,
   // and idle/working flips constantly. Everything volatile is patched in place below.
-  const sig = r ? JSON.stringify([r.id, r.status, r.meta?.remote_url || "", sessOf(r)?.session_id || ""]) : `empty:${consoleData.live.length}:${consoleData.adoptable.length}`;
+  const sig = r ? JSON.stringify([r.id, r.status, r.meta?.remote_url || "", sessOf(r)?.session_id || "", sessOf(r)?.web_url || ""]) : `empty:${consoleData.live.length}:${consoleData.adoptable.length}`;
   if (sig !== paneSig) {
     paneSig = sig;
     $("#session-pane").replaceChildren(...(r ? paneFor(r) : [emptyPane()]));
@@ -676,7 +711,7 @@ function paneFor(r) {
         ),
       ),
       h("div", { class: "row pane-actions" },
-        s?.web_url ? h("a", { href: s.web_url, target: "_blank" }, h("button", { class: "small" }, "Open on web ↗")) : "",
+        s?.web_url ? h("a", { href: s.web_url, target: "_blank" }, h("button", { class: "small" }, "Open on web ↗")) : remoteControlBtn(r.pid, s, true),
         h("button", { class: "small", title: "the full run record: command, env, log, sessions", onclick: () => openRun(r.id) }, "Details"),
         h("button", { class: "small danger", onclick: () => confirmDo(`Stop "${runLabel(r)}" (run #${r.id})?`, async () => { await post(`/runs/${r.id}/kill`); toast("stopped", true); consoleRun = null; railSig = paneSig = ""; loadConsole(); }) }, "Stop"),
         h("label", { class: "muted follow" }, h("input", { type: "checkbox", id: "console-follow", checked: true }), " follow"),

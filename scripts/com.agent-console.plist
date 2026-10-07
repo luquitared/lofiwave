@@ -1,11 +1,11 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- macOS launchd agent: cp to ~/Library/LaunchAgents/ then `launchctl load -w ~/Library/LaunchAgents/com.agent-console.plist` -->
+<!-- macOS launchd agent. scripts/install-service-macos.sh fills in the paths and loads it. -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>Label</key><string>com.agent-console</string>
   <key>ProgramArguments</key><array><string>/bin/bash</string><string>REPLACE_WITH_ABSOLUTE_PATH/agent-console/scripts/start.sh</string></array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
-  <key>StandardOutPath</key><string>/tmp/agent-console.log</string>
-  <key>StandardErrorPath</key><string>/tmp/agent-console.err</string>
+  <key>StandardOutPath</key><string>REPLACE_WITH_ABSOLUTE_PATH/agent-console/data/server.log</string>
+  <key>StandardErrorPath</key><string>REPLACE_WITH_ABSOLUTE_PATH/agent-console/data/server.log</string>
 </dict></plist>
