@@ -293,6 +293,8 @@ select { font-family:inherit; }
 .pane pre.screen { flex:1; min-height:340px; margin:0; padding:14px; overflow:auto; white-space:pre; background:#0d110e; border:1px solid var(--line); border-radius:8px; font-family:var(--mono); font-size:11.5px; line-height:1.3; }
 .pane form.keys input { flex:1; min-width:0; }
 .pane-foot { font-size:10.5px; }
+.term-hint { font-size:11px; }
+body.term-full .term-hint { margin-top:-4px; }
 .pane-empty { display:flex; flex-direction:column; align-items:center; gap:14px; padding:56px 10px; text-align:center; }
 .pane-empty h2 { font-size:21px; }
 .pane-empty p { margin:0; max-width:430px; font-size:13px; line-height:1.7; }

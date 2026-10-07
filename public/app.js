@@ -775,8 +775,19 @@ function paneFor(r) {
     ...(termMode()
       ? [h("div", { id: "console-term", class: "term" }, h("span", { class: "term-status" }, "connecting…"))]
       : [h("pre", { id: "console-screen", class: "screen" }, "connecting to the terminal…"), keysForm(r.id, () => pollScreenInto($("#console-screen"), r.id, true))]),
+    termMode() ? h("div", { class: "term-hint muted" }, copyHint()) : "",
     h("div", { class: "pane-foot muted mono" }, `tmux attach -t ${r.meta?.tmux || "?"}`),
   ];
+}
+
+// tmux has mouse mode on, so a plain drag selects inside tmux and never reaches the system clipboard. xterm.js
+// bypasses tmux with Option-drag on a Mac (macOptionClickForcesSelection) and Shift-drag elsewhere; the browser
+// never sees the fn key, so the Terminal.app habit doesn't work here.
+const isMac = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
+function copyHint() {
+  return isMac
+    ? "Copy: hold ⌥ Option and drag to select — it's copied when you let go (⌘C also works). fn-drag doesn't work in a browser."
+    : "Copy: hold Shift and drag to select — it's copied when you let go. A plain drag selects inside tmux only.";
 }
 
 // ---------------------------------------------------------------- full screen (terminal only)
@@ -841,6 +852,11 @@ function openTerm(runId) {
     return true;
   });
   term.onData((d) => { if (!isBareMotion(d)) send({ t: "i", d }); });
+  // Copy on select: the forced (Option/Shift) selection goes straight to the clipboard on mouse-up.
+  el.addEventListener("mouseup", () => {
+    const sel = term.hasSelection() && term.getSelection();
+    if (sel) navigator.clipboard?.writeText(sel).then(() => toast(`copied ${sel.length} chars`, true), () => {});
+  });
   term.onResize(({ cols, rows }) => send({ t: "r", cols, rows }));
   t.ro = new ResizeObserver(() => { try { fit.fit(); } catch {} });
   t.ro.observe(el);
