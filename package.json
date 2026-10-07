@@ -1,5 +1,5 @@
 {
-  "name": "agent-console",
+  "name": "lofiwave",
   "version": "1.0.0",
   "description": "Local web console for Claude Code / Codex / custom processes: monitor, start, stop, schedule workflows, keep run history in SQLite.",
   "type": "module",
@@ -13,6 +13,6 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/synjuku/agent-console.git"
+    "url": "https://github.com/synjuku/lofiwave.git"
   }
 }

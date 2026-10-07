@@ -165,7 +165,7 @@ async function listConsoleProcesses(filterType?: string, filterKind?: string): P
     let type = run?.type_name ?? null;
     if (!type) {
       // Skip the `ps`/powershell we spawned and anything mentioning this server.
-      if (/^ps -eo |powershell.*Win32_Process|agent-console\/src\/server\.ts/.test(p.cmd)) continue;
+      if (/^ps -eo |powershell.*Win32_Process|(?:agent-console|lofiwave)\/src\/server\.ts/.test(p.cmd)) continue;
       type = detectors.find((d) => d.re.test(p.cmd))?.name ?? null;
     }
     if (!type) continue;
@@ -684,7 +684,7 @@ async function dispatch(req: Request, url: URL): Promise<Response> {
 }
 
 startScheduler();
-console.log(`agent-console listening on http://${server.hostname}:${server.port}  (data: ${config.dataDir})`);
+console.log(`lofiwave listening on http://${server.hostname}:${server.port}  (data: ${config.dataDir})`);
 if (config.tokenGenerated) {
   // First start: hand the person a link that logs the browser in (the UI keeps the token and drops it from the URL).
   // Only this once, since service logs may be readable by others; later starts just say where the token is.

@@ -137,7 +137,7 @@ export async function startRun(opts: StartOptions): Promise<RunRow> {
   db.prepare("UPDATE runs SET log_path = ?, meta = ? WHERE id = ?").run(logPath, JSON.stringify(meta), id);
 
   const sink = Bun.file(logPath).writer();
-  const header = `# agent-console run ${id} | ${new Date(t).toISOString()} | cwd=${cwd}\n# $ ${[command, ...args].map(shellQuote).join(" ")}\n` +
+  const header = `# lofiwave run ${id} | ${new Date(t).toISOString()} | cwd=${cwd}\n# $ ${[command, ...args].map(shellQuote).join(" ")}\n` +
     (interactive ? `# interactive: tmux session "${meta.tmux}" (attach with: tmux attach -t ${meta.tmux}); the screen is captured here when it ends\n` : "") + "\n";
   sink.write(header);
   sink.flush();
@@ -240,7 +240,7 @@ export async function startRun(opts: StartOptions): Promise<RunRow> {
   if (timeoutSec > 0) {
     entry.timer = setTimeout(() => {
       entry.killedBy = "timeout";
-      sink.write(`\n# agent-console: timeout after ${timeoutSec}s, killing process tree\n`);
+      sink.write(`\n# lofiwave: timeout after ${timeoutSec}s, killing process tree\n`);
       killTree(entry.pid, true).catch(() => {});
     }, timeoutSec * 1000);
   }
@@ -255,7 +255,7 @@ export async function startRun(opts: StartOptions): Promise<RunRow> {
       await tmux("kill-session", "-t", entry.tmux);
     }
     const status = entry.killedBy === "timeout" ? "timeout" : entry.killedBy ? "killed" : code === 0 ? "success" : code === null ? "lost" : "failed";
-    sink.write(`\n# agent-console: exited with code ${code ?? "unknown"} (${status})\n`);
+    sink.write(`\n# lofiwave: exited with code ${code ?? "unknown"} (${status})\n`);
     await sink.end();
     if (isCodex && !meta.codex_session) {
       // `codex exec` prints "session id: <uuid>" in its header.
@@ -336,7 +336,7 @@ export async function killRun(id: number, force = false): Promise<RunRow> {
       if (meta.tmux) {
         // Nobody is polling this session any more: save its screen and drop it, like the live path does.
         const cap = await tmux("capture-pane", "-p", "-J", "-t", meta.tmux, "-S", "-2000");
-        if (cap.code === 0 && run.log_path) appendFileSync(run.log_path, cap.out.replace(/^Pane is dead.*$/m, "").replace(/\n{3,}/g, "\n\n").replace(/\s+$/, "") + "\n\n# agent-console: killed (orphan)\n");
+        if (cap.code === 0 && run.log_path) appendFileSync(run.log_path, cap.out.replace(/^Pane is dead.*$/m, "").replace(/\n{3,}/g, "\n\n").replace(/\s+$/, "") + "\n\n# lofiwave: killed (orphan)\n");
         await tmux("kill-session", "-t", meta.tmux);
       }
       db.prepare("UPDATE runs SET status = 'killed', ended_at = ? WHERE id = ?").run(now(), id);

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Installs agent-console as a launchd agent: starts at login, restarts if it dies.
+# Installs lofiwave as a launchd agent: starts at login, restarts if it dies.
 # Logs go to data/server.log (owner-only, like the rest of data/).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"

@@ -25,7 +25,7 @@ export function renderDocs(base: string, authRequired: boolean): string {
   const auth = authRequired
     ? `This console requires a token. Send it on every request as \`Authorization: Bearer <token>\` (or \`X-Auth-Token: <token>\`). Ask the person who gave you this URL for the token. \`GET ${api}/docs\` itself is public.`
     : `No authentication is currently required.`;
-  const quickstart = `# Agent Console API
+  const quickstart = `# lofiwave API
 
 Base URL: \`${api}\`  ·  Web UI: ${base}  ·  This document: \`${api}/docs\` (markdown)  ·  Machine index: \`${api}\`
 
@@ -74,7 +74,7 @@ Kinds: \`"agent"\` types (built-in \`claude\` and \`codex\`) are shown on the *A
 export function apiIndex(base: string) {
   const api = `${base}/api`;
   return {
-    name: "agent-console",
+    name: "lofiwave",
     docs: `${api}/docs`,
     ui: base,
     endpoints: {

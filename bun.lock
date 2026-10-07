@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "agent-console",
+      "name": "lofiwave",
       "devDependencies": {
         "@types/bun": "latest",
       },

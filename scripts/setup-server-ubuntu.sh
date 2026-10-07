@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Sets up agent-console as a shared team server on a fresh Ubuntu VM (tested on 24.04), behind HTTPS.
+# Sets up lofiwave as a shared team server on a fresh Ubuntu VM (tested on 24.04), behind HTTPS.
 #
 #   sudo DOMAIN=console.example.com PASSWORD='team password' scripts/setup-server-ubuntu.sh
 #
@@ -50,7 +50,7 @@ echo "== service"
 chmod +x "$ROOT/scripts/start.sh" "$HOOK"
 cat > /etc/systemd/system/agent-console.service <<EOF
 [Unit]
-Description=agent-console
+Description=lofiwave
 After=network-online.target
 Wants=network-online.target
 

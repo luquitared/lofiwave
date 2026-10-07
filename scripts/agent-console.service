@@ -1,5 +1,5 @@
 [Unit]
-Description=Agent Console (Claude / Codex process manager)
+Description=lofiwave (Claude / Codex process manager)
 # Tailscale is a system service; user units can't order on it, but the console
 # binds 0.0.0.0 so it's reachable over the tailnet as soon as tailscaled is up.
 After=network-online.target

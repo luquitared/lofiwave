@@ -1,4 +1,6 @@
-# Agent Console
+<p align="center"><img src="public/logo.png" width="96" alt=""></p>
+
+# lofiwave
 
 A small web console for the coding agents running on your machine: Claude Code, Codex, or any command you describe.
 
@@ -19,16 +21,16 @@ It runs on [Bun](https://bun.sh) with SQLite and no other dependencies. Linux an
 ## Install
 
 ```bash
-git clone https://github.com/synjuku/agent-console.git
-cd agent-console
+git clone https://github.com/synjuku/lofiwave.git
+cd lofiwave
 bun start
 ```
 
 On first start it generates an access token and prints a link that logs your browser in:
 
 ```
-agent-console listening on http://127.0.0.1:7770
-generated an access token (kept in …/agent-console/data/auth-token); open:
+lofiwave listening on http://127.0.0.1:7770
+generated an access token (kept in …/lofiwave/data/auth-token); open:
   http://127.0.0.1:7770/#token=…
 ```
 
@@ -99,7 +101,7 @@ Environment variables, or `KEY=VALUE` lines in `.env`:
 | `OPEN_TERMINAL` | `auto` | Desktop terminal window opened on an interactive run. `auto` = iTerm then Terminal.app on macOS, the first of wezterm/kitty/alacritty/ghostty/foot/gnome-terminal/konsole/tilix/xfce4-terminal/mate-terminal/terminator/urxvt/xterm found on Linux; `none` to keep runs headless; or name one (`iterm`, `terminal`, `kitty`, …). Ignored on a headless machine (no `DISPLAY`/`WAYLAND_DISPLAY`). |
 
 ```
-agent-console/
+lofiwave/
 ├── src/       server.ts (HTTP + API), db.ts, runner.ts, scheduler.ts, cron.ts, procs.ts, agents.ts, terminal.ts
 ├── public/    the single-page UI
 ├── scripts/   start.sh, service installers, Claude Code session hook, Tailscale helpers
@@ -221,8 +223,8 @@ Every process the console starts gets `AGENT_CONSOLE_RUN_ID`, `AGENT_CONSOLE_URL
 
 ```json
 { "hooks": {
-    "SessionStart": [{ "hooks": [{ "type": "command", "command": "/ABS/PATH/agent-console/scripts/claude-session-hook.sh", "timeout": 5 }] }],
-    "SessionEnd":   [{ "hooks": [{ "type": "command", "command": "/ABS/PATH/agent-console/scripts/claude-session-hook.sh", "timeout": 5 }] }]
+    "SessionStart": [{ "hooks": [{ "type": "command", "command": "/ABS/PATH/lofiwave/scripts/claude-session-hook.sh", "timeout": 5 }] }],
+    "SessionEnd":   [{ "hooks": [{ "type": "command", "command": "/ABS/PATH/lofiwave/scripts/claude-session-hook.sh", "timeout": 5 }] }]
 } }
 ```
 

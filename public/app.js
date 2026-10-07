@@ -1,4 +1,4 @@
-/* Agent Console UI — vanilla JS, talks to /api. */
+/* lofiwave UI — vanilla JS, talks to /api. */
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 

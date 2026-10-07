@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Launches agent-console with the user's tool paths (bun, claude, codex, node) on PATH.
+# Launches lofiwave with the user's tool paths (bun, claude, codex, node) on PATH.
 # Used by the systemd/launchd service, but you can also run it by hand.
 set -euo pipefail
 cd "$(dirname "$0")/.."
