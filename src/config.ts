@@ -36,10 +36,28 @@ export const config = {
   /** Where the generated token is kept ('' when it comes from AUTH_TOKEN); `tokenGenerated` = made on this start. */
   tokenFile: auth.file,
   tokenGenerated: auth.generated,
+  /** Shared team password. Set: people log in with a name + this password (a session cookie); the token still works. */
+  password: process.env.PASSWORD?.trim() || "",
+  /**
+   * Git identity per signed-in person, so commits made in their runs carry their name:
+   * GIT_AUTHORS="lucas=Lucas N <lucas@x.com>, seth=Seth N <seth@x.com>". Keys match the first word of the
+   * sign-in name, case-insensitively. Anyone else (and scheduled/API runs) gets git's own config.
+   */
+  gitAuthors: parseGitAuthors(process.env.GIT_AUTHORS ?? ""),
   schedulerIntervalMs: Number(process.env.SCHEDULER_INTERVAL_MS ?? 15_000),
   /** How much of the end of a run's log is copied into runs.output when it finishes. */
   outputTailBytes: Number(process.env.OUTPUT_TAIL_BYTES ?? 64 * 1024),
 };
+
+function parseGitAuthors(spec: string): Map<string, { name: string; email: string }> {
+  const out = new Map<string, { name: string; email: string }>();
+  for (const part of spec.split(",")) {
+    const m = part.trim().match(/^([^=\s]+)\s*=\s*(.+?)\s*<([^>]+)>$/);
+    if (m) out.set(m[1].toLowerCase(), { name: m[2], email: m[3] });
+    else if (part.trim()) console.warn(`GIT_AUTHORS: can't read "${part.trim()}" (want key=Name <email>)`);
+  }
+  return out;
+}
 
 export const logDir = join(config.dataDir, "logs");
 mkdirSync(logDir, { recursive: true, mode: 0o700 });

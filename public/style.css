@@ -313,3 +313,29 @@ select { font-family:inherit; }
   .pane form.keys input { flex:1 1 100%; }
   .pane-actions { width:100%; }
 }
+
+/* people: who you are, who else is here */
+.page-top-right { display:flex; align-items:center; gap:14px; min-width:0; }
+.people { color:var(--muted); font-size:11px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.people b { color:var(--text); font-weight:600; }
+.people button { margin-left:8px; }
+dialog.login { width:min(420px, calc(100vw - 32px)); }
+.by { color:var(--muted); }
+
+/* live terminal (xterm.js over a websocket to tmux) */
+/* A fixed height, never "grow to fit": the fit addon sizes the terminal from this box, so a box that grew with the
+   terminal would feed back (more rows → taller box → more rows) up to the row cap. */
+.pane .term { position:relative; flex:none; height:max(360px, calc(100dvh - 380px)); padding:8px; background:#0d110e; border:1px solid var(--line); border-radius:8px; overflow:hidden; }
+.pane .term .xterm { height:100%; }
+.pane .term-status { position:absolute; top:8px; right:12px; z-index:5; font-size:11px; color:var(--muted); background:#0d110ecc; padding:2px 8px; border-radius:6px; }
+.pane .term-status:empty { display:none; }
+
+/* full-screen terminal: just the session, edge to edge */
+body.term-full .sidebar, body.term-full .page-top, body.term-full .page-heading, body.term-full .rail, body.term-full .pane-foot { display:none; }
+body.term-full main { margin:0; padding:0; max-width:none; }
+body.term-full .console-view { display:block; }
+body.term-full .pane { position:fixed; inset:0; top:0; max-height:none; gap:8px; padding:8px 12px 10px; border:0; border-radius:0; z-index:20; }
+body.term-full .pane .term { flex:1; height:auto; min-height:0; }
+body.term-full .pane-head { align-items:center; }
+body.term-full .pane h2 { font-size:15px; }
+body.term-full .pane-meta { margin-top:2px; }

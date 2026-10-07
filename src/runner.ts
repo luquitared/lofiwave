@@ -9,6 +9,8 @@ import { config, logDir } from "./config";
 import { killTree, pidAlive } from "./procs";
 import { discoverCodexSession, codexRolloutPath, claudeRegistry, claudeWebUrl, claudeTranscriptPath } from "./agents";
 import { openTerminalForTmux } from "./terminal";
+import { actor } from "./auth";
+import { ttyViewers } from "./tty";
 
 export class ApiError extends Error {
   constructor(public status: number, message: string) { super(message); }
@@ -117,6 +119,9 @@ export async function startRun(opts: StartOptions): Promise<RunRow> {
   const timeoutSec = opts.timeoutSec ?? opts.workflow?.timeout_sec ?? 0;
   const meta: Record<string, any> = { timeout_sec: timeoutSec, template_len };
   if (opts.resumeSession) meta.resume_session = opts.resumeSession;
+  // Who started it: the logged-in person (or "api" for the token), when it comes from a request; scheduled runs have none.
+  const by = actor.getStore();
+  if (by) meta.started_by = by;
   const isCodex = basename(command) === "codex";
 
   const ins = db.prepare(
@@ -137,8 +142,15 @@ export async function startRun(opts: StartOptions): Promise<RunRow> {
   sink.write(header);
   sink.flush();
 
+  // Commits made in this run are authored by the person who started it (GIT_AUTHORS), when we know them.
+  const author = by ? config.gitAuthors.get(by.trim().split(/\s+/)[0].toLowerCase()) : undefined;
+  const gitEnv: Record<string, string> = author
+    ? { GIT_AUTHOR_NAME: author.name, GIT_AUTHOR_EMAIL: author.email, GIT_COMMITTER_NAME: author.name, GIT_COMMITTER_EMAIL: author.email }
+    : {};
+  if (author) meta.git_author = `${author.name} <${author.email}>`;
+
   const childEnv = {
-    ...process.env, ...env,
+    ...process.env, ...gitEnv, ...env,
     AGENT_CONSOLE_RUN_ID: String(id),
     // Lets scripts/claude-session-hook.sh (a Claude Code SessionStart/SessionEnd hook) report the session back.
     AGENT_CONSOLE_URL: `http://127.0.0.1:${config.port}`,
@@ -160,7 +172,7 @@ export async function startRun(opts: StartOptions): Promise<RunRow> {
   if (interactive) {
     // A detached tmux session owns the pty; we track the pane's process and poll its exit status.
     const sess = meta.tmux as string;
-    const envFlags = Object.entries({ ...env, PATH: childEnv.PATH ?? "", AGENT_CONSOLE_RUN_ID: childEnv.AGENT_CONSOLE_RUN_ID, AGENT_CONSOLE_URL: childEnv.AGENT_CONSOLE_URL, AGENT_CONSOLE_TOKEN: childEnv.AGENT_CONSOLE_TOKEN })
+    const envFlags = Object.entries({ ...gitEnv, ...env, PATH: childEnv.PATH ?? "", AGENT_CONSOLE_RUN_ID: childEnv.AGENT_CONSOLE_RUN_ID, AGENT_CONSOLE_URL: childEnv.AGENT_CONSOLE_URL, AGENT_CONSOLE_TOKEN: childEnv.AGENT_CONSOLE_TOKEN })
       .flatMap(([k, v]) => ["-e", `${k}=${v}`]);
     const created = await tmux("new-session", "-d", "-s", sess, "-c", cwd, "-x", "180", "-y", "48", ...envFlags, "--", command, ...args);
     if (created.code !== 0) await fail(`failed to start tmux session: ${created.err || created.out}`);
@@ -267,7 +279,7 @@ export async function screenOf(run: RunRow, lines = 200, cols = 0): Promise<{ te
   const size = await tmux("display-message", "-p", "-t", meta.tmux, "#{window_width}");
   if (size.code === 0) width = Number(size.out) || 0;
   // A phone can't show 180 columns: resize the window to the viewer's width and the TUI reflows (SIGWINCH), like a real terminal would.
-  if (cols >= 40 && cols <= 220 && width && cols !== width && run.status === "running") {
+  if (cols >= 40 && cols <= 220 && width && cols !== width && run.status === "running" && !ttyViewers.has(meta.tmux)) {
     const r = await tmux("resize-window", "-t", meta.tmux, "-x", String(cols), "-y", String(cols < 100 ? 40 : 48));
     if (r.code === 0) width = cols;
   }
