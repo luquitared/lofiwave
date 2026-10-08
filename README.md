@@ -21,7 +21,7 @@ It runs on [Bun](https://bun.sh) with SQLite and no other dependencies. Linux an
 ## Install
 
 ```bash
-git clone https://github.com/synjuku/lofiwave.git
+git clone https://github.com/luquitared/lofiwave.git
 cd lofiwave
 bun start
 ```
