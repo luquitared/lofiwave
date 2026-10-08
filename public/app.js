@@ -917,13 +917,11 @@ async function openHistory(t, lines) {
   t.histLines = (t.histLoading ? t.histLines : 0) + lines; // keep counting while the snapshot loads
   if (t.histLoading) return;
   t.histLoading = true;
-  let text, own_scroll;
-  try { ({ text, own_scroll } = await api("GET", `/runs/${t.runId}/history`)); }
+  let text;
+  try { ({ text } = await api("GET", `/runs/${t.runId}/history`)); }
   catch (e) { toast(`couldn't load the history: ${e.message}`); return; }
   finally { t.histLoading = false; }
   if (t.closed || liveTerm !== t || t.hist) return;
-  // Nothing to snapshot: the app draws full-screen and keeps its own history, so the wheel goes to it (shared, as before).
-  if (own_scroll) { t.ownScroll = true; toast("this session scrolls itself — the wheel now goes to it, and other viewers see it scroll too", true); return; }
   const body = h("div", { class: "term-history-body" });
   const box = h("div", { class: "term-history" },
     h("div", { class: "term-history-bar", title: "back to the live screen", onclick: () => closeHistory(t) }, "Scrolled back · only you see this · snapshot, the session keeps running · scroll down or Esc to return"),
@@ -957,7 +955,6 @@ function closeHistory(t) {
  * on pixel deltas), and scrolling down past the bottom closes it.
  */
 function onTermWheel(t, e) {
-  if (t.ownScroll) return; // let xterm pass the wheel to tmux and on to the app
   e.preventDefault(); e.stopPropagation();
   const px = t.term.element ? t.term.element.clientHeight / t.term.rows : 16; // one line, in pixels
   t.wheelAcc = (t.wheelAcc || 0) + (e.deltaMode === 1 ? e.deltaY : e.deltaMode === 2 ? e.deltaY * t.term.rows : e.deltaY / px);
