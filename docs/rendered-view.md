@@ -1,6 +1,7 @@
 # Rendered view: a chat UI you can toggle with the terminal
 
-Status: **design, nothing built yet** (2026-10-09); tracked as issues.md #3. Research behind it: claude-code-viewer (upstream v0.8.2),
+Status: **phase 1 built** (2026-10-09: read-only chat view, `src/chat/`, `public/chat.js`); phases 2–6 open.
+Tracked as issues.md #3. Research behind it: claude-code-viewer (upstream v0.8.2),
 T3 Code (pingdotgg/t3code), claude.ai/code, the Claude Code source (2026-03 snapshot) checked against the
 installed 2.1.296, and Codex CLI 0.153.4.
 
@@ -242,16 +243,17 @@ earlier", rather than a virtualization library.
 ## Edge cases checklist
 
 Reading:
-- [ ] Partial last line, a file that shrinks, a file that doesn't exist yet (a new session has no file until the first prompt)
-- [ ] Rewind/edit branches: render only the active chain
-- [ ] `/clear` (new file), `/compact` (divider), `--resume` (same file), `--fork-session` (new file)
+- [x] Partial last line, a file that shrinks, a file that doesn't exist yet (a new session has no file until the first prompt)
+- [x] Rewind/edit branches: render only the active chain
+- [x] `/clear` (new file), `/compact` (divider), `--resume` (same file), `--fork-session` (new file)
 - [ ] Two live runs on one session id (ideas-fridge §4): writes interleave. Show a warning and use the active
       chain, never file order.
-- [ ] Parallel tool calls whose results interleave between the assistant's block lines
-- [ ] Subagents in separate files, both old and new layouts; nested subagents
-- [ ] Huge outputs (tool results above 1MB, base64 images): omit and fetch on demand
-- [ ] Unknown entry types and tools: a raw row, never a crash
-- [ ] Interrupted turns, API errors, `turn_duration`, background `<task-notification>`
+- [x] Parallel tool calls whose results interleave between the assistant's block lines
+- [x] Subagents in separate files, both old and new layouts
+- [ ] Nested subagents (a subagent's own subagents: untested)
+- [x] Huge outputs (tool results above 1MB, base64 images): omit and fetch on demand
+- [x] Unknown entry types and tools: a raw row, never a crash
+- [x] Interrupted turns, API errors, `turn_duration`, background `<task-notification>`
 - [ ] Transcripts of sessions lofiwave didn't start (read-only), and sessions on a remote host (later, fridge §3)
 
 Input:
@@ -269,9 +271,9 @@ Approvals:
 - [ ] Prompts not handled through hooks (trust, MCP auth, `/config`): fall back to the terminal banner
 
 Display:
-- [ ] Untrusted markdown and HTML in transcripts: sanitize; images only from our blob endpoint
+- [x] Untrusted markdown and HTML in transcripts: sanitize; images only from our blob endpoint
 - [ ] Linkify only paths that exist; file reads restricted to cwd or `$HOME` through `realpath`
-- [ ] Scroll anchoring with late-rendering markdown, images and syntax highlighting
+- [x] Scroll anchoring with late-rendering markdown, images and syntax highlighting
 - [ ] Mobile layout and the composer under the on-screen keyboard
 
 ## Codex

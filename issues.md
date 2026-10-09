@@ -6,7 +6,7 @@ Open work, newest first within each status. One heading per issue; close it by m
 ## Open
 
 ### #3 Chat view, toggleable with the terminal
-*Opened 2026-10-09 · designed in [`docs/rendered-view.md`](docs/rendered-view.md), nothing built*
+*Opened 2026-10-09 · designed in [`docs/rendered-view.md`](docs/rendered-view.md) · phase 1 (read-only chat view) built*
 
 An interactive run gets a second view: the same live session as messages, tool cards, diffs and images,
 with a composer that takes uploads and answers approvals. You can switch between it and the xterm view at
@@ -14,7 +14,10 @@ any time. The TUI in tmux stays the only process running the session; the chat v
 and types into the pane. It also ends the terminal scrolling back-and-forth (`81e63a9` → `ed62c8d` →
 `ad17cb8`), because the chat view scrolls separately in each browser.
 
-Six phases, one PR each (in the doc). First, the five spikes at the end of the doc:
+Six phases, one PR each (in the doc). Phase 1 is in: the Chat view for Claude runs and, read-only in a dialog,
+for Claude sessions lofiwave didn't start. Still open from phase 1's checklist: warning when two live runs share
+a session id, nested subagents, the phone layout on a real device. Before phases 2 and 3, the five spikes at the
+end of the doc:
 - Does pasting an image path into a live TUI with `tmux paste-buffer -p` attach it?
 - Do `--settings` hooks merge with the user's own hooks or replace them?
 - Do HTTP hooks need `allowedHttpHookUrls`, and can their headers carry the token?

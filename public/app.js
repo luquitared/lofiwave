@@ -172,7 +172,7 @@ const typeByName = (n) => types.find((t) => t.name === n);
 $$("nav button").forEach((b) => b.addEventListener("click", () => switchTab(b.dataset.tab)));
 function switchTab(name, push = true) {
   if (name !== "runs" && selectedRun) closeRun(false);
-  if (name !== "console") { closeTerm(); syncFull(false); }
+  if (name !== "console") { closeTerm(); closeChat(); syncFull(false); }
   activeTab = name;
   const pages = {
     console: ["Console", "Your live sessions, and a terminal to talk to them."],
@@ -291,6 +291,7 @@ function renderProcRows(tbody, procs) {
         ? h("button", { class: "small primary", title: "this session already has a terminal here", onclick: () => { selectConsoleRunId(p.run_id); switchTab("console"); loadConsole(); } }, "Open terminal")
         : p.session?.session_id && !p.child ? h("button", { class: "small", title: `${p.session.resume_cmd} — in a tmux session managed here`, onclick: () => takeOver(p) }, "Take over here") : "",
       !p.child ? remoteControlBtn(p.pid, p.session, p.drivable || Boolean(p.session?.tmux)) : "",
+      !p.child && !p.drivable ? chatBtn(p.session) : "",
       p.run_id && !p.child ? h("button", { class: "small", onclick: () => guard(async () => { const r = await post(`/runs/${p.run_id}/restart`); toast(`restarted as run #${r.id}`, true); refresh(); })() }, "Restart") : "",
       h("button", { class: "small danger", onclick: () => confirmDo(`Stop pid ${p.pid} (${p.type})?`, async () => { await del(`/processes/${p.pid}`); toast("SIGTERM sent", true); refresh(); }) }, "Stop"),
       h("button", { class: "small danger", title: "SIGKILL", onclick: () => confirmDo(`Force kill pid ${p.pid}?`, async () => { await del(`/processes/${p.pid}?force=1`); toast("SIGKILL sent", true); refresh(); }) }, "Kill"),
@@ -725,6 +726,7 @@ function renderRail() {
       p.session?.session_id
         ? h("div", { class: "row", style: "gap:6px" },
             h("button", { class: "small", title: "reopen this session in a tmux pane here, so it can be driven from the browser", onclick: () => takeOver(p) }, "Take over here"),
+            chatBtn(p.session),
             remoteControlBtn(p.pid, p.session, Boolean(p.session.tmux)))
         : h("div", { class: "rail-sub dim" }, "no session id — can't take over"),
     )),
@@ -794,10 +796,14 @@ function enableRemote(pid, s, inPane) {
 
 function renderPane() {
   const r = consoleRun;
-  if (!r || !termMode()) { closeTerm(); syncFull(false); }
+  const mode = paneMode(r);
+  if (!r || r.id !== liveTerm?.runId) closeTerm();
+  else if (mode !== "terminal") parkTerm();
+  if (!r || mode !== "chat" || liveChat?.runId !== r.id) closeChat();
+  if (mode !== "terminal") syncFull(false);
   // Rebuild only when the run or its session changes: a rebuild would drop whatever is half-typed in the keys field,
   // and idle/working flips constantly. Everything volatile is patched in place below.
-  const sig = r ? JSON.stringify([r.id, r.status, r.meta?.remote_url || "", sessOf(r)?.session_id || "", sessOf(r)?.web_url || ""]) : `empty:${consoleData.live.length}:${consoleData.adoptable.length}`;
+  const sig = r ? JSON.stringify([r.id, r.status, mode, r.meta?.remote_url || "", sessOf(r)?.session_id || "", sessOf(r)?.web_url || ""]) : `empty:${consoleData.live.length}:${consoleData.adoptable.length}`;
   if (sig !== paneSig) {
     paneSig = sig;
     $("#session-pane").replaceChildren(...(r ? paneFor(r) : [emptyPane()]));
@@ -807,13 +813,15 @@ function renderPane() {
   const dot = $("#pane-dot"); if (dot) { dot.className = `dot ${s?.status || ""}`; dot.title = s?.status || ""; }
   const label = $("#pane-label"); if (label && label.textContent !== runLabel(r)) label.textContent = runLabel(r);
   const up = $("#pane-up"); if (up) up.textContent = `up ${fmtDur((Date.now() - r.started_at) / 1000)}`;
-  syncFull(termMode());
-  if (termMode()) openTerm(r.id);
+  syncFull(mode === "terminal");
+  if (mode === "terminal") openTerm(r.id);
+  else if (mode === "chat") openChat(r.id);
   else pollScreenInto($("#console-screen"), r.id, $("#console-follow")?.checked !== false);
 }
 
 function paneFor(r) {
   const s = sessOf(r);
+  const mode = paneMode(r);
   return [
     h("div", { class: "pane-head" },
       h("div", { class: "pane-id" },
@@ -828,16 +836,16 @@ function paneFor(r) {
         s?.web_url ? h("a", { href: s.web_url, target: "_blank" }, h("button", { class: "small" }, "Open on web ↗")) : remoteControlBtn(r.pid, s, true),
         h("button", { class: "small", title: "the full run record: command, env, log, sessions", onclick: () => openRun(r.id) }, "Details"),
         h("button", { class: "small danger", onclick: () => confirmDo(`Stop "${runLabel(r)}" (run #${r.id})?`, async () => { await post(`/runs/${r.id}/kill`); toast("stopped", true); consoleRun = null; railSig = paneSig = ""; loadConsole(); }) }, "Stop"),
-        termMode() ? h("button", { class: "small", id: "select-btn", title: "turn the mouse into a plain text selector: drag to select, it's copied when you let go; click again to give the mouse back to tmux", onclick: () => toggleSelect() }, selectLabel()) : "",
-        termMode() ? h("button", { class: "small", id: "full-btn", title: "hide the sidebar and session list, terminal edge to edge (Ctrl+Shift+F)", onclick: () => toggleFull() }, fullLabel()) : "",
-        h("button", { class: "small", title: termMode() ? "switch to the simple view: a polled screen and a text box (good on a phone or a flaky link)" : "switch to a real terminal in the browser", onclick: () => { setTermMode(!termMode()); paneSig = ""; renderPane(); } }, termMode() ? "Simple view" : "Terminal view"),
-        termMode() ? "" : h("label", { class: "muted follow" }, h("input", { type: "checkbox", id: "console-follow", checked: true }), " follow"),
+        mode === "terminal" ? h("button", { class: "small", id: "select-btn", title: "turn the mouse into a plain text selector: drag to select, it's copied when you let go; click again to give the mouse back to tmux", onclick: () => toggleSelect() }, selectLabel()) : "",
+        mode === "terminal" ? h("button", { class: "small", id: "full-btn", title: "hide the sidebar and session list, terminal edge to edge (Ctrl+Shift+F)", onclick: () => toggleFull() }, fullLabel()) : "",
+        viewSwitch(r, mode),
+        mode === "simple" ? h("label", { class: "muted follow" }, h("input", { type: "checkbox", id: "console-follow", checked: true }), " follow") : "",
       ),
     ),
-    ...(termMode()
-      ? [h("div", { id: "console-term", class: "term" }, h("span", { class: "term-status" }, "connecting…"))]
+    ...(mode === "terminal" ? [h("div", { id: "console-term", class: "term" }, h("span", { class: "term-status" }, "connecting…"))]
+      : mode === "chat" ? [h("div", { id: "console-chat" })]
       : [h("pre", { id: "console-screen", class: "screen" }, "connecting to the terminal…"), keysForm(r.id, () => pollScreenInto($("#console-screen"), r.id, true))]),
-    termMode() ? h("div", { class: "term-hint muted" }, copyHint()) : "",
+    mode === "terminal" ? h("div", { class: "term-hint muted" }, copyHint()) : "",
     h("div", { class: "pane-foot muted mono" }, `tmux attach -t ${r.meta?.tmux || "?"}`),
   ];
 }
@@ -886,13 +894,33 @@ function syncFull(hasTerm) {
 }
 
 // ---------------------------------------------------------------- live terminal (xterm.js ⟷ websocket ⟷ tmux attach)
-/** Terminal view by default where it works well; the simple view on phones (no keys for Esc/Tab/arrows) or if xterm didn't load. */
-function termMode() {
-  if (!window.Terminal || !window.FitAddon) return false;
+/**
+ * How the pane shows a run: "chat" (the session rendered from its transcript, Claude only), "terminal" (xterm.js on
+ * the tmux pane) or "simple" (a polled screen and a text box). Saved per browser. Terminal by default where it works
+ * well; the simple view on phones (no keys for Esc/Tab/arrows) or if xterm didn't load.
+ */
+function paneMode(r) {
+  const xterm = Boolean(window.Terminal && window.FitAddon);
   const saved = localStorage.getItem("ac_term_mode");
-  return saved ? saved === "terminal" : !matchMedia("(max-width: 700px)").matches;
+  if (saved === "chat" && chatable(r)) return "chat";
+  if (saved === "terminal" && xterm) return "terminal";
+  if (saved === "simple") return "simple";
+  return xterm && !matchMedia("(max-width: 700px)").matches ? "terminal" : "simple";
 }
-function setTermMode(on) { localStorage.setItem("ac_term_mode", on ? "terminal" : "simple"); }
+function setPaneMode(mode) { localStorage.setItem("ac_term_mode", mode); paneSig = ""; renderPane(); }
+/** The chat view reads Claude Code transcripts; other agents (Codex) and plain commands get the terminal only. */
+function chatable(r) {
+  if (!r) return false;
+  const s = sessOf(r);
+  if (s) return s.agent === "claude";
+  return /(^|\/)claude$/.test(typeByName(r.type_name)?.command || "");
+}
+function viewSwitch(r, mode) {
+  const views = [["chat", "Chat", "the session as messages, tool calls and diffs, read from its transcript; scrolls on its own"], ["terminal", "Terminal", "a real terminal in the browser"], ["simple", "Simple", "a polled screen and a text box (good on a phone or a flaky link)"]]
+    .filter(([m]) => (m !== "chat" || chatable(r)) && (m !== "terminal" || (window.Terminal && window.FitAddon)));
+  return h("div", { class: "seg", role: "group", "aria-label": "View" },
+    ...views.map(([m, label, title]) => h("button", { class: `small${m === mode ? " on" : ""}`, title, "aria-pressed": String(m === mode), onclick: () => m !== mode && setPaneMode(m) }, label)));
+}
 
 /**
  * A mouse report for pointer movement with no button held. tmux treats any input as activity and sizes the shared
@@ -975,15 +1003,37 @@ function closeTerm() {
   if (!liveTerm) return;
   const t = liveTerm; liveTerm = null;
   closeHistory(t);
-  t.closed = true; clearTimeout(t.retry); t.ro?.disconnect();
+  t.closed = true; clearTimeout(t.retry); clearTimeout(t.parkTimer); t.ro?.disconnect();
+  t.el.remove();
   try { t.ws?.close(); } catch {}
   t.term.dispose();
 }
+/**
+ * Switching to another view keeps the terminal attached, out of sight, for a minute, so flipping back is instant.
+ * A parked terminal sends nothing: no resizes (with window-size latest a hidden tab would resize the pane for
+ * everyone), and no input.
+ */
+function parkTerm() {
+  const t = liveTerm;
+  if (!t || t.parked) return;
+  t.parked = true;
+  $("#term-park").append(t.el);
+  t.parkTimer = setTimeout(() => { if (liveTerm === t && t.parked) closeTerm(); }, 60_000);
+}
+
 /** Attach the pane's #console-term to run `runId` (no-op if it already is). Reconnects while the run is live. */
 function openTerm(runId) {
   const el = $("#console-term");
   if (!el) return closeTerm();
   if (liveTerm && liveTerm.runId === runId && liveTerm.el === el) return;
+  if (liveTerm?.parked && liveTerm.runId === runId) {
+    const t = liveTerm;
+    clearTimeout(t.parkTimer); t.parked = false;
+    el.replaceWith(t.el);
+    try { t.fit.fit(); } catch {}
+    t.term.focus();
+    return;
+  }
   closeTerm();
   const term = new Terminal(termOptions({ cursorBlink: true, scrollback: 5000 }));
   const fit = new FitAddon.FitAddon();
@@ -1016,8 +1066,8 @@ function openTerm(runId) {
     const sel = from.hasSelection() && from.getSelection();
     if (sel) navigator.clipboard?.writeText(sel).then(() => toast(`copied ${sel.length} chars`, true), () => {});
   });
-  term.onResize(({ cols, rows }) => send({ t: "r", cols, rows }));
-  t.ro = new ResizeObserver(() => { try { fit.fit(); t.hist?.fit.fit(); } catch {} });
+  term.onResize(({ cols, rows }) => { if (!t.parked) send({ t: "r", cols, rows }); });
+  t.ro = new ResizeObserver(() => { if (t.parked) return; try { fit.fit(); t.hist?.fit.fit(); } catch {} });
   t.ro.observe(el);
   const connect = () => {
     if (t.closed) return;
@@ -1044,9 +1094,37 @@ function openTerm(runId) {
 document.addEventListener("visibilitychange", () => {
   const t = liveTerm;
   if (!t) return;
-  if (document.hidden) { clearTimeout(t.retry); const ws = t.ws; t.ws = null; try { ws?.close(); } catch {} }
+  if (document.hidden && t.parked) closeTerm();
+  else if (document.hidden) { clearTimeout(t.retry); const ws = t.ws; t.ws = null; try { ws?.close(); } catch {} }
   else if (!t.ws || t.ws.readyState > 1) t.connect();
 });
+
+// ---------------------------------------------------------------- chat view (public/chat.js)
+let liveChat = null; // { runId, view }
+function openChat(runId) {
+  if (!liveChat || liveChat.runId !== runId) {
+    closeChat();
+    liveChat = { runId, view: new ChatView(`/runs/${runId}`, { onTerminal: () => setPaneMode(window.Terminal && window.FitAddon ? "terminal" : "simple") }) };
+  }
+  // A rebuilt pane has a fresh placeholder: move the live view into it.
+  const el = $("#console-chat"), root = liveChat.view.root;
+  if (el && el !== root) { el.replaceWith(root); root.id = "console-chat"; }
+}
+function closeChat() { if (liveChat) { liveChat.view.close(); liveChat.view.root.remove(); liveChat = null; } }
+
+/** A session lofiwave didn't start (Agents tab, the rail's "started outside"): its chat, read-only, in a dialog. */
+let dialogChat = null;
+function openSessionChat(s) {
+  const dlg = $("#chat-dialog");
+  dialogChat?.close();
+  dialogChat = new ChatView(`/sessions/${encodeURIComponent(s.session_id)}`);
+  $("#chat-dialog-title").textContent = s.title || s.name || `session ${shortId(s.session_id)}`;
+  $("#chat-dialog-meta").textContent = `${s.agent} · ${shortCwd(s.cwd)} · ${s.session_id}`;
+  $("#chat-dialog-body").replaceChildren(dialogChat.root);
+  dlg.onclose = () => { dialogChat?.close(); dialogChat = null; };
+  if (!dlg.open) dlg.showModal();
+}
+const chatBtn = (s) => (s?.agent === "claude" && s.session_id ? h("button", { class: "small", title: "read this session's conversation (read-only)", onclick: () => openSessionChat(s) }, "View chat") : "");
 
 function emptyPane() {
   const n = consoleData.adoptable.length;
