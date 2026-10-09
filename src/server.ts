@@ -1,3 +1,4 @@
+import type { ServerWebSocket } from "bun";
 import { join, dirname, basename } from "node:path";
 import { readdirSync, existsSync } from "node:fs";
 import { hostname, homedir } from "node:os";
@@ -10,6 +11,7 @@ import { startScheduler, refreshNextRun, runWorkflow, computeNext } from "./sche
 import { validateCron } from "./cron";
 import { renderDocs, apiIndex } from "./docs";
 import { ttyFor, ttySocket, type TtyData } from "./tty";
+import { chatFor, chatSocket, chatEarlier, chatBlob, chatSubagent, type ChatData } from "./chat";
 import { actor, identify, touch, online, passwordMatches, cleanName, makeSession, sessionCookie, loginBlocked, loginFailed, TOKEN_ACTOR } from "./auth";
 
 const PUBLIC_DIR = join(config.root, "public");
@@ -581,6 +583,15 @@ route("GET", "/api/runs/:id/sessions/:sid/transcript", (_r, p) => {
   return new Response(Bun.file(s.transcript_path), { headers: { "content-type": "text/plain; charset=utf-8" } });
 });
 
+// ---- chat view (read-only, from the transcript; the live updates come over the /chat WebSocket, see src/chat)
+// GET …/chat?before=<ordinal>: the turns before what the browser has. GET …/chat/blob?ref=: an image or a long output.
+// GET …/chat/subagent/:agent: a subagent's own conversation. The same three exist for any session by id.
+for (const [prefix, kind] of [["/api/runs/:id", "run"], ["/api/sessions/:id", "session"]] as const) {
+  route("GET", `${prefix}/chat`, (_r, p, url) => json(chatEarlier(kind, p.id, int(url.searchParams.get("before"), "before", Number.MAX_SAFE_INTEGER))));
+  route("GET", `${prefix}/chat/blob`, (_r, p, url) => chatBlob(kind, p.id, str(url.searchParams.get("ref") ?? undefined, "ref", { required: true }), url.searchParams.get("agent") ?? ""));
+  route("GET", `${prefix}/chat/subagent/:agent`, (_r, p) => json(chatSubagent(kind, p.id, p.agent)));
+}
+
 route("DELETE", "/api/runs/:id", async (_r, p) => {
   const run = getRun(Number(p.id));
   if (run.status === "running") throw new ApiError(409, "kill the run before deleting it");
@@ -626,32 +637,46 @@ function clientIp(req: Request): string {
   return peer;
 }
 
-const server = Bun.serve<TtyData>({
+type WsData = TtyData | ChatData;
+const isChat = (ws: ServerWebSocket<WsData>): ws is ServerWebSocket<ChatData> => (ws.data as ChatData).kind === "chat";
+
+const server = Bun.serve<WsData>({
   hostname: config.host,
   port: config.port,
   async fetch(req, srv) {
     peers.set(req, srv.requestIP(req)?.address ?? "");
-    const tty = new URL(req.url).pathname.match(/^\/api\/runs\/(\d+)\/tty$/);
-    if (tty && req.headers.get("upgrade")?.toLowerCase() === "websocket") {
-      const r = upgradeTty(req, srv, Number(tty[1]));
+    const path = new URL(req.url).pathname;
+    const ws = req.headers.get("upgrade")?.toLowerCase() === "websocket";
+    const tty = ws && path.match(/^\/api\/runs\/(\d+)\/tty$/);
+    const chat = ws && path.match(/^\/api\/(runs|sessions)\/([^/]+)\/chat$/);
+    if (tty || chat) {
+      const r = upgradeSocket(req, srv, (url, who) => tty ? ttyFor(Number(tty[1]), url, who) : chatFor(chat![1] === "runs" ? "run" : "session", decodeURIComponent(chat![2]), who));
       return r ? harden(r) : undefined;
     }
     return harden(await handle(req));
   },
-  websocket: ttySocket,
+  websocket: {
+    open: (ws) => (isChat(ws) ? chatSocket.open(ws) : ttySocket.open(ws as ServerWebSocket<TtyData>)),
+    message: (ws, msg) => (isChat(ws) ? chatSocket.message() : ttySocket.message(ws as ServerWebSocket<TtyData>, msg)),
+    close: (ws) => (isChat(ws) ? chatSocket.close(ws) : ttySocket.close(ws as ServerWebSocket<TtyData>)),
+  },
 });
 
-/** GET /api/runs/:id/tty (WebSocket): a live terminal on an interactive run (see src/tty.ts). Returns a Response only on failure. */
-function upgradeTty(req: Request, srv: Bun.Server<TtyData>, runId: number): Response | undefined {
+/**
+ * The WebSockets: GET /api/runs/:id/tty, a live terminal on an interactive run (see src/tty.ts), and
+ * GET /api/runs/:id/chat or /api/sessions/:sid/chat, the chat view's live feed (see src/chat). Returns a Response
+ * only on failure.
+ */
+function upgradeSocket(req: Request, srv: Bun.Server<WsData>, make: (url: URL, who: string) => WsData): Response | undefined {
   const url = new URL(req.url);
   const who = identify(req, url);
   if (!who) return json({ error: "unauthorized" }, 401);
   // Browsers send Origin on every WebSocket and don't apply CORS to it: refuse other sites' pages outright.
   const origin = req.headers.get("origin");
-  if (origin) { try { if (new URL(origin).host !== req.headers.get("host")) return json({ error: "cross-origin terminal refused" }, 403); } catch { return json({ error: "bad origin" }, 403); } }
+  if (origin) { try { if (new URL(origin).host !== req.headers.get("host")) return json({ error: "cross-origin socket refused" }, 403); } catch { return json({ error: "bad origin" }, 403); } }
   touch(who);
-  let data: TtyData;
-  try { data = ttyFor(runId, url, who); } catch (e: any) { return json({ error: e.message }, e instanceof ApiError ? e.status : 500); }
+  let data: WsData;
+  try { data = make(url, who); } catch (e: any) { return json({ error: e.message }, e instanceof ApiError ? e.status : 500); }
   return srv.upgrade(req, { data }) ? undefined : json({ error: "websocket upgrade failed" }, 400);
 }
 

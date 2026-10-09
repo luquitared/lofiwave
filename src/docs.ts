@@ -86,6 +86,7 @@ export function apiIndex(base: string) {
       runs: [`GET ${api}/runs?workflow_id=&status=&type=&limit=&offset=`, `GET|DELETE ${api}/runs/:id`, `GET ${api}/runs/:id/log?offset=|raw=1`, `POST ${api}/runs/:id/kill?force=1`, `POST ${api}/runs/:id/restart`],
       interactive: [`POST ${api}/processes {interactive: true}`, `GET ${api}/runs/:id/screen?lines=200`, `GET ${api}/runs/:id/history?lines=5000`, `POST ${api}/runs/:id/keys {text, keys, enter}`],
       sessions: [`GET|POST ${api}/runs/:id/sessions`, `PUT ${api}/runs/:id/sessions/:session_id`, `POST ${api}/runs/:id/sessions/:session_id/resume`, `POST ${api}/sessions/resume {session_id, agent?, cwd?}`, `GET ${api}/sessions/:session_id?agent=`, `GET ${api}/runs/:id/sessions/:session_id/transcript`],
+      chat: [`GET ${api}/runs/:id/chat (WebSocket)`, `GET ${api}/runs/:id/chat?before=`, `GET ${api}/runs/:id/chat/blob?ref=&agent=`, `GET ${api}/runs/:id/chat/subagent/:agent_id`, `GET ${api}/sessions/:session_id/chat… (same, by session id)`],
     },
   };
 }

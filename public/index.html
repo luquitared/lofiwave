@@ -185,9 +185,21 @@
     <div class="wide row"><button type="submit" class="primary">Sign in</button></div>
   </form>
 </dialog>
+<dialog id="chat-dialog" class="chat-dialog" aria-labelledby="chat-dialog-title">
+  <div class="chat-dialog-head">
+    <div><h3 id="chat-dialog-title"></h3><div id="chat-dialog-meta" class="muted mono"></div></div>
+    <form method="dialog"><button class="small">Close</button></form>
+  </div>
+  <div id="chat-dialog-body"></div>
+</dialog>
 <div id="toast" role="status" aria-live="polite" hidden></div>
+<div id="term-park" hidden></div>
 <script src="/vendor/xterm.js"></script>
 <script src="/vendor/addon-fit.js"></script>
+<script src="/vendor/marked.min.js"></script>
+<script src="/vendor/purify.min.js"></script>
+<script src="/vendor/highlight.min.js"></script>
+<script src="/chat.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>
