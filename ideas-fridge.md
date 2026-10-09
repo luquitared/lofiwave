@@ -53,7 +53,7 @@ Two catches:
 the vague local/remote framing. Everything the console sees today comes from `ps` on *this* box, so "local"
 is currently universal and therefore not a distinction worth drawing.
 
-### What was verified (2026-09-12, against lucas-XPS-8930 over `ssh xps`)
+### What was verified (2026-09-12, against a second Linux box over ssh)
 
 - **Claude Code's own peer roster does see remote sessions** — a session can list Remote Control peers on
   other machines, with idle/offline status. **But there is no supported external access to it:** no CLI
@@ -64,7 +64,7 @@ is currently universal and therefore not a distinction worth drawing.
 - **Reading `~/.claude` over ssh is a strict superset** and needs no API at all:
   - `~/.claude/sessions/<pid>.json` → live sessions (check the pid is alive; stale files linger)
   - `~/.claude/projects/**/<id>.jsonl` → every session ever, i.e. the closed ones
-  - On the XPS: **4 live, 31 on disk.** The roster only showed the 3 with an *active* Remote Control bridge,
+  - On that box: **4 live, 31 on disk.** The roster only showed the 3 with an *active* Remote Control bridge,
     and none of the 27 closed ones.
 - **`cwd` must come from inside the transcript.** The project folder name is a lossy slug (every
   non-alphanumeric becomes `-`, so `/home/lucas/robot/ent-scrub-tech` →
@@ -92,7 +92,7 @@ socket limit, and ssh then "succeeds" in 0.01s while doing nothing. Check exit c
 
 `tmux()` in `src/runner.ts` is just `Bun.spawn(["tmux", ...args])`, and `screenOf`/`sendKeys` are nothing but
 `capture-pane` and `send-keys`. **Give that one function a host** and the same primitives run as
-`ssh xps tmux capture-pane …` over the persistent master — remote sessions become fully drivable from the
+`ssh <host> tmux capture-pane …` over the persistent master — remote sessions become fully drivable from the
 browser, which a claude.ai roster entry can never be. Same code, one indirection.
 
 ### Shape
@@ -117,7 +117,7 @@ banner on the pane naming the twin, with a jump to it.
 
 ## 5. Restarts leave children behind — and the memory figure lies
 
-Noticed 2026-09-12 on the XPS, where `systemctl --user status agent-console` reported **`Memory: 8.3G`** for a
+Noticed 2026-09-12 on a second Linux box, where `systemctl --user status agent-console` reported **`Memory: 8.3G`** for a
 console that had restarted three seconds earlier.
 
 **It was page cache, not usage.** `systemctl status` prints `memory.current`, which charges the cgroup for the
@@ -158,6 +158,7 @@ Ideas:
 
 ## 6. Smaller notes
 
-- **`ideas-fridge.md` is not a backlog.** If something here is actually next, it belongs in an issue.
+- **`ideas-fridge.md` is not a backlog.** If something here is actually next, it moves to `issues.md`.
 - Per-viewer auth tokens (see §2) are worth doing on their own, before any of the terminal work.
 - `tailscale serve` would put the console on HTTPS 443 instead of plain HTTP on 7770.
+

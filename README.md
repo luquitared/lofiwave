@@ -148,7 +148,7 @@ Useful extra args: Claude Code `--output-format json`, `--model ...`; Codex `--f
 
 ## API
 
-**Live docs:** `GET /api/docs` returns this section as markdown with the real base URL filled in, plus a step-by-step quickstart for registering an app. Give that URL (e.g. `http://lucas-xps-8930:7770/api/docs`) to a coding agent and it has everything it needs. `/docs` shows the same rendered in the browser (the **API** button in the UI header), and `GET /api` returns a JSON index of endpoints. Both are readable without the auth token.
+**Live docs:** `GET /api/docs` returns this section as markdown with the real base URL filled in, plus a step-by-step quickstart for registering an app. Give that URL (e.g. `http://my-box:7770/api/docs`) to a coding agent and it has everything it needs. `/docs` shows the same rendered in the browser (the **API** button in the UI header), and `GET /api` returns a JSON index of endpoints. Both are readable without the auth token.
 
 Base URL `http://host:7770/api`. All bodies and responses are JSON. Errors are `{"error": "message"}` with a 4xx/5xx status. Timestamps are Unix milliseconds. Fields that take an argument list (`args`, `extra_args`) accept either a JSON array or a single shell-style string (`"--foo 'a b'"`).
 
