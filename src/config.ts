@@ -44,6 +44,11 @@ export const config = {
    * sign-in name, case-insensitively. Anyone else (and scheduled/API runs) gets git's own config.
    */
   gitAuthors: parseGitAuthors(process.env.GIT_AUTHORS ?? ""),
+  /**
+   * Permission mode every claude run starts in (headless, interactive, restart and resume): passed as
+   * `--permission-mode <mode>` unless the run's args already pick one. E.g. `bypassPermissions` on a sandbox VM.
+   */
+  claudePermissionMode: process.env.CLAUDE_PERMISSION_MODE?.trim() || "",
   schedulerIntervalMs: Number(process.env.SCHEDULER_INTERVAL_MS ?? 15_000),
   /** How much of the end of a run's log is copied into runs.output when it finishes. */
   outputTailBytes: Number(process.env.OUTPUT_TAIL_BYTES ?? 64 * 1024),
