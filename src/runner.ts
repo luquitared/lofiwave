@@ -101,8 +101,13 @@ export function buildCommand(type: ProcessTypeRow, opts: { cwd: string; prompt?:
   if (needsPrompt && !prompt.trim() && !opts.interactive) throw new ApiError(400, `process type "${type.name}" requires a prompt`);
   const vars = { prompt, cwd: opts.cwd, session: opts.resumeSession ?? "" };
   const kept = prompt.trim() ? templateArgs : templateArgs.filter((a) => !a.includes("{prompt}"));
-  const args = [...kept.map((a) => substitute(a, vars)), ...(opts.extraArgs ?? [])];
-  return { command: substitute(type.command, vars), args, template_len: kept.length };
+  const command = substitute(type.command, vars);
+  const templ = kept.map((a) => substitute(a, vars));
+  const extra = opts.extraArgs ?? [];
+  // The configured default mode goes in with the template (so restarts don't count it as an extra arg); args that pick a mode win.
+  const picksMode = [...templ, ...extra].some((a) => a === "--dangerously-skip-permissions" || a === "--permission-mode" || a.startsWith("--permission-mode="));
+  if (config.claudePermissionMode && basename(command) === "claude" && !picksMode) templ.push("--permission-mode", config.claudePermissionMode);
+  return { command, args: [...templ, ...extra], template_len: templ.length };
 }
 
 export async function startRun(opts: StartOptions): Promise<RunRow> {
