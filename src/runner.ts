@@ -8,7 +8,7 @@ import { db, now, hydrate, type ProcessTypeRow, type RunRow, type WorkflowRow } 
 import { config, logDir } from "./config";
 import { killTree, pidAlive } from "./procs";
 import { discoverCodexSession, codexRolloutPath, claudeRegistry, claudeWebUrl, claudeTranscriptPath } from "./agents";
-import { openTerminalForTmux } from "./terminal";
+import { openTerminalForTmux, macTabOf, typeIntoMacTab } from "./terminal";
 import { actor } from "./auth";
 import { ttyViewers } from "./tty";
 
@@ -401,9 +401,10 @@ type RawRun = RunRow;
 /**
  * Turn Remote Control on for a claude session that is already running, so it shows up in the Claude app.
  *
- * - In a tmux pane (an interactive run of ours, or any claude whose registry entry names a pane): type `/remote-control`
- *   into it. Whatever was half-typed is cleared first with Ctrl+U, which claude keeps for Ctrl+Y.
- * - Anywhere else (a plain terminal window, a headless run) there is nothing to type into. With `replace`, stop that
+ * - In a tmux pane (an interactive run of ours, or any claude whose registry entry names a pane), or on macOS in an
+ *   iTerm or Terminal.app tab: type `/remote-control` into it. Whatever was half-typed is cleared first with Ctrl+U,
+ *   which claude keeps for Ctrl+Y.
+ * - Anywhere else (another terminal app, a headless run) there is nothing to type into. With `replace`, stop that
  *   process and reopen the same conversation here in tmux with the type's resume_args (which carry --remote-control).
  */
 export async function enableRemoteControl(pid: number, o: { replace?: boolean; terminal?: string } = {}): Promise<{ status: "already" | "enabled" | "pending" | "replaced"; web_url: string; run?: RunRow }> {
@@ -421,14 +422,22 @@ export async function enableRemoteControl(pid: number, o: { replace?: boolean; t
     if (q?.code === 0 && Number(q.out) === pid) target = pane;
   }
 
-  if (target) {
+  // Not in tmux: on macOS, the iTerm or Terminal.app tab it is the foreground program of (null everywhere else).
+  const tab = target ? null : await macTabOf(pid);
+
+  if (target || tab) {
     if (entry.status === "busy") throw new ApiError(409, "the session is working right now; enable Remote Control once it is idle");
-    for (const keys of [["C-u"], ["-l", "--", "/remote-control"]]) {
-      const r = await tmux("send-keys", "-t", target, ...keys);
-      if (r.code !== 0) throw new ApiError(500, `tmux send-keys failed: ${r.err}`);
+    if (tab) {
+      try { await typeIntoMacTab(tab, "\x15/remote-control"); }  // \x15 is Ctrl+U
+      catch (e: any) { throw new ApiError(500, `could not type into the ${tab.app} tab: ${e.message}`); }
+    } else {
+      for (const keys of [["C-u"], ["-l", "--", "/remote-control"]]) {
+        const r = await tmux("send-keys", "-t", target, ...keys);
+        if (r.code !== 0) throw new ApiError(500, `tmux send-keys failed: ${r.err}`);
+      }
+      await Bun.sleep(300);                               // let the slash-command menu catch up before Enter picks it
+      await tmux("send-keys", "-t", target, "Enter");
     }
-    await Bun.sleep(300);                                 // let the slash-command menu catch up before Enter picks it
-    await tmux("send-keys", "-t", target, "Enter");
     for (let i = 0; i < 30; i++) {
       await Bun.sleep(500);
       const bridge = claudeRegistry(true).byPid.get(pid)?.bridgeSessionId;
@@ -441,7 +450,7 @@ export async function enableRemoteControl(pid: number, o: { replace?: boolean; t
     return { status: "pending", web_url: "" };
   }
 
-  if (!o.replace) throw new ApiError(409, `pid ${pid} is not in a tmux pane the console can type into. Pass replace: true to stop it and reopen the conversation here with Remote Control.`);
+  if (!o.replace) throw new ApiError(409, `pid ${pid} is not in a tmux pane or terminal tab the console can type into. Pass replace: true to stop it and reopen the conversation here with Remote Control.`);
   if (run) await killRun(run.id, false);
   else await killTree(pid, false);
   for (let i = 0; i < 50 && pidAlive(pid); i++) await Bun.sleep(200);

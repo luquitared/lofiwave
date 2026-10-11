@@ -772,20 +772,27 @@ function takeOver(p) {
 }
 
 /**
- * Turn Remote Control on for a claude session that is already running. In a tmux pane the console types /remote-control
- * into it; anywhere else there is nothing to type into, so the only way is to stop it and reopen the conversation here.
+ * Turn Remote Control on for a claude session that is already running. In a tmux pane (or, on a Mac, an iTerm or
+ * Terminal.app tab) the console types /remote-control into it; anywhere else there is nothing to type into, so the only
+ * way is to stop it and reopen the conversation here. The server says which (409); we only ask before the reopen.
  */
 function remoteControlBtn(pid, s, inPane) {
   if (!pid || s?.agent !== "claude" || s.web_url) return "";
-  const title = inPane ? "type /remote-control into its terminal, so it shows up in the Claude app" : "stop it and reopen the conversation here with Remote Control on";
+  const title = inPane ? "type /remote-control into its terminal, so it shows up in the Claude app" : "type /remote-control into its terminal if the console can reach it, else offer to reopen it here with Remote Control on";
   return h("button", { class: "small", title, onclick: () => enableRemote(pid, s, inPane) }, "Remote Control");
 }
 function enableRemote(pid, s, inPane) {
   const label = s.title || s.name || `pid ${pid}`;
-  if (!inPane && !confirm(`"${label}" is not in a terminal the console can type into.\n\nStop it and reopen the same conversation here, with Remote Control on? Anything it is doing right now is interrupted.`)) return;
   return guard(async () => {
-    toast(inPane ? "turning on Remote Control…" : "reopening with Remote Control…", true);
-    const r = await post(`/processes/${pid}/remote-control`, inPane ? {} : { replace: true });
+    toast("turning on Remote Control…", true);
+    let r;
+    try { r = await post(`/processes/${pid}/remote-control`, {}); }
+    catch (e) {
+      if (inPane || !/replace: true/.test(e.message)) throw e;
+      if (!confirm(`"${label}" is not in a terminal the console can type into.\n\nStop it and reopen the same conversation here, with Remote Control on? Anything it is doing right now is interrupted.`)) return;
+      toast("reopening with Remote Control…", true);
+      r = await post(`/processes/${pid}/remote-control`, { replace: true });
+    }
     if (r.run) { toast(`reopened as run #${r.run.id}`, true); selectConsoleRunId(r.run.id); switchTab("console"); loadConsole(); return; }
     toast(r.web_url ? "Remote Control is on — the session is in the Claude app" : "sent /remote-control; the web link appears once it connects", true);
     refresh();
