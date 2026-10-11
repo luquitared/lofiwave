@@ -26,6 +26,8 @@ type LiveEntry = {
   done: Promise<void>;
 };
 const live = new Map<number, LiveEntry>();
+/** Runs startRun is still setting up (no pid yet, not in `live`): reconcileRuns must leave them alone. */
+const starting = new Set<number>();
 
 export function getType(name: string): ProcessTypeRow {
   const t = db.query<ProcessTypeRow, [string]>("SELECT * FROM process_types WHERE name = ?").get(name);
@@ -137,6 +139,7 @@ export async function startRun(opts: StartOptions): Promise<RunRow> {
     opts.prompt ?? "", JSON.stringify(env), opts.trigger, t, JSON.stringify(meta),
   );
   const id = Number(ins.lastInsertRowid);
+  starting.add(id);
   const logPath = join(logDir, `run-${id}.log`);
   if (interactive) { meta.interactive = true; meta.tmux = tmuxSessionName(id); }
   db.prepare("UPDATE runs SET log_path = ?, meta = ? WHERE id = ?").run(logPath, JSON.stringify(meta), id);
@@ -163,6 +166,7 @@ export async function startRun(opts: StartOptions): Promise<RunRow> {
   };
 
   const fail = async (msg: string) => {
+    starting.delete(id);
     sink.write(`\n${msg}\n`);
     await sink.end();
     db.prepare("UPDATE runs SET status = 'error', ended_at = ?, error = ? WHERE id = ?").run(now(), msg, id);
@@ -242,6 +246,7 @@ export async function startRun(opts: StartOptions): Promise<RunRow> {
   db.prepare("UPDATE runs SET pid = ? WHERE id = ?").run(entry.pid, id);
   if (opts.workflow) db.prepare("UPDATE workflows SET last_run_at = ? WHERE id = ?").run(t, opts.workflow.id);
   live.set(id, entry);
+  starting.delete(id);
   if (timeoutSec > 0) {
     entry.timer = setTimeout(() => {
       entry.killedBy = "timeout";
@@ -488,7 +493,8 @@ export function readLogFrom(path: string | null, offset: number, maxBytes = 512 
 export function reconcileRuns() {
   const running = db.query<RunRow, []>("SELECT * FROM runs WHERE status = 'running'").all();
   for (const r of running) {
-    if (live.has(r.id)) continue;
+    // Still starting: opening its terminal window (osascript) can take seconds, longer if the app is slow to answer.
+    if (live.has(r.id) || starting.has(r.id)) continue;
     if (r.pid && pidAlive(r.pid)) {
       const meta = JSON.parse(r.meta || "{}");
       if (!meta.orphan) {
