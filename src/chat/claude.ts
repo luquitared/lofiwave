@@ -232,7 +232,16 @@ export function activeChain(byUuid: Map<string, Rec>, order: string[]): Rec[] {
     const next = r.parent ?? r.logicalParent;
     r = next ? byUuid.get(next) : undefined;
   }
-  return chain.reverse();
+  chain.reverse();
+  // Parallel tool calls: the chain runs through the last call's result, and each earlier result hangs off its own
+  // tool_use as a side branch (2.1.296). Put those back right after the entry they answer.
+  const side = new Map<string, Rec[]>();
+  for (const uuid of order) {
+    const s = byUuid.get(uuid);
+    if (!s?.results?.length || seen.has(s.uuid) || !s.parent || !seen.has(s.parent)) continue;
+    side.set(s.parent, [...(side.get(s.parent) ?? []), s]);
+  }
+  return side.size ? chain.flatMap((c) => [c, ...(side.get(c.uuid) ?? [])]) : chain;
 }
 
 // ---------------------------------------------------------------- projection

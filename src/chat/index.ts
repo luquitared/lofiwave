@@ -12,7 +12,7 @@
  *   {t:"status", status, waiting_for, read_only}
  *   {t:"requests", requests}   (runs only: the approvals waiting on the browser, see ./approvals.ts; also in hello)
  * The client sends nothing on the socket. Older turns come from GET …/chat?before=<ordinal>, big payloads from
- * GET …/chat/blob?ref=, typing goes through POST /api/runs/:id/chat/send (see ./input.ts), and answers through
+ * GET …/chat/blob?ref=, files on disk from GET …/chat/file?path= (see ./files.ts), typing goes through POST /api/runs/:id/chat/send (see ./input.ts), and answers through
  * POST /api/runs/:id/chat/requests/:rid.
  */
 import type { ServerWebSocket } from "bun";
@@ -350,6 +350,13 @@ function subagentTranscript(feed: Feed, agentId: string) {
   subCache.set(path, out);
   if (subCache.size > 50) subCache.delete(subCache.keys().next().value!);
   return out;
+}
+
+/** The folder the session's relative paths are in: Claude's cwd from the transcript, else the run's (for ./files.ts). */
+export function chatCwd(kind: "run" | "session", id: string): string {
+  const feed = feedFor(chatSource(kind, id));
+  if (feed.transcript?.cwd) return feed.transcript.cwd;
+  return feed.source.runId ? db.query<RunRow, [number]>("SELECT * FROM runs WHERE id = ?").get(feed.source.runId)?.cwd ?? "" : "";
 }
 
 export function chatSubagent(kind: "run" | "session", id: string, agentId: string) {
