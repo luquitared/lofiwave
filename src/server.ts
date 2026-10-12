@@ -5,7 +5,7 @@ import { config } from "./config";
 import { db, now, hydrate, type ProcessTypeRow, type WorkflowRow, type RunRow, type SessionRow, type ApiKeyRow } from "./db";
 import { listOsProcesses, cwdOf, killTree, type OsProcess } from "./procs";
 import { ApiError, startRun, killRun, restartRun, getRun, getType, readLogFrom, isLive, buildCommand, screenOf, historyOf, sendKeys, tmuxPath, recordSession, resumeSession, resumeAgentSession, enableRemoteControl } from "./runner";
-import { describeSession, sessionForPid, locateSession, type SessionInfo } from "./agents";
+import { describeSession, sessionForPid, locateSession, transcriptMessages, type SessionInfo } from "./agents";
 import { startScheduler, refreshNextRun, runWorkflow, computeNext } from "./scheduler";
 import { validateCron } from "./cron";
 import { renderDocs, apiIndex } from "./docs";
@@ -407,7 +407,19 @@ route("GET", "/api/console", async () => {
   const liveRunIds = new Set(live.map((r) => r.id));
   // adoptable: agent processes on this machine the console cannot drive (started in a terminal, or a headless run).
   const adoptable = (await listConsoleProcesses(undefined, "agent")).filter((p) => !p.child && !(p.run_id && liveRunIds.has(p.run_id)));
-  return json({ live, headless, adoptable });
+  // ended: recent interactive runs that have stopped, newest first, one per conversation, leaving out any that is live again.
+  const seen = new Set(live.flatMap((r) => r.sessions.map((s) => s.session_id)));
+  const ended = db.query<RunRow, []>("SELECT * FROM runs WHERE status != 'running' AND json_extract(meta, '$.interactive') = 1 ORDER BY started_at DESC LIMIT 100").all()
+    .map(withSessions)
+    .filter((r) => {
+      const sid = r.sessions.at(-1)?.session_id;
+      if (!sid) return true;
+      if (seen.has(sid)) return false;
+      seen.add(sid);
+      return true;
+    })
+    .slice(0, 30);
+  return json({ live, headless, adoptable, ended });
 });
 
 route("POST", "/api/processes/preview", async (req) => {
@@ -595,14 +607,19 @@ route("GET", "/api/sessions/:sid", (_r, p, url) => {
 });
 
 // The raw transcript (Claude Code writes JSONL under ~/.claude/projects/..., codex under ~/.codex/sessions/...). Only paths under the home dir are served.
-route("GET", "/api/runs/:id/sessions/:sid/transcript", (_r, p) => {
-  const s = sessionsOf(getRun(Number(p.id)).id).find((x) => x.session_id === p.sid);
-  if (!s) throw new ApiError(404, `session ${p.sid} not found on run ${p.id}`);
+function transcriptOf(runId: string, sid: string): string {
+  const s = sessionsOf(getRun(Number(runId)).id).find((x) => x.session_id === sid);
+  if (!s) throw new ApiError(404, `session ${sid} not found on run ${runId}`);
   if (!s.transcript_path) throw new ApiError(404, "no transcript path recorded for this session");
   if (!s.transcript_path.startsWith(homedir() + "/")) throw new ApiError(403, "transcript path is outside the home directory");
   if (!existsSync(s.transcript_path)) throw new ApiError(404, `transcript not found on disk: ${s.transcript_path}`);
-  return new Response(Bun.file(s.transcript_path), { headers: { "content-type": "text/plain; charset=utf-8" } });
-});
+  return s.transcript_path;
+}
+route("GET", "/api/runs/:id/sessions/:sid/transcript", (_r, p) =>
+  new Response(Bun.file(transcriptOf(p.id, p.sid)), { headers: { "content-type": "text/plain; charset=utf-8" } }));
+// The same conversation, readable: [{role: user|assistant|tool, text, at}], newest `limit` (default 500).
+route("GET", "/api/runs/:id/sessions/:sid/messages", (_r, p, url) =>
+  json(transcriptMessages(transcriptOf(p.id, p.sid), int(url.searchParams.get("limit"), "limit", 500) || 500)));
 
 route("DELETE", "/api/runs/:id", async (_r, p) => {
   const run = getRun(Number(p.id));

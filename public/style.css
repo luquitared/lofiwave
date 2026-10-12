@@ -392,3 +392,11 @@ dialog .hint { margin:0; font-size:12px; }
 .theme-swatch span { flex:1; }
 .theme-name { font-size:13px; font-weight:600; }
 .theme-name small { display:block; font-weight:400; color:var(--muted); font-size:11px; margin-top:2px; }
+.rail-tabs { flex-shrink:0; align-self:flex-start; }
+@media (max-width:1200px) { .rail-tabs { align-self:center; flex-direction:column; } }
+.chat { flex:1; min-height:340px; max-height:calc(100dvh - 190px); overflow:auto; display:flex; flex-direction:column; gap:10px; padding:14px; background:var(--term-bg); border:1px solid var(--line); border-radius:8px; }
+.chat .msg { max-width:80ch; white-space:pre-wrap; overflow-wrap:anywhere; font-size:13px; line-height:1.5; }
+.chat .msg.user { align-self:flex-end; padding:8px 12px; background:var(--sel); border:1px solid var(--sel-line); border-radius:12px; }
+.chat .msg.tool { color:var(--dim); font-family:var(--mono); font-size:11px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:100%; }
+.chat pre.screen { margin:0; border:0; padding:0; }
+@media (max-width:900px) { .chat { max-height:none; min-height:44dvh; } }
