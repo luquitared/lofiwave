@@ -23,7 +23,7 @@ function readmeApiSection(): string {
 export function renderDocs(base: string, authRequired: boolean): string {
   const api = `${base}/api`;
   const auth = authRequired
-    ? `This console requires a token. Send it on every request as \`Authorization: Bearer <token>\` (or \`X-Auth-Token: <token>\`). Ask the person who gave you this URL for the token. \`GET ${api}/docs\` itself is public.`
+    ? `Every request needs an API key: \`Authorization: Bearer <key>\` (or \`X-Auth-Token: <key>\`). The person who gave you this URL makes one on the console's *Connect* page. \`GET ${api}/docs\` itself is public.`
     : `No authentication is currently required.`;
   const quickstart = `# lofiwave API
 
@@ -32,6 +32,25 @@ Base URL: \`${api}\`  ·  Web UI: ${base}  ·  This document: \`${api}/docs\` (m
 ${auth}
 
 All request and response bodies are JSON (\`content-type: application/json\`). Errors are \`{"error": "..."}\` with a 4xx/5xx status.
+
+## Quickstart: workflows (the usual job)
+
+A **workflow** is a saved agent launch: an agent type (\`claude\` or \`codex\`), a folder, a prompt, and optionally a cron \`schedule\`. Each time it fires it creates a **run**: a live, interactive session the person can watch and type into from the console. A claude run closes itself once the agent has finished and stayed idle (\`IDLE_STOP_SEC\`, default 120s, while nobody has its terminal open).
+
+\`\`\`bash
+curl -X POST ${api}/workflows -H "authorization: Bearer $KEY" -H 'content-type: application/json' -d '{
+  "name": "nightly-review",
+  "type": "claude",
+  "cwd": "/absolute/path/to/repo",
+  "prompt": "Review yesterday'"'"'s commits and open issues for anything risky",
+  "schedule": "0 2 * * *"
+}'
+\`\`\`
+
+- Leave \`schedule\` out (or \`""\`) for a workflow that only runs on demand: \`POST ${api}/workflows/<id>/run\`.
+- \`GET ${api}/workflows\` lists them with \`next_run_at\` / \`last_run_at\`; \`PUT ${api}/workflows/<id>\` changes any field (\`{"enabled": false}\` pauses it).
+- \`GET ${api}/runs?workflow_id=<id>\` is its history; \`GET ${api}/runs/<run id>/screen\` shows the live terminal and \`POST ${api}/runs/<run id>/keys\` types into it.
+- Claude asks before editing files or running commands; for a run nobody watches, add \`"extra_args": "--permission-mode acceptEdits"\`.
 
 ## Quickstart: register an app so it can be monitored, started and stopped from the console
 
@@ -65,7 +84,7 @@ curl -X POST ${api}/process-types -H 'content-type: application/json' -d '{
 
 To change the definition later use \`PUT ${api}/process-types/my-app\` with only the fields to change; \`GET ${api}/process-types\` lists everything registered along with whether each command was found on PATH (\`available\`).
 
-Kinds: \`"agent"\` types (built-in \`claude\` and \`codex\`) are shown on the *Agents* tab; \`"app"\` types on the *Apps* tab. Both use exactly the same endpoints.
+Kinds: \`"agent"\` types (built-in \`claude\` and \`codex\`) start interactive by default and show under *Sessions*; \`"app"\` types run headless and show under *Advanced → Apps*. Both use exactly the same endpoints.
 
 `;
   return quickstart + readmeApiSection().replace(/localhost:7770/g, base.replace(/^https?:\/\//, ""));
@@ -82,6 +101,7 @@ export function apiIndex(base: string) {
       process_types: [`GET ${api}/process-types`, `POST ${api}/process-types`, `GET|PUT|DELETE ${api}/process-types/:name`],
       console: [`GET ${api}/console`],
       processes: [`GET ${api}/processes?type=&kind=`, `POST ${api}/processes`, `POST ${api}/processes/preview`, `DELETE ${api}/processes/:pid?force=1`, `POST ${api}/processes/:pid/remote-control {replace?}`],
+      keys: [`GET|POST ${api}/keys`, `DELETE ${api}/keys/:id`],
       workflows: [`GET|POST ${api}/workflows`, `GET|PUT|DELETE ${api}/workflows/:id`, `POST ${api}/workflows/:id/run`],
       runs: [`GET ${api}/runs?workflow_id=&status=&type=&limit=&offset=`, `GET|DELETE ${api}/runs/:id`, `GET ${api}/runs/:id/log?offset=|raw=1`, `POST ${api}/runs/:id/kill?force=1`, `POST ${api}/runs/:id/restart`],
       interactive: [`POST ${api}/processes {interactive: true}`, `GET ${api}/runs/:id/screen?lines=200`, `GET ${api}/runs/:id/history?lines=5000`, `POST ${api}/runs/:id/keys {text, keys, enter}`],

@@ -2,7 +2,7 @@ import { join, dirname, basename } from "node:path";
 import { readdirSync, existsSync } from "node:fs";
 import { hostname, homedir } from "node:os";
 import { config } from "./config";
-import { db, now, hydrate, type ProcessTypeRow, type WorkflowRow, type RunRow, type SessionRow } from "./db";
+import { db, now, hydrate, type ProcessTypeRow, type WorkflowRow, type RunRow, type SessionRow, type ApiKeyRow } from "./db";
 import { listOsProcesses, cwdOf, killTree, type OsProcess } from "./procs";
 import { ApiError, startRun, killRun, restartRun, getRun, getType, readLogFrom, isLive, buildCommand, screenOf, historyOf, sendKeys, tmuxPath, recordSession, resumeSession, resumeAgentSession, enableRemoteControl } from "./runner";
 import { describeSession, sessionForPid, locateSession, type SessionInfo } from "./agents";
@@ -10,7 +10,7 @@ import { startScheduler, refreshNextRun, runWorkflow, computeNext } from "./sche
 import { validateCron } from "./cron";
 import { renderDocs, apiIndex } from "./docs";
 import { ttyFor, ttySocket, type TtyData } from "./tty";
-import { actor, identify, touch, online, passwordMatches, cleanName, makeSession, sessionCookie, loginBlocked, loginFailed, TOKEN_ACTOR } from "./auth";
+import { actor, identify, touch, online, passwordMatches, cleanName, makeSession, sessionCookie, loginBlocked, loginFailed, TOKEN_ACTOR, KEY_ACTOR_PREFIX, createApiKey } from "./auth";
 
 const PUBLIC_DIR = join(config.root, "public");
 const startedAt = now();
@@ -90,7 +90,9 @@ function typeWithAvailability(t: ProcessTypeRow) {
 }
 
 function workflowOut(w: WorkflowRow) {
-  return hydrate(w);
+  const last = db.query<{ id: number; status: string; started_at: number; ended_at: number | null }, [number]>(
+    "SELECT id, status, started_at, ended_at FROM runs WHERE workflow_id = ? ORDER BY started_at DESC LIMIT 1").get(w.id);
+  return { ...hydrate(w), last_run: last ?? null };
 }
 
 function runOut(r: RunRow, { withOutput = true } = {}) {
@@ -232,7 +234,7 @@ route("POST", "/api/login", async (req) => {
   const b = await body(req);
   const name = cleanName(b.name);
   if (!name) throw new ApiError(400, "name is required");
-  if (name === TOKEN_ACTOR) throw new ApiError(400, `"${TOKEN_ACTOR}" is reserved; pick another name`);
+  if (name === TOKEN_ACTOR || name.startsWith(KEY_ACTOR_PREFIX)) throw new ApiError(400, `"${name}" is reserved; pick another name`);
   if (!passwordMatches(b.password)) { loginFailed(ip); throw new ApiError(401, "wrong password"); }
   const { value, maxAge } = makeSession(name);
   touch(name);
@@ -248,6 +250,25 @@ route("POST", "/api/logout", (req) => {
 });
 
 route("GET", "/api/me", () => json({ name: actor.getStore() ?? null, password_login: Boolean(config.password), online: online() }));
+
+// ---- API keys (for agents and scripts). An API key can use the API but not make or revoke keys.
+const keyOut = ({ hash: _h, ...k }: ApiKeyRow) => k;
+function keyAdmin() {
+  if ((actor.getStore() ?? "").startsWith(KEY_ACTOR_PREFIX)) throw new ApiError(403, "API keys can't manage API keys; sign in to the UI or use the console token");
+}
+route("GET", "/api/keys", () => { keyAdmin(); return json(db.query<ApiKeyRow, []>("SELECT * FROM api_keys ORDER BY created_at DESC").all().map(keyOut)); });
+route("POST", "/api/keys", async (req) => {
+  keyAdmin();
+  const name = str((await body(req)).name, "name", { required: true }).trim().slice(0, 60);
+  if (!name) throw new ApiError(400, "name is required");
+  const { key, row } = createApiKey(name, actor.getStore() ?? "");
+  return json({ ...keyOut(row), key }, 201);
+});
+route("DELETE", "/api/keys/:id", (_r, p) => {
+  keyAdmin();
+  if (!db.prepare("DELETE FROM api_keys WHERE id = ?").run(Number(p.id)).changes) throw new ApiError(404, `API key ${p.id} not found`);
+  return json({ ok: true });
+});
 
 // ---- paths (recent working directories + filesystem completion, for the UI's path picker)
 route("GET", "/api/paths", async (_r, _p, url) => {
@@ -366,7 +387,9 @@ route("POST", "/api/processes", async (req) => {
     extraArgs: strArray(b.extra_args, "extra_args"),
     env: strMap(b.env, "env"),
     timeoutSec: int(b.timeout_sec, "timeout_sec", 0),
-    interactive: bool(b.interactive, false),
+    // Agents start interactive unless the caller asks for headless; apps stay headless unless asked.
+    interactive: bool(b.interactive, getType(typeName).kind === "agent" && Boolean(tmuxPath())),
+    stopWhenIdle: bool(b.stop_when_idle, false),
     terminal: str(b.terminal, "terminal"),
     trigger: "manual",
   });
@@ -390,7 +413,7 @@ route("GET", "/api/console", async () => {
 route("POST", "/api/processes/preview", async (req) => {
   const b = await body(req);
   const type = getType(str(b.type, "type", { required: true }));
-  const interactive = bool(b.interactive, false);
+  const interactive = bool(b.interactive, type.kind === "agent" && Boolean(tmuxPath()));
   const { command, args } = buildCommand(type, { cwd: str(b.cwd, "cwd") || type.default_cwd || ".", prompt: str(b.prompt, "prompt"), extraArgs: strArray(b.extra_args, "extra_args"), interactive });
   return json({ command, args, interactive, tmux: interactive ? tmuxPath() : undefined });
 });

@@ -1,6 +1,6 @@
 import { db, now, type WorkflowRow, type RunRow } from "./db";
 import { nextCron } from "./cron";
-import { startRun, reconcileRuns } from "./runner";
+import { startRun, reconcileRuns, getType, tmuxPath } from "./runner";
 import { config } from "./config";
 
 export function computeNext(schedule: string, after = now()): number | null {
@@ -27,6 +27,9 @@ export async function runWorkflow(wf: WorkflowRow, trigger: string): Promise<Run
       throw new ApiError(409, `workflow "${wf.name}" already has run ${active.id} in progress`);
     }
   }
+  // Agents run interactively, so a run can be watched and steered from the browser while it works; it closes itself
+  // once the agent is done. Without tmux (or for an app type) it runs headless as before.
+  const interactive = getType(wf.type_name).kind === "agent" && Boolean(tmuxPath());
   return startRun({
     typeName: wf.type_name,
     cwd: wf.cwd,
@@ -36,6 +39,10 @@ export async function runWorkflow(wf: WorkflowRow, trigger: string): Promise<Run
     trigger,
     workflow: wf,
     timeoutSec: wf.timeout_sec,
+    interactive,
+    stopWhenIdle: interactive,
+    // No window popping up on the machine for a cron run; it is in the browser's session list.
+    terminal: "none",
   });
 }
 

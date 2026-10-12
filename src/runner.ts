@@ -60,6 +60,8 @@ export type StartOptions = {
   resumeSession?: string;
   /** Desktop terminal to attach to an interactive run: a name ("iterm", "kitty", ...), "auto", or "none". Defaults to $OPEN_TERMINAL. */
   terminal?: string;
+  /** Interactive claude runs: end the run once the agent has finished its work and sat idle (config.idleStopSec). */
+  stopWhenIdle?: boolean;
 };
 
 /** Record (or refresh) an agent session on a run. Keyed by (run, session id) so a resumed session can belong to several runs. */
@@ -126,6 +128,7 @@ export async function startRun(opts: StartOptions): Promise<RunRow> {
   const timeoutSec = opts.timeoutSec ?? opts.workflow?.timeout_sec ?? 0;
   const meta: Record<string, any> = { timeout_sec: timeoutSec, template_len };
   if (opts.resumeSession) meta.resume_session = opts.resumeSession;
+  if (opts.stopWhenIdle && interactive) meta.stop_when_idle = true;
   // Who started it: the logged-in person (or "api" for the token), when it comes from a request; scheduled runs have none.
   const by = actor.getStore();
   if (by) meta.started_by = by;
@@ -203,6 +206,8 @@ export async function startRun(opts: StartOptions): Promise<RunRow> {
     if (term.opened || term.error) { sink.flush(); db.prepare("UPDATE runs SET meta = ? WHERE id = ?").run(JSON.stringify(meta), id); }
     exited = (async () => {
       let ticks = 0;
+      // stop_when_idle: claude's own registry says busy while it works, waiting on a permission prompt, idle when done.
+      let sawBusy = false, idleSince = 0;
       for (;;) {
         await Bun.sleep(1000);
         const q = await tmux("display-message", "-p", "-t", sess, "#{pane_dead} #{pane_dead_status}");
@@ -213,6 +218,24 @@ export async function startRun(opts: StartOptions): Promise<RunRow> {
         if (isCodex && !meta.codex_session && ticks % 5 === 0) {
           const found = opts.resumeSession ? { session_id: opts.resumeSession, path: codexRolloutPath(opts.resumeSession) } : discoverCodexSession(t, cwd);
           if (found) { meta.codex_session = found.session_id; db.prepare("UPDATE runs SET meta = ? WHERE id = ?").run(JSON.stringify(meta), id); recordSession(id, { session_id: found.session_id, agent: "codex", cwd, transcript_path: found.path, source: opts.resumeSession ? "resume" : "startup" }); }
+        }
+        if (meta.stop_when_idle && !entry.killedBy && ticks % 3 === 0) {
+          const st = claudeRegistry().byPid.get(pid)?.status;
+          if (st === "idle" && sawBusy) {
+            idleSince ||= Date.now();
+            // Someone with the terminal open may be about to type: wait until they close it.
+            if (Date.now() - idleSince >= config.idleStopSec * 1000 && !ttyViewers.has(sess)) {
+              entry.killedBy = "idle";
+              // claude clears its screen on the way out: keep what it showed last (its answer) before closing it.
+              const last = await tmux("capture-pane", "-p", "-J", "-t", sess);
+              if (last.code === 0) sink.write(last.out.replace(/\n{3,}/g, "\n\n").replace(/\s+$/, "") + "\n");
+              sink.write(`\n# lofiwave: finished, idle for ${config.idleStopSec}s; closing the session\n`);
+              killTree(pid, false).catch(() => {});
+            }
+          } else if (st) {
+            if (st !== "idle") sawBusy = true;
+            idleSince = 0;
+          }
         }
         // Claude Code prints its Remote Control link once it is up; keep it on the run so the UI can open the session in the Claude app.
         ticks++;
@@ -264,7 +287,7 @@ export async function startRun(opts: StartOptions): Promise<RunRow> {
       if (cap.code === 0) sink.write(cap.out.replace(/^Pane is dead.*$/m, "").replace(/\n{3,}/g, "\n\n").replace(/\s+$/, "") + "\n");
       await tmux("kill-session", "-t", entry.tmux);
     }
-    const status = entry.killedBy === "timeout" ? "timeout" : entry.killedBy ? "killed" : code === 0 ? "success" : code === null ? "lost" : "failed";
+    const status = entry.killedBy === "timeout" ? "timeout" : entry.killedBy === "idle" ? "success" : entry.killedBy ? "killed" : code === 0 ? "success" : code === null ? "lost" : "failed";
     sink.write(`\n# lofiwave: exited with code ${code ?? "unknown"} (${status})\n`);
     await sink.end();
     if (isCodex && !meta.codex_session) {
@@ -372,7 +395,7 @@ export async function restartRun(id: number): Promise<RunRow> {
   return startRun({
     typeName: run.type_name, cwd: run.cwd, prompt: run.prompt, extraArgs,
     env: JSON.parse(run.env || "{}"), trigger: "restart", workflow: wf, timeoutSec: meta.timeout_sec ?? 0,
-    interactive: Boolean(meta.interactive), resumeSession: meta.resume_session,
+    interactive: Boolean(meta.interactive), resumeSession: meta.resume_session, stopWhenIdle: Boolean(meta.stop_when_idle),
   });
 }
 

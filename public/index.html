@@ -10,28 +10,38 @@
 <title>lofiwave</title>
 <link rel="icon" type="image/png" href="/favicon.png">
 <link rel="apple-touch-icon" href="/logo.png">
+<script>
+// Apply the saved color scheme before anything paints (Settings → Appearance). "system" follows the OS light/dark.
+(function () {
+  var pref = "system"; try { pref = localStorage.getItem("ac_theme") || "system"; } catch (e) {}
+  var light = window.matchMedia && matchMedia("(prefers-color-scheme: light)").matches;
+  document.documentElement.dataset.theme = pref === "system" ? (light ? "wave-light" : "wave") : pref;
+})();
+</script>
 <link rel="stylesheet" href="/vendor/xterm.css">
 <link rel="stylesheet" href="/style.css">
 </head>
 <body class="console">
 <a class="skip-link" href="#main">Skip to content</a>
 <header class="sidebar">
-  <a class="brand" href="#console" aria-label="lofiwave home"><span class="brand-mark" aria-hidden="true">a<span>·</span></span><span>lofiwave<small>Your local workspace</small></span></a>
-  <a href="/docs" class="mobile-docs" aria-label="API documentation">API ↗</a>
-  <div class="nav-label">WORKSPACE</div>
+  <a class="brand" href="#console" aria-label="lofiwave home"><img class="brand-mark" src="/logo.png" alt="" width="32" height="32"><span>lofiwave</span></a>
   <nav aria-label="Main navigation">
-    <button data-tab="console" class="active"><span aria-hidden="true">▶</span>Console</button>
-    <button data-tab="agents"><span aria-hidden="true">✳</span>Agents</button>
-    <button data-tab="apps"><span aria-hidden="true">▦</span>Apps</button>
+    <button data-tab="console" class="active"><span aria-hidden="true">▶</span>Sessions</button>
     <button data-tab="workflows"><span aria-hidden="true">⌁</span>Workflows</button>
-    <button data-tab="runs"><span aria-hidden="true">◷</span>Runs</button>
-    <button data-tab="types"><span aria-hidden="true">☷</span>Types</button>
+    <button data-tab="connect"><span aria-hidden="true">⚿</span>Connect</button>
+    <button data-tab="advanced"><span aria-hidden="true">☷</span>Advanced</button>
+    <button data-tab="settings"><span aria-hidden="true">⚙</span>Settings</button>
   </nav>
-  <div class="sidebar-bottom"><a href="/docs" class="api-link">API documentation <span aria-hidden="true">↗</span></a><div id="sysinfo" class="sysinfo"></div></div>
+  <div class="sidebar-bottom"><div id="sysinfo" class="sysinfo"></div></div>
 </header>
 <main id="main">
-  <div class="page-top"><span class="breadcrumb">Workspace <span>/</span> <b id="page-location">Console</b></span><span class="page-top-right"><span id="people" class="people" hidden></span><span class="connection" id="connection-status">Connecting…</span></span></div>
-  <div class="page-heading"><div><p class="eyebrow">YOUR WORK, IN MOTION</p><h1 id="page-title">Console</h1><p id="page-description">Your live sessions, and a terminal to talk to them.</p></div><button id="refresh-btn" aria-label="Refresh current view">↻ <span>Refresh</span></button></div>
+  <div class="page-top">
+    <h1 id="page-title">Sessions</h1>
+    <div class="subnav" id="subnav" role="tablist" aria-label="Advanced" hidden>
+      <button data-sub="agents">Processes</button><button data-sub="apps">Apps</button><button data-sub="runs">Runs</button><button data-sub="types">Types</button>
+    </div>
+    <span class="page-top-right"><span id="people" class="people" hidden></span><span class="connection" id="connection-status">Connecting…</span><button id="refresh-btn" class="small" aria-label="Refresh current view">↻</button></span>
+  </div>
 
   <section id="tab-console" class="tab active">
     <div class="console-view">
@@ -42,7 +52,6 @@
 
   <section id="tab-agents" class="tab">
     <div class="toolbar">
-      <button class="primary" id="start-agent-btn">+ Start an agent</button>
       <button id="resume-agent-btn">Resume by ID</button>
       <span id="agent-count" class="muted"></span>
       <label class="muted right"><input type="checkbox" id="hide-children" checked> Hide child processes</label>
@@ -56,7 +65,6 @@
   <section id="tab-apps" class="tab">
     <div class="toolbar">
       <button class="primary" id="add-app-btn">+ Add app</button>
-      <span class="muted">Your services and tools, all in one place.</span>
     </div>
     <table id="app-table">
       <thead><tr><th>App</th><th>Command</th><th>Running</th><th>Last run</th><th></th></tr></thead>
@@ -70,30 +78,41 @@
   </section>
 
   <section id="tab-workflows" class="tab">
-    <details class="panel" id="wf-panel">
-      <summary id="wf-panel-title">New workflow</summary>
-      <form id="wf-form" class="grid">
-        <input type="hidden" name="id">
-        <label>Name <input name="name" required></label>
-        <label>Type <select name="type"></select></label>
-        <label class="wide">Working directory <span class="pp"><input name="cwd" autocomplete="off" data-pathpicker placeholder="blank = the type's default folder"></span></label>
-        <label class="wide">Prompt <textarea name="prompt" rows="3"></textarea></label>
-        <label>Extra args <input name="extra_args"></label>
-        <label>Env (KEY=VALUE per line) <textarea name="env" rows="2"></textarea></label>
-        <label>Schedule (cron, blank = manual) <input name="schedule" placeholder="0 9 * * 1-5"> <small class="muted">min hour day month weekday · @hourly @daily @weekly</small></label>
-        <label>Timeout (sec, 0 = none) <input name="timeout_sec" type="number" min="0" value="0"></label>
-        <label class="row"><input type="checkbox" name="enabled" checked> Enabled</label>
-        <label class="row"><input type="checkbox" name="allow_overlap"> Allow overlapping runs</label>
-        <div class="wide row">
-          <button type="submit" class="primary">Save</button>
-          <button type="button" id="wf-cancel">Cancel</button>
-        </div>
-      </form>
-    </details>
+    <div class="toolbar">
+      <button class="primary" id="wf-new-btn">+ New workflow</button>
+      <span id="wf-count" class="muted"></span>
+    </div>
     <table id="wf-table">
-      <thead><tr><th>Name</th><th>Type</th><th>Working dir</th><th>Schedule</th><th>Next</th><th>Last</th><th>On</th><th></th></tr></thead>
+      <thead><tr><th>Workflow</th><th>Schedule</th><th>Last run</th><th>On</th><th></th></tr></thead>
       <tbody></tbody>
     </table>
+  </section>
+
+  <section id="tab-connect" class="tab">
+    <div class="card">
+      <h2>Let an agent run lofiwave</h2>
+      <p class="muted">Give an agent this URL and an API key. It can then create workflows, start sessions and read runs for you.</p>
+      <div class="copy-row"><code id="docs-url" class="mono"></code><button class="small" id="copy-docs-url">Copy</button><a href="/docs" target="_blank" rel="noopener"><button class="small">Open ↗</button></a></div>
+      <div class="copy-row"><code id="agent-prompt" class="mono"></code><button class="small" id="copy-agent-prompt">Copy prompt</button></div>
+    </div>
+    <div class="card">
+      <div class="card-head"><h2>API keys</h2>
+        <form id="key-form" class="row"><input name="name" placeholder="name, e.g. claude on laptop" required maxlength="60" autocomplete="off"><button type="submit" class="primary small">Create key</button></form>
+      </div>
+      <div id="new-key" class="new-key" hidden></div>
+      <table id="key-table">
+        <thead><tr><th>Name</th><th>Key</th><th>Created</th><th>Last used</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="tab-settings" class="tab">
+    <div class="card">
+      <h2>Appearance</h2>
+      <p class="muted">Saved in this browser.</p>
+      <div class="themes" id="theme-picker" role="radiogroup" aria-label="Color scheme"></div>
+    </div>
   </section>
 
   <section id="tab-runs" class="tab">
@@ -118,7 +137,7 @@
       <form id="type-form" class="grid">
         <input type="hidden" name="orig">
         <label>Name <input name="name" required pattern="[a-zA-Z0-9_.\-]+"></label>
-        <label>Kind <select name="kind"><option value="app">app (Apps tab)</option><option value="agent">agent (Agents tab)</option></select></label>
+        <label>Kind <select name="kind"><option value="app">app (headless)</option><option value="agent">agent (interactive)</option></select></label>
         <label>Command (binary) <input name="command" required placeholder="claude"></label>
         <label>Default working directory <span class="pp"><input name="default_cwd" autocomplete="off" data-pathpicker placeholder="optional"></span></label>
         <label>URL of its UI (optional; {host} = this machine) <input name="url" placeholder="http://{host}:3000"></label>
@@ -143,19 +162,57 @@
 
 <dialog id="start-dialog" aria-labelledby="start-title">
   <form id="start-form" class="grid" method="dialog">
-    <h3 class="wide" id="start-title">Start</h3>
-    <label>Type <select name="type"></select></label>
-    <label>Working directory <span class="pp"><input name="cwd" placeholder="start typing to search" autocomplete="off" data-pathpicker></span></label>
-    <label class="wide" id="prompt-label">Prompt <textarea name="prompt" rows="4" placeholder="What should the agent do?"></textarea></label>
-    <label>Extra args <input name="extra_args" placeholder="--permission-mode acceptEdits"></label>
-    <label>Timeout (sec, 0 = none) <input name="timeout_sec" type="number" min="0" value="0"></label>
-    <label class="wide row" id="interactive-label"><input type="checkbox" name="interactive"> Interactive <span class="muted" id="interactive-hint">— stays open in a tmux session; claude starts with Remote Control on, so it appears in the Claude app</span></label>
+    <h3 class="wide" id="start-title">New session</h3>
+    <label>Agent <select name="type"></select></label>
+    <label>Folder <span class="pp"><input name="cwd" placeholder="start typing to search" autocomplete="off" data-pathpicker></span></label>
+    <label class="wide" id="prompt-label">Prompt <textarea name="prompt" rows="4" placeholder="Optional first message"></textarea></label>
+    <details class="wide more"><summary class="muted">More options</summary>
+      <div class="grid">
+        <label>Extra args <input name="extra_args" placeholder="--permission-mode acceptEdits"></label>
+        <label>Timeout (sec, 0 = none) <input name="timeout_sec" type="number" min="0" value="0"></label>
+        <code id="preview" class="wide muted"></code>
+        <div class="wide"><button type="button" class="small" id="preview-btn">Preview command</button></div>
+      </div>
+    </details>
     <div id="start-feedback" class="wide form-error" role="alert" hidden></div>
-    <code id="preview" class="wide muted"></code>
     <div class="wide row">
       <button type="button" class="primary" id="start-submit">Start</button>
-      <button type="button" id="preview-btn">Preview command</button>
       <button type="button" id="start-cancel" style="margin-left:auto">Cancel</button>
+    </div>
+  </form>
+</dialog>
+<dialog id="wf-dialog" aria-labelledby="wf-title">
+  <form id="wf-form" class="grid" method="dialog">
+    <h3 class="wide" id="wf-title">New workflow</h3>
+    <input type="hidden" name="id">
+    <label>Name <input name="name" required autocomplete="off"></label>
+    <label>Agent <select name="type"></select></label>
+    <label class="wide">Folder <span class="pp"><input name="cwd" autocomplete="off" data-pathpicker placeholder="blank = the type's default folder"></span></label>
+    <label class="wide">Prompt <textarea name="prompt" rows="4"></textarea></label>
+    <label>Schedule <select name="preset">
+      <option value="">Manual only</option>
+      <option value="@hourly">Every hour</option>
+      <option value="0 9 * * *">Every day at 9:00</option>
+      <option value="0 9 * * 1-5">Weekdays at 9:00</option>
+      <option value="0 9 * * 1">Mondays at 9:00</option>
+      <option value="custom">Custom (cron)</option>
+    </select></label>
+    <label id="cron-label">Cron <input name="schedule" placeholder="0 9 * * 1-5" autocomplete="off"><small class="muted">min hour day month weekday</small></label>
+    <label class="wide row"><input type="checkbox" name="enabled" checked> Enabled</label>
+    <details class="wide more"><summary class="muted">More options</summary>
+      <div class="grid">
+        <label>Extra args <input name="extra_args" placeholder="--permission-mode acceptEdits"></label>
+        <label>Timeout (sec, 0 = none) <input name="timeout_sec" type="number" min="0" value="0"></label>
+        <label class="wide">Env (KEY=VALUE per line) <textarea name="env" rows="2"></textarea></label>
+        <label class="wide row"><input type="checkbox" name="allow_overlap"> Allow overlapping runs</label>
+      </div>
+    </details>
+    <p class="wide muted hint">Each run opens as a live session you can watch and type into. Claude runs close once the agent is done and idle.</p>
+    <div id="wf-feedback" class="wide form-error" role="alert" hidden></div>
+    <div class="wide row">
+      <button type="submit" class="primary">Save</button>
+      <button type="button" id="wf-save-run">Save &amp; run now</button>
+      <button type="button" id="wf-cancel" style="margin-left:auto">Cancel</button>
     </div>
   </form>
 </dialog>
@@ -166,7 +223,6 @@
     <div id="resume-found" class="wide muted" aria-live="polite"></div>
     <label>Agent <select name="agent"><option value="">Detect from the id</option><option>claude</option><option>codex</option></select></label>
     <label>Working directory <span class="pp"><input name="cwd" placeholder="where the session ran" autocomplete="off" data-pathpicker></span></label>
-    <p class="wide muted">Reopens it here in a tmux session (claude with Remote Control on). If it is still open somewhere else, claude continues it as a copy under a new id.</p>
     <div id="resume-feedback" class="wide form-error" role="alert" hidden></div>
     <div class="wide row">
       <button type="button" class="primary" id="resume-submit">Resume</button>
