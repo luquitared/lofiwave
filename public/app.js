@@ -165,7 +165,9 @@ $$("input[data-pathpicker]").forEach(attachPathPicker);
 // ---------------------------------------------------------------- state
 let types = [], workflows = [], selectedRun = null, logOffset = 0, activeTab = "console";
 // Console (session-first working view) state.
-let consoleData = { live: [], headless: [], adoptable: [] }, consoleRun = null, railSig = "", paneSig = "";
+let consoleData = { live: [], headless: [], adoptable: [], ended: [] }, consoleRun = null, railSig = "", paneSig = "";
+// The rail shows live sessions or recently ended ones; an ended one opens read-only, with a button to turn it back on.
+let consoleView = localStorage.getItem("ac_console_view") === "ended" ? "ended" : "live", endedRun = null;
 const typeByName = (n) => types.find((t) => t.name === n);
 
 // ---------------------------------------------------------------- tabs
@@ -784,7 +786,8 @@ let linkedRun = null;
 /** Keep the selected session in the address bar, so the link can be shared. */
 function syncConsoleHash() {
   if (activeTab !== "console") return;
-  const want = consoleRun ? `#sessions/${consoleRun.id}` : "";
+  const r = consoleView === "ended" ? endedRun : consoleRun;
+  const want = r ? `#sessions/${r.id}` : "";
   if (location.hash !== want) history.replaceState(null, "", location.pathname + want);
 }
 /** Open a session from a link: its terminal if it is still live, else its run in the history. */
@@ -796,11 +799,14 @@ function openSessionLink(id) {
 
 const loadConsole = guard(async () => {
   consoleData = await get("/console");
-  const live = consoleData.live;
+  const { live, ended } = consoleData;
   if (linkedRun) {
     const id = linkedRun; linkedRun = null;
-    if (!live.some((r) => r.id === id)) { toast(`session #${id} isn't live; showing its run`, true); return openRun(id); }
+    if (live.some((r) => r.id === id)) setConsoleView("live", false);
+    else if (ended.some((r) => r.id === id)) { setConsoleView("ended", false); endedRun = ended.find((r) => r.id === id); }
+    else { toast(`session #${id} isn't live; showing its run`, true); return openRun(id); }
   }
+  endedRun = ended.find((r) => r.id === endedRun?.id) || ended[0] || null;
   // Keep the selected session if it is still live; otherwise the one we last used, else the newest.
   const remembered = Number(localStorage.getItem("ac_console_run") || 0);
   consoleRun = live.find((r) => r.id === consoleRun?.id) || live.find((r) => r.id === remembered) || live[0] || null;
@@ -818,12 +824,33 @@ function selectConsoleRun(run) {
   patchRail(); renderPane();
 }
 
+function setConsoleView(view, render = true) {
+  if (view === consoleView) return;
+  consoleView = view;
+  localStorage.setItem("ac_console_view", view);
+  railSig = paneSig = "";
+  if (render) { syncConsoleHash(); renderRail(); renderPane(); }
+}
+function selectEndedRun(run) {
+  if (run.id === endedRun?.id) return;
+  endedRun = run; railSig = "";
+  syncConsoleHash(); renderRail(); renderPane();
+}
+
+/** The Live / Ended switch at the top of the rail. */
+function railTabs() {
+  const tab = (view, label, n) => h("button", { role: "tab", class: consoleView === view ? "active" : "", "aria-selected": String(consoleView === view), onclick: () => setConsoleView(view) }, `${label} ${n}`);
+  return h("div", { class: "subnav rail-tabs", role: "tablist", "aria-label": "Sessions" }, tab("live", "Live", consoleData.live.length), tab("ended", "Ended", consoleData.ended.length));
+}
+
 function renderRail() {
-  const { live, headless, adoptable } = consoleData;
-  const sig = JSON.stringify([live.map((r) => [r.id, runLabel(r)]), headless.map((r) => [r.id, runLabel(r)]), adoptable.map((p) => [p.pid, p.session?.session_id || "", p.session?.web_url || ""])]);
+  const { live, headless, adoptable, ended } = consoleData;
+  const sig = JSON.stringify([consoleView, live.map((r) => [r.id, runLabel(r)]), headless.map((r) => [r.id, runLabel(r)]), adoptable.map((p) => [p.pid, p.session?.session_id || "", p.session?.web_url || ""]), ended.map((r) => [r.id, runLabel(r)]), endedRun?.id]);
   if (sig === railSig) return patchRail();
   railSig = sig;
+  if (consoleView === "ended") return $("#session-rail").replaceChildren(railTabs(), ...endedRail());
   $("#session-rail").replaceChildren(
+    railTabs(),
     h("div", { class: "rail-head" },
       h("span", {}, live.length ? `${live.length} live session${live.length === 1 ? "" : "s"}` : "No live sessions"),
       h("span", { class: "row" },
@@ -856,6 +883,69 @@ function renderRail() {
         : h("div", { class: "rail-sub dim" }, "no session id — can't take over"),
     )),
   );
+}
+
+function endedRail() {
+  const { ended } = consoleData;
+  return [
+    h("div", { class: "rail-head" }, h("span", {}, ended.length ? `${ended.length} recently ended` : "Nothing ended yet")),
+    ...ended.map((r) => h("button", { class: `rail-item ${endedRun?.id === r.id ? "active" : ""}`, "aria-current": endedRun?.id === r.id ? "true" : "false", onclick: () => selectEndedRun(r) },
+      h("div", { class: "rail-title" }, runLabel(r)),
+      h("div", { class: "rail-sub" }, r.workflow_name ? h("span", { class: "wf-tag" }, `⌁ ${r.workflow_name}`) : "", `${r.type_name} · ${shortCwd(r.cwd)}${byWho(r)}`),
+      h("div", { class: "rail-sub dim" }, endedWhen(r)),
+    )),
+  ];
+}
+const endedWhen = (r) => `ended ${r.ended_at ? fmtRel(r.ended_at) : "?"}` + (r.ended_at ? ` · ran ${fmtDur((r.ended_at - r.started_at) / 1000)}` : "") + (r.status && r.status !== "success" ? ` · ${r.status}` : "");
+
+/** Start an ended session again: reopen its conversation if it has one, else rerun the same command. */
+const turnBackOn = (r) => guard(async () => {
+  const s = sessOf(r);
+  const n = s?.session_id ? await post(`/runs/${r.id}/sessions/${encodeURIComponent(s.session_id)}/resume`) : await post(`/runs/${r.id}/restart`);
+  toast(`back on as run #${n.id}`, true);
+  selectConsoleRunId(n.id);
+  setConsoleView("live", false);
+  await loadConsole();
+})();
+
+/** An ended session, read-only: its conversation from the transcript, else the terminal log saved when it stopped. */
+function endedPaneFor(r) {
+  const s = sessOf(r);
+  const tokenQ = token ? `?token=${encodeURIComponent(token)}` : "";
+  const body = h("div", { id: "ended-read", class: "chat" }, h("div", { class: "muted" }, "loading…"));
+  (async () => {
+    let items;
+    try {
+      if (!s?.transcript_path) throw new Error("no transcript");
+      const msgs = await get(`/runs/${r.id}/sessions/${encodeURIComponent(s.session_id)}/messages`);
+      if (!msgs.length) throw new Error("empty transcript");
+      items = msgs.map((m) => h("div", { class: `msg ${m.role}`, title: m.at ? new Date(m.at).toLocaleString() : "" }, m.role === "tool" ? `→ ${m.text}` : m.text));
+    } catch {
+      let log = await get(`/runs/${r.id}/log`);
+      if (log.size > log.offset) log = await get(`/runs/${r.id}/log?offset=${log.size - 512 * 1024}`);
+      items = [h("pre", { class: "screen" }, log.data || "(nothing was saved for this session)")];
+    }
+    body.replaceChildren(...items);
+    body.scrollTop = body.scrollHeight;
+  })().catch((e) => body.replaceChildren(h("div", { class: "muted" }, e.message)));
+  return [
+    h("div", { class: "pane-head" },
+      h("div", { class: "pane-id" },
+        h("h2", {}, runLabel(r)),
+        h("div", { class: "pane-meta muted" },
+          `${r.type_name} · ${shortCwd(r.cwd)}${byWho(r)} · ${endedWhen(r)}`, s?.model ? ` · ${s.model}` : "",
+          s?.session_id ? h("code", { class: "mono", title: s.session_id }, shortId(s.session_id)) : "",
+        ),
+      ),
+      h("div", { class: "row pane-actions" },
+        h("button", { class: "small primary", title: s?.session_id ? `${s.resume_cmd} — in a new terminal here` : "run the same command again", onclick: () => turnBackOn(r) }, "Turn back on"),
+        s?.transcript_path ? h("a", { href: `/api/runs/${r.id}/sessions/${encodeURIComponent(s.session_id)}/transcript${tokenQ}`, target: "_blank" }, h("button", { class: "small" }, "Transcript")) : "",
+        h("button", { class: "small", title: "the full run record: command, env, log, sessions", onclick: () => openRun(r.id) }, "Details"),
+      ),
+    ),
+    body,
+    h("div", { class: "pane-foot muted" }, "Read-only. Turn it back on to keep going."),
+  ];
 }
 
 /** Where a session was launched: its tmux target if it has one, else the shell that spawned it. */
@@ -920,6 +1010,15 @@ function enableRemote(pid, s, inPane) {
 }
 
 function renderPane() {
+  if (consoleView === "ended") {
+    closeTerm(); syncFull(false);
+    const sig = `ended:${endedRun?.id ?? ""}`;
+    if (sig !== paneSig) {
+      paneSig = sig;
+      $("#session-pane").replaceChildren(...(endedRun ? endedPaneFor(endedRun) : [h("div", { class: "pane-empty" }, h("h2", {}, "No ended sessions"))]));
+    }
+    return;
+  }
   const r = consoleRun;
   if (!r || !termMode()) { closeTerm(); syncFull(false); }
   // Rebuild only when the run or its session changes: a rebuild would drop whatever is half-typed in the keys field,

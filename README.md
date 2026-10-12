@@ -254,6 +254,7 @@ On top of the recorded id, the console reads what the agents themselves know: Cl
 | `POST /api/runs/:id/sessions` | register (upsert by `session_id`): `{session_id, agent?, cwd?, transcript_path?, model?, source?}` → 201 |
 | `PUT /api/runs/:id/sessions/:session_id` | `{ended: true, reason?, model?}` marks it ended |
 | `GET /api/runs/:id/sessions/:session_id/transcript` | the raw JSONL transcript (`text/plain`; only files under the home directory are served) |
+| `GET /api/runs/:id/sessions/:session_id/messages?limit=500` | the same conversation, readable: `[{role: user\|assistant\|tool, text, at}]`, newest `limit` (thinking and tool output left out); *Sessions → Ended* shows it |
 
 ### Examples
 

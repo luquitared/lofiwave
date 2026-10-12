@@ -225,3 +225,49 @@ export function sessionForPid(pid: number): SessionInfo | null {
   if (!r) return null;
   return describeSession("claude", r.sessionId, { cwd: r.cwd, pid });
 }
+
+// ---------------------------------------------------------------- reading a conversation back
+
+export type ChatMessage = { role: "user" | "assistant" | "tool"; text: string; at: string | null };
+
+/** One line for a tool call: its name and the input that says what it did (a command, a file, a pattern). */
+function toolLine(name: string, input: any): string {
+  if (typeof input === "string") { try { input = JSON.parse(input); } catch { return `${name} ${input}`.slice(0, 300); } }
+  const what = input?.command ?? input?.cmd ?? input?.file_path ?? input?.path ?? input?.pattern ?? input?.url ?? input?.query ?? input?.description ?? input?.prompt ?? "";
+  return `${name}${what ? " " + (Array.isArray(what) ? what.join(" ") : String(what)) : ""}`.slice(0, 300);
+}
+
+/**
+ * The readable part of a Claude transcript or a codex rollout: what the user said, what the agent answered, and a line
+ * per tool call. Thinking, tool output, hooks and bookkeeping are left out. Newest `limit` messages.
+ */
+export function transcriptMessages(path: string, limit = 500): ChatMessage[] {
+  const out: ChatMessage[] = [];
+  const push = (role: ChatMessage["role"], text: string, at: string | null) => { text = text.trim(); if (text) out.push({ role, text: text.slice(0, 20_000), at }); };
+  for (const line of readFileSync(path, "utf8").split("\n")) {
+    if (!line) continue;
+    let d: any;
+    try { d = JSON.parse(line); } catch { continue; }
+    const at = d.timestamp ?? null;
+    if (d.type === "user" || d.type === "assistant") {
+      // claude: a message per line; skip sub-agents and the meta messages the CLI injects (command output, caveats).
+      if (d.isSidechain || d.isMeta) continue;
+      const c = d.message?.content;
+      if (typeof c === "string") { if (!c.startsWith("<")) push(d.type, c, at); continue; }
+      for (const part of Array.isArray(c) ? c : []) {
+        if (part.type === "text" && !(d.type === "user" && part.text?.startsWith("<"))) push(d.type, part.text ?? "", at);
+        else if (part.type === "tool_use") push("tool", toolLine(part.name, part.input), at);
+      }
+    } else if (d.type === "response_item") {
+      // codex: the model's items; user messages that start with "<" are context it injects (environment, instructions).
+      const p = d.payload ?? {};
+      if (p.type === "message" && (p.role === "user" || p.role === "assistant")) {
+        const text = (p.content ?? []).map((x: any) => x.text ?? "").join("\n");
+        if (!(p.role === "user" && text.trimStart().startsWith("<"))) push(p.role, text, at);
+      } else if (p.type === "function_call" || p.type === "custom_tool_call" || p.type === "local_shell_call") {
+        push("tool", toolLine(p.name ?? "shell", p.arguments ?? p.input ?? p.action), at);
+      }
+    }
+  }
+  return out.slice(-limit);
+}
