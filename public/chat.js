@@ -1,7 +1,8 @@
 /*
  * Chat view: a Claude Code session as messages, tool rows, diffs and images, read live from its transcript
  * (server: src/chat, design: docs/rendered-view.md). On a live run of ours it has a composer, which types into the
- * TUI through the server (src/chat/input.ts); sessions lofiwave didn't start are read-only.
+ * TUI through the server (src/chat/input.ts), and cards that answer Claude's permission prompts, questions and plans
+ * (src/chat/approvals.ts); sessions lofiwave didn't start are read-only.
  * Uses app.js's helpers (h, token, toast, fmtDur, shortCwd), which are loaded by the time a view opens.
  */
 
@@ -106,9 +107,22 @@ class ChatView {
     this.pending = [];
     this.pendingEl = h("div", { class: "chat-list chat-pending" });
     this.readOnly = true;
+    /** Approvals waiting on someone (runs only): {id, kind, tool_name, tool_input, suggestions, item_id?}. */
+    this.requests = [];
+    this.cardEls = new Map();
+    this.cardsEl = h("div", { class: "chat-cards", hidden: true });
     this.scroller.append(this.top, this.list, this.pendingEl, this.state);
     this.composer = base.startsWith("/runs/") ? new Composer(this) : null;
-    this.root.append(h("div", { class: "chat-main" }, this.scroller, this.jump), this.banner, this.composer?.el ?? "", this.footer());
+    this.root.append(h("div", { class: "chat-main" }, this.scroller, this.jump), this.cardsEl, this.banner, this.composer?.el ?? "", this.footer());
+    // Keys 1–9 pick an option on the oldest card, unless you're typing somewhere.
+    this.onKey = (e) => {
+      if (!this.requests.length || e.metaKey || e.ctrlKey || e.altKey || !/^[1-9]$/.test(e.key)) return;
+      if (!this.root.isConnected || !this.root.offsetParent || e.target?.closest?.("input, textarea, select, [contenteditable]")) return;
+      const card = this.cardEls.get(this.requests[0].id);
+      if (!card?.pick || card.classList.contains("busy")) return;
+      e.preventDefault(); card.pick(Number(e.key));
+    };
+    document.addEventListener("keydown", this.onKey);
     this.scroller.addEventListener("scroll", () => { this.atBottom = this.nearBottom(); this.jump.hidden = this.atBottom; ChatView.scrolls.set(this.base, this.atBottom ? null : this.scroller.scrollTop); });
     this.atBottom = true;
     this.connect();
@@ -125,12 +139,12 @@ class ChatView {
   footNote() {
     if (!this.composer) return;
     $(".chat-foot-note", this.root).textContent = this.readOnly ? "Read-only: this run has ended."
-      : this.status === "waiting" ? "Claude is waiting on the terminal; sending is paused."
+      : this.status === "waiting" ? (this.requests.length ? "Claude is waiting for your answer above (or in the terminal)." : "Claude is waiting on the terminal; sending is paused.")
       : this.status === "busy" ? "Messages sent now are queued until Claude finishes the current step."
       : matchMedia("(pointer: coarse)").matches ? "" : "Enter to send · Shift+Enter for a new line · / for commands";
   }
 
-  close() { this.closed = true; clearTimeout(this.retry); clearTimeout(this.screenTimer); this.composer?.close(); try { this.ws?.close(); } catch {} }
+  close() { this.closed = true; clearTimeout(this.retry); clearTimeout(this.screenTimer); document.removeEventListener("keydown", this.onKey); this.composer?.close(); try { this.ws?.close(); } catch {} }
 
   connect() {
     if (this.closed) return;
@@ -156,6 +170,8 @@ class ChatView {
       this.floor = m.floor; this.hasEarlier = m.has_earlier;
       this.turnEls.clear(); this.list.replaceChildren();
       this.readOnly = m.read_only;
+      this.requests = m.requests || [];
+      this.renderCards();
       this.setStatus(m.status, m.waiting_for);
       this.loaded = true;
       this.composer?.update(); this.footNote();
@@ -176,6 +192,8 @@ class ChatView {
     } else if (m.t === "status") {
       if (m.read_only !== undefined) this.readOnly = m.read_only;
       this.setStatus(m.status, m.waiting_for);
+    } else if (m.t === "requests") {
+      this.setRequests(m.requests);
     }
   }
 
@@ -187,11 +205,12 @@ class ChatView {
     // "shell": the turn is over but a background command it started still runs. Newer statuses show as they are.
     $(".chat-pill-text", pill).textContent = { busy: "Working…", idle: "Idle", waiting: "Waiting for you", shell: "Idle · background task running" }[this.status]
       || (this.status ? this.status[0].toUpperCase() + this.status.slice(1) : this.sessionId ? "Not running" : "");
-    // Claude is blocked on a dialog (permission, question, plan, a menu). Answering from here comes later (phase 3):
+    // Claude is blocked on something no card here can answer (a menu, the trust prompt, a run without our hook):
     // show what the terminal shows, and a way there.
-    const waiting = this.status === "waiting";
+    const waiting = this.status === "waiting" && !this.requests.length;
+    const wasShown = !this.banner.hidden;
     this.banner.hidden = !waiting;
-    if (waiting && (was !== "waiting" || !this.banner.firstChild)) {
+    if (waiting && (!wasShown || !this.banner.firstChild)) {
       this.screenEl = this.composer && !this.readOnly ? h("pre", { class: "chat-screen", hidden: true }) : null;
       this.banner.replaceChildren(
         h("div", { class: "chat-banner-head" },
@@ -209,12 +228,151 @@ class ChatView {
   /** While Claude waits, a live snapshot of the bottom of the terminal, so a phone can see what it's asking. */
   async pollScreen() {
     clearTimeout(this.screenTimer);
-    if (this.closed || this.status !== "waiting" || !this.screenEl) return;
+    if (this.closed || this.banner.hidden || !this.screenEl) return;
     try {
       const r = await api("GET", `${this.base}/chat/screen?lines=16`);
       if (this.screenEl) { this.screenEl.textContent = r.text; this.screenEl.hidden = !r.text.trim(); }
     } catch { /* the run may just have ended */ }
     this.screenTimer = setTimeout(() => this.pollScreen(), 1500);
+  }
+
+  // ---------------------------------------------------------------- approvals (answered here or in the terminal, first wins)
+  setRequests(list) {
+    const linked = new Set([...this.requests, ...(list || [])].map((r) => r.item_id).filter(Boolean));
+    this.requests = list || [];
+    // Rows waiting on a card carry a badge: redraw their turns.
+    for (const id of linked) { const it = this.items.get(id); if (it) this.dirty.add(it.turnId); }
+    if (linked.size) this.render();
+    this.renderCards();
+    this.setStatus(this.status, this.waitingFor);
+  }
+
+  renderCards() {
+    const ids = new Set(this.requests.map((r) => r.id));
+    for (const id of [...this.cardEls.keys()]) if (!ids.has(id)) this.cardEls.delete(id);
+    const els = this.requests.map((r) => { if (!this.cardEls.has(r.id)) this.cardEls.set(r.id, this.card(r)); return this.cardEls.get(r.id); });
+    const cur = [...this.cardsEl.children];
+    if (cur.length !== els.length || cur.some((c, i) => c !== els[i])) this.cardsEl.replaceChildren(...els);
+    this.cardsEl.hidden = !els.length;
+  }
+
+  card(r) {
+    const el = h("div", { class: `chat-card k-${r.kind}`, role: "group" });
+    const lock = (on) => { el.classList.toggle("busy", on); for (const c of el.querySelectorAll("button, input")) c.disabled = on; };
+    // The server's next {t:"requests"} removes the card once Claude has the answer.
+    const send = async (answer) => {
+      lock(true);
+      try { await call("POST", `${this.base}/chat/requests/${encodeURIComponent(r.id)}`, answer); }
+      catch (e) {
+        if (e.status === 409) { toast("that was already answered in the terminal"); this.setRequests(this.requests.filter((x) => x.id !== r.id)); }
+        else { toast(`couldn't answer: ${e.message}`); lock(false); }
+      }
+    };
+    if (r.kind === "question") this.questionCard(el, r, send);
+    else if (r.kind === "plan") this.planCard(el, r, send);
+    else this.permissionCard(el, r, send);
+    return el;
+  }
+
+  /** Numbered choices; keys 1–9 press them (see onKey). */
+  options(el, list) {
+    el.pick = (n) => list[n - 1]?.[1]();
+    return h("div", { class: "chat-opts" }, ...list.map(([label, fn], i) =>
+      h("button", { class: "chat-opt", onclick: fn }, h("span", { class: "key" }, String(i + 1)), h("span", { class: "chat-opt-text" }, label))));
+  }
+
+  /** A line to type into and a button, for "deny, and tell Claude what to do instead". */
+  noteRow(placeholder, label, fn) {
+    const input = h("input", { class: "chat-note", placeholder, "aria-label": placeholder });
+    const btn = h("button", { class: "small", disabled: true, onclick: () => input.value.trim() && fn(input.value.trim()) }, label);
+    input.addEventListener("input", () => { btn.disabled = !input.value.trim(); });
+    input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.isComposing && input.value.trim()) { e.preventDefault(); fn(input.value.trim()); } });
+    return h("div", { class: "chat-note-row" }, input, btn);
+  }
+
+  permissionCard(el, r, send) {
+    const [title, ...body] = this.describeTool(r.tool_name, r.tool_input || {});
+    el.append(h("div", { class: "chat-card-head" }, h("b", {}, title), r.mode && r.mode !== "default" ? h("span", { class: "chat-badge" }, r.mode) : ""), ...body);
+    const opts = [["Allow", () => send({ decision: "allow" })]];
+    (r.suggestions || []).forEach((s, i) => opts.push([`Allow, and ${this.suggestionText(s)}`, () => send({ decision: "allow", suggestion: i })]));
+    opts.push(["Deny", () => send({ decision: "deny" })]);
+    el.append(this.options(el, opts), this.noteRow("or deny and tell Claude what to do instead…", "Deny with note", (m) => send({ decision: "deny", message: m })));
+  }
+
+  /** A permission card's title and what it shows: the command, the diff, the file, or the raw input. */
+  describeTool(name, inp) {
+    const pre = (text, cls = "") => h("pre", { class: `chat-out ${cls}` }, text);
+    const edit = (o, n) => ({ oldStart: 0, oldLines: 0, newStart: 0, newLines: 0, lines: [...String(o ?? "").split("\n").map((l) => "-" + l), ...String(n ?? "").split("\n").map((l) => "+" + l)] });
+    switch (name) {
+      case "Bash": return ["Run this command?", inp.description ? h("div", { class: "muted" }, inp.description) : "", pre("$ " + (inp.command || ""), "cmd")];
+      case "Edit": return [`Edit ${this.rel(inp.file_path)}?`, diffView([edit(inp.old_string, inp.new_string)], true)];
+      case "MultiEdit": return [`Edit ${this.rel(inp.file_path)}?`, diffView((inp.edits || []).map((e) => edit(e.old_string, e.new_string)), true)];
+      case "Write": return [`Write ${this.rel(inp.file_path)}?`, pre(inp.content ?? "")];
+      case "NotebookEdit": return [`Edit ${this.rel(inp.notebook_path)}?`, pre(inp.new_source ?? "")];
+      case "Read": return [`Read ${this.rel(inp.file_path)}?`];
+      case "WebFetch": return [`Fetch ${inp.url}?`, inp.prompt ? h("div", { class: "muted" }, inp.prompt) : ""];
+      case "WebSearch": return [`Search the web for "${inp.query}"?`];
+      case "Grep": case "Glob": return [`Search for "${inp.pattern}"${inp.path ? ` in ${this.rel(inp.path)}` : ""}?`];
+      case "Task": case "Agent": return [`Start an agent: ${inp.description || inp.subagent_type || "subagent"}?`, inp.prompt ? h("details", {}, h("summary", { class: "muted" }, "Prompt"), pre(inp.prompt)) : ""];
+    }
+    return [`Use ${toolName(name)}?`, kvTable(inp)];
+  }
+
+  /** "always allow Bash(npm test:*) in this project", from a permission_suggestions entry. */
+  suggestionText(s) {
+    const where = { session: "for this session", localSettings: "in this project (just you)", projectSettings: "in this project", userSettings: "everywhere", cliArg: "for this session" }[s.destination] || "";
+    const tail = where ? ` ${where}` : "";
+    if (s.type === "addRules" || s.type === "replaceRules") {
+      const rules = (s.rules || []).map((x) => x.ruleContent ? `${x.toolName}(${x.ruleContent})` : x.toolName).join(", ");
+      return `${s.behavior === "deny" ? "always deny" : s.behavior === "ask" ? "always ask for" : "always allow"} ${rules}${tail}`;
+    }
+    if (s.type === "addDirectories") return `always allow access to ${(s.directories || []).map((d) => this.rel(d) || d).join(", ")}${tail}`;
+    if (s.type === "setMode") return `${{ acceptEdits: "accept all edits", bypassPermissions: "skip all permission prompts", plan: "switch to plan mode", default: "ask again for each action", auto: "switch to auto mode" }[s.mode] || `switch to ${s.mode} mode`}${tail}`;
+    return JSON.stringify(s);
+  }
+
+  /** AskUserQuestion: each question's options, plus "Other". One single-choice question answers on click. */
+  questionCard(el, r, send) {
+    const qs = (r.tool_input?.questions || []).filter((q) => q && typeof q.question === "string");
+    const single = qs.length === 1 && !qs[0].multiSelect;
+    const rows = qs.map((q) => ({ q, chosen: new Set(), other: "", btns: [], input: null }));
+    const answer = (row) => [...row.chosen, ...(row.other.trim() ? [row.other.trim()] : [])].join(", ");
+    const complete = () => rows.every((row) => answer(row));
+    const submit = () => complete() && send({ decision: "allow", answers: Object.fromEntries(rows.map((row) => [row.q.question, answer(row)])) });
+    const submitBtn = h("button", { class: "small primary", disabled: true, onclick: submit }, "Answer");
+    const paint = () => {
+      for (const row of rows) row.btns.forEach((b, j) => { const on = row.chosen.has(row.q.options[j].label); b.classList.toggle("on", on); b.setAttribute("aria-pressed", String(on)); });
+      submitBtn.disabled = !complete();
+    };
+    el.append(h("div", { class: "chat-card-head" }, h("b", {}, qs.length === 1 ? "Claude has a question" : `Claude has ${qs.length} questions`)));
+    for (const row of rows) {
+      const { q } = row;
+      row.btns = (q.options || []).map((o, j) => h("button", { class: "chat-opt", "aria-pressed": "false", onclick: () => {
+        if (single) return send({ decision: "allow", answers: { [q.question]: o.label } });
+        if (q.multiSelect) { if (row.chosen.has(o.label)) row.chosen.delete(o.label); else row.chosen.add(o.label); }
+        else { row.chosen = new Set([o.label]); row.other = ""; row.input.value = ""; }
+        paint();
+      } }, h("span", { class: "key" }, String(j + 1)), h("span", { class: "chat-opt-text" }, h("span", {}, o.label), o.description && o.description !== o.label ? h("span", { class: "muted" }, o.description) : "")));
+      row.input = h("input", { class: "chat-note", placeholder: "Other…", "aria-label": `other answer to: ${q.question}` });
+      row.input.addEventListener("input", () => { row.other = row.input.value; if (!q.multiSelect && row.other.trim()) row.chosen.clear(); paint(); });
+      row.input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.isComposing) { e.preventDefault(); submit(); } });
+      el.append(h("div", { class: "chat-q" },
+        h("div", { class: "chat-q-text" }, q.header ? h("span", { class: "chat-badge" }, q.header) : "", h("span", {}, q.question), q.multiSelect ? h("span", { class: "muted" }, "(pick any)") : ""),
+        h("div", { class: "chat-opts" }, ...row.btns), row.input));
+    }
+    // Keys pick from the first question that still needs an answer.
+    el.pick = (n) => (rows.find((row) => !answer(row)) ?? rows[0])?.btns[n - 1]?.click();
+    el.append(h("div", { class: "row chat-card-foot" }, single ? "" : submitBtn, h("button", { class: "small", onclick: () => send({ decision: "deny" }) }, "Skip")));
+  }
+
+  /** ExitPlanMode: approve into a mode, or send Claude back to planning with what to change. */
+  planCard(el, r, send) {
+    el.append(h("div", { class: "chat-card-head" }, h("b", {}, "Claude's plan is ready. Go ahead?")),
+      h("div", { class: "chat-card-plan" }, markdown(r.tool_input?.plan || "")));
+    el.append(this.options(el, [
+      ["Yes, and accept edits without asking", () => send({ decision: "allow", mode: "acceptEdits" })],
+      ["Yes, and ask before each edit", () => send({ decision: "allow", mode: "default" })],
+    ]), this.noteRow("or tell Claude what to change…", "Keep planning", (m) => send({ decision: "deny", message: m })));
   }
 
   // ---------------------------------------------------------------- sent from here, not in the transcript yet
@@ -317,9 +475,9 @@ class ChatView {
     } catch (e) { toast(`couldn't load earlier messages: ${e.message}`); }
   }
 
-  /** A finished turn folds to "Worked for 2m 13s"; the live one shows everything. */
+  /** A finished turn folds to "Worked for 2m 13s"; the live one (working, or waiting on an answer) shows everything. */
   renderTurn(turnId, items, isLast) {
-    const live = isLast && this.status === "busy";
+    const live = isLast && (this.status === "busy" || this.status === "waiting");
     const head = items[0].kind === "user" ? items[0] : null;
     const body = head ? items.slice(1) : items;
     const el = h("section", { class: `chat-turn${live ? " live" : ""}`, "data-turn": turnId });
@@ -447,9 +605,10 @@ class ChatView {
     const badges = [];
     if (it.kind === "file_change") badges.push(h("span", { class: "chat-diffstat" }, h("span", { class: "add" }, `+${it.added}`), " ", h("span", { class: "del" }, `−${it.removed}`)));
     if (failed(it)) badges.push(h("span", { class: "chat-badge bad" }, it.kind === "command" && it.exitCode > 0 ? `exit ${it.exitCode}` : "failed"));
-    if (it.status === "interrupted") badges.push(h("span", { class: "chat-badge warn" }, "interrupted"));
+    if (it.status === "interrupted") badges.push(h("span", { class: "chat-badge warn" }, it.denied ? "denied" : "interrupted"));
     if (it.background) badges.push(h("span", { class: "chat-badge" }, "background"));
-    if (running) badges.push(this.status === "busy" || it.kind === "subagent" ? h("span", { class: "chat-spin", title: "running" }) : h("span", { class: "chat-badge" }, "no result"));
+    if (this.requests?.some((r) => r.item_id === it.id)) badges.push(h("span", { class: "chat-badge warn" }, "needs your answer"));
+    else if (running) badges.push(this.status === "busy" || this.status === "waiting" || it.kind === "subagent" ? h("span", { class: "chat-spin", title: "running" }) : h("span", { class: "chat-badge" }, "no result"));
     const head = h(expandable ? "button" : "div", { class: `chat-row${open ? " open" : ""}${failed(it) ? " failed" : ""}`, ...(expandable ? { "aria-expanded": String(open), onclick: () => this.toggle(it.id, turnId) } : {}) },
       h("span", { class: expandable ? "chev" : "chev none" }), h("span", { class: "chat-icon" }, icon), h("span", { class: "chat-label" }, label), ...badges);
     const row = h("div", { class: `chat-item k-${it.kind}` }, head);
@@ -555,17 +714,18 @@ function kvTable(obj) {
   return h("dl", { class: "chat-kv" }, ...Object.entries(obj).flatMap(([k, v]) => [h("dt", {}, k), h("dd", {}, typeof v === "string" ? v : JSON.stringify(v, null, 2))]));
 }
 
-/** A unified diff from structuredPatch hunks, with old and new line numbers. */
-function diffView(hunks) {
+/** A unified diff from structuredPatch hunks, with old and new line numbers (`bare`: no numbers, for an edit not made yet). */
+function diffView(hunks, bare = false) {
   const rows = [];
   for (const hk of hunks || []) {
     let o = hk.oldStart, n = hk.newStart;
-    rows.push(h("div", { class: "dl hunk" }, h("span", { class: "ln" }), h("span", { class: "ln" }), h("span", { class: "tx" }, `@@ -${hk.oldStart},${hk.oldLines} +${hk.newStart},${hk.newLines} @@`)));
+    if (!bare) rows.push(h("div", { class: "dl hunk" }, h("span", { class: "ln" }), h("span", { class: "ln" }), h("span", { class: "tx" }, `@@ -${hk.oldStart},${hk.oldLines} +${hk.newStart},${hk.newLines} @@`)));
+    else if (rows.length) rows.push(h("div", { class: "dl hunk" }, h("span", { class: "ln" }), h("span", { class: "ln" }), h("span", { class: "tx" }, "…")));
     for (const line of hk.lines || []) {
       const s = line[0], tx = line.slice(1);
       if (s === "\\") continue;
       const cls = s === "+" ? "add" : s === "-" ? "del" : "";
-      rows.push(h("div", { class: `dl ${cls}` }, h("span", { class: "ln" }, s === "+" ? "" : o), h("span", { class: "ln" }, s === "-" ? "" : n), h("span", { class: "tx" }, (s === "+" || s === "-" ? s : " ") + tx)));
+      rows.push(h("div", { class: `dl ${cls}` }, h("span", { class: "ln" }, s === "+" || bare ? "" : o), h("span", { class: "ln" }, s === "-" || bare ? "" : n), h("span", { class: "tx" }, (s === "+" || s === "-" ? s : " ") + tx)));
       if (s !== "+") o++;
       if (s !== "-") n++;
     }
@@ -619,7 +779,7 @@ class Composer {
     const uploading = this.files.some((f) => !f.id && !f.error);
     this.input.disabled = off;
     this.attach.disabled = off;
-    this.input.placeholder = off ? (v.loaded ? "This run has ended" : "connecting…") : v.status === "waiting" ? "Claude is waiting on the terminal…" : v.status === "busy" ? "Queue a message for Claude…" : "Message Claude…";
+    this.input.placeholder = off ? (v.loaded ? "This run has ended" : "connecting…") : v.status === "waiting" ? (v.requests.length ? "Answer Claude above…" : "Claude is waiting on the terminal…") : v.status === "busy" ? "Queue a message for Claude…" : "Message Claude…";
     this.send.disabled = off || this.sending || uploading || v.status === "waiting" || (!this.input.value.trim() && !this.files.some((f) => f.id));
     this.send.textContent = v.status === "busy" ? "Queue" : "Send";
     this.stop.hidden = off || v.status !== "busy";

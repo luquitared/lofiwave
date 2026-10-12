@@ -6,7 +6,7 @@ Open work, newest first within each status. One heading per issue; close it by m
 ## Open
 
 ### #3 Chat view, toggleable with the terminal
-*Opened 2026-10-09 · designed in [`docs/rendered-view.md`](docs/rendered-view.md) · phases 1 (read-only chat view) and 2 (composer) built*
+*Opened 2026-10-09 · designed in [`docs/rendered-view.md`](docs/rendered-view.md) · phases 1 (read-only chat view), 2 (composer) and 3 (approvals) built*
 
 An interactive run gets a second view: the same live session as messages, tool cards, diffs and images,
 with a composer that takes uploads and answers approvals. You can switch between it and the xterm view at
@@ -17,13 +17,16 @@ and types into the pane. It also ends the terminal scrolling back-and-forth (`81
 Six phases, one PR each (in the doc). Phase 1 is in: the Chat view for Claude runs and, read-only in a dialog,
 for Claude sessions lofiwave didn't start. Phase 2 adds the composer: text, Stop, queued messages, the
 unsent-draft check, image and file uploads, the `/` list, and a "terminal needs you" banner with a live snapshot.
+Phase 3 answers permission prompts, questions and plans from cards in the chat view, through a `PermissionRequest`
+hook injected with `--settings`. Still untested from phase 3: the hook timing out, a server restart while a request
+is held, bypass and `acceptEdits` modes, requests from inside a subagent, and the cards on a real phone.
 Still untested from phase 2: very long pastes and non-ASCII text, several images in one message, HEIC, Stop
 during a tool call, two browsers sending at once. Still open from phase 1's checklist: warning when two live runs share
 a session id, nested subagents, the phone layout on a real device. Before phases 2 and 3, the five spikes at the
 end of the doc. All five ran on 2026-10-11 (results at the end of the doc). Image paste, hook merging, HTTP hooks
 with the token, and the approval race all work. `MessageDisplay` streams by paragraph but blocks the TUI
-until it returns, so lofiwave's endpoint must reply at once. Still untested: ExitPlanMode through the hook, and
-`deny` with a message.
+until it returns, so lofiwave's endpoint must reply at once. ExitPlanMode and `deny` with a message were
+checked in phase 3 (ExitPlanMode needs `updatedInput` on allow; see the doc's "Phase 3 findings").
 
 ### #2 Codex: untested paths
 *Opened 2026-10-09 · audit against `codex-cli 0.153.4`; see #1 for what's confirmed broken*

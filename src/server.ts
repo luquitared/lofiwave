@@ -13,6 +13,7 @@ import { renderDocs, apiIndex } from "./docs";
 import { ttyFor, ttySocket, type TtyData } from "./tty";
 import { chatFor, chatSocket, chatEarlier, chatBlob, chatSubagent, type ChatData } from "./chat";
 import { chatSend, chatInterrupt, chatScreen, chatCommands, chatUpload, deleteUploads, opensMenu } from "./chat/input";
+import { permissionHook, answerRequest, requestsFor } from "./chat/approvals";
 import { actor, identify, touch, online, passwordMatches, cleanName, makeSession, sessionCookie, loginBlocked, loginFailed, TOKEN_ACTOR, KEY_ACTOR_PREFIX, createApiKey } from "./auth";
 
 const PUBLIC_DIR = join(config.root, "public");
@@ -631,6 +632,23 @@ route("GET", "/api/runs/:id/chat/screen", async (_r, p, url) => json(await chatS
 route("GET", "/api/runs/:id/chat/commands", (_r, p) => json(chatCommands(Number(p.id))));
 route("POST", "/api/runs/:id/uploads", async (req, p, url) => json(await chatUpload(Number(p.id), req, url.searchParams.get("name") ?? ""), 201));
 
+// ---- approvals (see src/chat/approvals.ts): Claude's PermissionRequest hook is held open until the browser answers
+// POST …/chat/requests/:rid {decision: "allow"|"deny", suggestion?, answers?, mode?, message?}; 409 once it's gone.
+route("GET", "/api/runs/:id/chat/requests", (_r, p) => json({ requests: requestsFor(getRun(Number(p.id)).id) }));
+route("POST", "/api/runs/:id/chat/requests/:rid", async (req, p) => {
+  const b = await body(req);
+  const answers = b.answers;
+  if (answers !== undefined && (typeof answers !== "object" || answers === null || Array.isArray(answers) || Object.values(answers).some((v) => typeof v !== "string")))
+    throw new ApiError(400, "answers must be an object of question → answer strings");
+  const suggestion = int(b.suggestion, "suggestion", -1);
+  return json(answerRequest(Number(p.id), p.rid, {
+    decision: str(b.decision, "decision", { required: true }) as "allow" | "deny",
+    suggestion: suggestion < 0 ? undefined : suggestion, answers, mode: str(b.mode, "mode"), message: str(b.message, "message"),
+  }));
+});
+// Claude calls this (the run's env has the token and run id). It answers when someone decides, or with {} to leave it to the TUI.
+route("POST", "/api/hooks/permission", async (req) => json(await permissionHook(req, await body(req))));
+
 route("DELETE", "/api/runs/:id", async (_r, p) => {
   const run = getRun(Number(p.id));
   if (run.status === "running") throw new ApiError(409, "kill the run before deleting it");
@@ -686,6 +704,8 @@ const server = Bun.serve<WsData>({
   async fetch(req, srv) {
     peers.set(req, srv.requestIP(req)?.address ?? "");
     const path = new URL(req.url).pathname;
+    // A held approval stays open with nothing sent until someone answers: no idle timeout for it.
+    if (path === "/api/hooks/permission") srv.timeout(req, 0);
     const ws = req.headers.get("upgrade")?.toLowerCase() === "websocket";
     const tty = ws && path.match(/^\/api\/runs\/(\d+)\/tty$/);
     const chat = ws && path.match(/^\/api\/(runs|sessions)\/([^/]+)\/chat$/);
