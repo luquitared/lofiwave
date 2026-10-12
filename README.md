@@ -257,15 +257,20 @@ On top of the recorded id, the console reads what the agents themselves know: Cl
 
 ### Chat view (a Claude session read from its transcript)
 
-The Console's **Chat** view, and **View chat** on Claude sessions lofiwave didn't start, show a session as messages, tool calls, diffs and images. The TUI in tmux stays the only process running the session: the server only tails its transcript (`~/.claude/projects/…/<session>.jsonl`), follows the active branch (rewinds and edits leave old branches in the file), switches files on `/clear`, and reads the live idle/busy/waiting status from Claude's own `~/.claude/sessions/<pid>.json`. Read-only for now. Design and the phases still to come: [`docs/rendered-view.md`](docs/rendered-view.md).
+The Console's **Chat** view, and **View chat** on Claude sessions lofiwave didn't start, show a session as messages, tool calls, diffs and images. The TUI in tmux stays the only process running the session: the server only tails its transcript (`~/.claude/projects/…/<session>.jsonl`), follows the active branch (rewinds and edits leave old branches in the file), switches files on `/clear`, and reads the live idle/busy/waiting status from Claude's own `~/.claude/sessions/<pid>.json`. On a live run of ours the view has a composer that types into the TUI through tmux: text goes in as one bracketed paste, images as pasted paths (the TUI attaches them), other files as `@path` references. A message sent while Claude works is queued by the TUI. Sending is refused while Claude waits on a dialog, and when the terminal's input box already holds an unsent draft the server asks what to do with it. Sessions lofiwave didn't start stay read-only. Design and the phases still to come: [`docs/rendered-view.md`](docs/rendered-view.md).
 
 | | |
 |---|---|
-| `GET /api/runs/:id/chat` (WebSocket) | live feed: `{t:"hello", session_id, cwd, status, items, floor, has_earlier}` with the last 30 turns, then `{t:"items", upsert, remove}` (whole items, keyed by `id`) and `{t:"status", status, waiting_for}` |
+| `GET /api/runs/:id/chat` (WebSocket) | live feed: `{t:"hello", session_id, cwd, status, items, floor, has_earlier}` with the last 30 turns, then `{t:"items", upsert, remove}` (whole items, keyed by `id`) and `{t:"status", status, waiting_for, read_only}` |
 | `GET /api/runs/:id/chat?before=<ordinal>` | the 30 turns before `before`: `{session_id, items, floor, has_earlier}` |
 | `GET /api/runs/:id/chat/blob?ref=&agent=` | a payload too big to send inline (`{omitted: true, bytes, preview, blob}` in an item): an image, a long output or a diff |
 | `GET /api/runs/:id/chat/subagent/:agent_id` | a subagent's own conversation: `{agent_id, items}` |
-| `/api/sessions/:session_id/chat…` | the same four, for any Claude session on this machine by id |
+| `/api/sessions/:session_id/chat…` | the same four, for any Claude session on this machine by id (read-only) |
+| `POST /api/runs/:id/chat/send` | `{text, files?: [upload ids], draft?: "replace"\|"append"}` types a message into the run's TUI and presses Enter: `{ok, queued, opens_menu}`. 409 while Claude waits on a dialog, or `{error, draft}` when the input box has an unsent draft (send again with `draft`) |
+| `POST /api/runs/:id/chat/interrupt` | Escape, only while Claude is working |
+| `POST /api/runs/:id/uploads?name=` | the raw file as the body (20 MB cap): `{id, name, kind, bytes}`. Saved under `data/uploads/<run>/` (mode 600, HEIC converted to PNG on macOS) and deleted with the run |
+| `GET /api/runs/:id/chat/commands` | the `/` list: built-ins (`menu: true` when it opens a TUI menu), and commands and skills from the project, the user and installed plugins |
+| `GET /api/runs/:id/chat/screen?lines=20` | the bottom of the terminal as text, for the "terminal needs you" banner |
 
 ### Examples
 

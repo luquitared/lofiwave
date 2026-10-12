@@ -1,6 +1,7 @@
 # Rendered view: a chat UI you can toggle with the terminal
 
-Status: **phase 1 built** (2026-10-09: read-only chat view, `src/chat/`, `public/chat.js`); phases 2–6 open.
+Status: **phases 1 and 2 built** (2026-10-09: read-only chat view, `src/chat/`, `public/chat.js`; 2026-10-11: the
+composer, `src/chat/input.ts`); phases 3–6 open.
 Tracked as issues.md #3. Research behind it: claude-code-viewer (upstream v0.8.2),
 T3 Code (pingdotgg/t3code), claude.ai/code, the Claude Code source (2026-03 snapshot) checked against the
 installed 2.1.296, and Codex CLI 0.153.4.
@@ -262,11 +263,14 @@ Reading:
 - [ ] Transcripts of sessions lofiwave didn't start (read-only), and sessions on a remote host (later, fridge §3)
 
 Input:
-- [ ] Multi-line text, text starting with `/`, `!` or `#`, very long pastes, emoji and other non-ASCII
-- [ ] Sending while busy (queued), while waiting (blocked by a dialog), or while the pane is dead
-- [ ] An unsent draft in the TUI input box
-- [ ] Image paste timing (wait for `[Image #N]`), unsupported formats, size caps, several images in one message
-- [ ] Interrupt during a tool versus during text
+- [x] Multi-line text, text starting with `/` or `!`
+- [ ] Very long pastes, emoji and other non-ASCII (`#` is no longer a special prefix)
+- [x] Sending while busy (queued), while waiting (blocked by a dialog), or while the pane is dead
+- [x] An unsent draft in the TUI input box
+- [x] Image paste timing (wait for `[Image #N]`), files as `@path`, size caps
+- [ ] Several images in one message, HEIC conversion
+- [x] Interrupt during text
+- [ ] Interrupt during a tool
 - [ ] Two browsers typing at once (fine, same as tmux), plus one in Terminal and one in Chat
 
 Approvals:
@@ -319,6 +323,27 @@ status list. The plan for the view:
    strip, and git checkpoints for per-turn diffs.
 6. **Codex:** the issues.md #1 fixes, then a read-only rollout adapter, then the composer, then the
    app-server spike.
+
+## Phase 2 findings (2026-10-11, Claude Code 2.1.296)
+
+Checked against a live TUI in tmux while building the composer:
+
+- **The input box** is the lines between the last two `─` rules on screen, starting with `❯` (or `!` in shell
+  mode). When it's empty it shows a **dim** placeholder ("Try …", a suggested next prompt, "Press up to edit
+  queued messages"), so `capture-pane -e` is needed to tell a placeholder from a draft.
+- **Clearing a draft:** `C-u` deletes only to the start of the current line, and Esc Esc clears the box but
+  interrupts a busy turn (and opens the rewind menu on an empty box). The composer repeats
+  `C-e C-u Delete BSpace` and re-reads the box until it's empty, which works mid-turn and wherever the cursor is.
+- **Queued messages** (sent while busy) land in the transcript as an `attachment` of type `queued_command`, not
+  a `user` entry. The adapter shows them as user messages inside the turn that read them.
+- **Autocomplete takes the Enter.** A pasted `/clea` runs the highlighted `/clear` (the TUI does that for typed
+  text too). A pasted `@path` at the very end opens the file picker and Enter picks a file instead of
+  submitting, so file references go on the first line, followed by a newline or a space.
+- **Images:** the `[Image #N]` chip shows up within ~100ms of the paste. N keeps counting across messages, so
+  the composer waits for the number of chips to go up.
+- **Stop:** Escape interrupts the turn, and the TUI then sends any queued message straight away.
+- **Status `shell`:** the pid file says `shell` when the turn is over but a background command it started is
+  still running. It accepts messages like `idle`.
 
 ## Spike results (2026-10-11, Claude Code 2.1.296, codex-cli 0.162.1)
 

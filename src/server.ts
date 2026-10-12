@@ -12,6 +12,7 @@ import { validateCron } from "./cron";
 import { renderDocs, apiIndex } from "./docs";
 import { ttyFor, ttySocket, type TtyData } from "./tty";
 import { chatFor, chatSocket, chatEarlier, chatBlob, chatSubagent, type ChatData } from "./chat";
+import { chatSend, chatInterrupt, chatScreen, chatCommands, chatUpload, deleteUploads, opensMenu } from "./chat/input";
 import { actor, identify, touch, online, passwordMatches, cleanName, makeSession, sessionCookie, loginBlocked, loginFailed, TOKEN_ACTOR, KEY_ACTOR_PREFIX, createApiKey } from "./auth";
 
 const PUBLIC_DIR = join(config.root, "public");
@@ -615,10 +616,26 @@ for (const [prefix, kind] of [["/api/runs/:id", "run"], ["/api/sessions/:id", "s
   route("GET", `${prefix}/chat/subagent/:agent`, (_r, p) => json(chatSubagent(kind, p.id, p.agent)));
 }
 
+// ---- chat composer (runs only: it types into the run's tmux pane, see src/chat/input.ts)
+// POST …/chat/send {text, files: [upload ids], draft?: "replace"|"append"}: 409 with {draft} when the terminal has an unsent draft.
+route("POST", "/api/runs/:id/chat/send", async (req, p) => {
+  const b = await body(req);
+  const draft = str(b.draft, "draft");
+  if (draft && draft !== "replace" && draft !== "append") throw new ApiError(400, `draft must be "replace" or "append"`);
+  const text = str(b.text, "text");
+  const r = await chatSend(Number(p.id), { text, files: strArray(b.files, "files"), draft: draft as "replace" | "append" | "" });
+  return json({ ...r, opens_menu: opensMenu(text) });
+});
+route("POST", "/api/runs/:id/chat/interrupt", async (_r, p) => json(await chatInterrupt(Number(p.id))));
+route("GET", "/api/runs/:id/chat/screen", async (_r, p, url) => json(await chatScreen(Number(p.id), int(url.searchParams.get("lines"), "lines", 20))));
+route("GET", "/api/runs/:id/chat/commands", (_r, p) => json(chatCommands(Number(p.id))));
+route("POST", "/api/runs/:id/uploads", async (req, p, url) => json(await chatUpload(Number(p.id), req, url.searchParams.get("name") ?? ""), 201));
+
 route("DELETE", "/api/runs/:id", async (_r, p) => {
   const run = getRun(Number(p.id));
   if (run.status === "running") throw new ApiError(409, "kill the run before deleting it");
   db.prepare("DELETE FROM runs WHERE id = ?").run(run.id);
+  deleteUploads(run.id);
   if (run.log_path) { try { await Bun.file(run.log_path).delete(); } catch { /* already gone */ } }
   return json({ ok: true });
 });
@@ -725,7 +742,7 @@ async function dispatch(req: Request, url: URL): Promise<Response> {
     }
     return json({ error: `no route for ${req.method} ${url.pathname}` }, 404);
   } catch (e: any) {
-    if (e instanceof ApiError) return json({ error: e.message }, e.status);
+    if (e instanceof ApiError) return json({ error: e.message, ...e.extra }, e.status);
     console.error(`[api] ${req.method} ${url.pathname}`, e);
     return json({ error: e?.message ?? "internal error" }, 500);
   }

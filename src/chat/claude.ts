@@ -20,7 +20,7 @@ export type Item = {
   native: { agent: "claude" | "codex"; ref: string };
   startedAt?: number; completedAt?: number;
 } & (
-  | { kind: "user"; text: string; images: ImageRef[]; command?: string; output?: Omitted<string>; notification?: boolean; turnDurationMs?: number }
+  | { kind: "user"; text: string; images: ImageRef[]; command?: string; output?: Omitted<string>; notification?: boolean; queued?: boolean; turnDurationMs?: number }
   | { kind: "assistant"; text: string; streaming?: boolean }
   | { kind: "thinking"; text: string; durationMs?: number }
   | { kind: "command"; label: string; command: string; output?: Omitted<string>; exitCode?: number; background?: boolean }
@@ -33,7 +33,7 @@ export type Item = {
   | { kind: "event"; event: "compact" | "clear" | "interrupt" | "error" | "info" | "raw"; text: string; detail?: Omitted<string> }
 );
 
-export const capabilities = { streaming: false, approvals: false, images: true, interrupt: false, composer: false };
+export const capabilities = { streaming: false, approvals: false, images: true, interrupt: true, composer: true };
 
 /** Outputs longer than this arrive as `omitted` with a preview, and are fetched when a row is expanded. */
 const INLINE = 8 * 1024;
@@ -61,7 +61,7 @@ export type Rec = {
   type: string; subtype?: string;
   hidden?: boolean;
   // user
-  text?: string; images?: ImageRef[]; results?: ToolResult[]; compactSummary?: boolean; notification?: boolean;
+  text?: string; images?: ImageRef[]; results?: ToolResult[]; compactSummary?: boolean; notification?: boolean; queued?: boolean;
   // assistant
   blocks?: ({ type: "text"; text: string } | { type: "thinking"; text: string } | { type: "tool_use"; id: string; name: string; input: any })[];
   thinkingMs?: number; apiError?: boolean;
@@ -165,7 +165,17 @@ export function ingest(e: any, loc: LineLoc): Rec | null {
     if (typeof e.durationMs === "number") rec.durationMs = e.durationMs;
     return rec;
   }
-  if (e.type === "attachment") { rec.hidden = true; return rec; } // context the model sees (hooks, reminders): not conversation
+  if (e.type === "attachment") {
+    // A message typed while Claude was working, delivered mid-turn.
+    const a = e.attachment;
+    if (a?.type === "queued_command" && a.commandMode === "prompt" && !a.isMeta) {
+      rec.type = "user"; rec.queued = true;
+      rec.text = textOf(a.prompt);
+      if (Array.isArray(a.prompt)) rec.images = imagesIn(a.prompt, e.uuid, "queued");
+      return rec;
+    }
+    rec.hidden = true; return rec; // context the model sees (hooks, reminders): not conversation
+  }
   return rec; // a type we don't know yet: a quiet raw row, never an error
 }
 
@@ -173,6 +183,11 @@ export function ingest(e: any, loc: LineLoc): Rec | null {
 export function extractBlob(e: any, path: string[]): { image?: { data: string; mediaType: string }; text?: string } | null {
   const c = e?.message?.content;
   const [what, a, b] = path;
+  if (what === "queued") {
+    const img = Array.isArray(e?.attachment?.prompt) ? e.attachment.prompt[Number(a)] : null;
+    if (img?.type === "image" && img.source?.type === "base64") return { image: { data: img.source.data, mediaType: img.source.media_type } };
+    return null;
+  }
   if (what === "img") {
     const blocks = b === undefined ? c : c?.[Number(a)]?.content;
     const img = Array.isArray(blocks) ? blocks[Number(b ?? a)] : null;
@@ -316,6 +331,11 @@ export function project(chain: Rec[]): Item[] {
   for (const r of chain) {
     if (r.hidden) continue;
     if (r.type === "user") {
+      if (r.queued) {
+        // Part of the turn it was delivered into, not a new one.
+        push({ id: r.uuid, kind: "user", text: stripReminders(r.text ?? ""), images: r.images ?? [], queued: true, status: "completed", native: native(r), startedAt: r.ts });
+        continue;
+      }
       if (r.compactSummary) {
         push({ id: r.uuid, kind: "event", event: "compact", text: "Conversation compacted", detail: r.text, status: "completed", native: native(r), startedAt: r.ts });
         continue;
