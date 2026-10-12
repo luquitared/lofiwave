@@ -36,6 +36,8 @@ Never exercised end to end:
 - [ ] Codex on Linux
 - [ ] The Agents tab while the Codex Desktop app is running
 - [ ] A clean exit: every interactive Codex run so far ended as "killed"
+- [ ] Workflow runs never close on their own: Codex has no idle state like claude's session registry, so
+      they stay open until stopped or `timeout_sec`
 
 Waiting to break:
 - [ ] Rollouts older than 7 days may be compressed to `.jsonl.zst`, and our lookups match only `.jsonl`.

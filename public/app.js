@@ -169,25 +169,24 @@ let consoleData = { live: [], headless: [], adoptable: [] }, consoleRun = null, 
 const typeByName = (n) => types.find((t) => t.name === n);
 
 // ---------------------------------------------------------------- tabs
+// Main tabs: Sessions, Workflows, Connect, and Advanced, which holds the rest (processes, apps, runs, types).
+const ADVANCED = ["agents", "apps", "runs", "types"];
+const TITLES = { console: "Sessions", workflows: "Workflows", connect: "Connect", settings: "Settings", agents: "Advanced", apps: "Advanced", runs: "Advanced", types: "Advanced" };
 $$("nav button").forEach((b) => b.addEventListener("click", () => switchTab(b.dataset.tab)));
+$$("#subnav button").forEach((b) => b.addEventListener("click", () => switchTab(b.dataset.sub)));
 function switchTab(name, push = true) {
+  if (name === "advanced") name = ADVANCED.includes(localStorage.getItem("ac_advanced")) ? localStorage.getItem("ac_advanced") : "runs";
+  if (!TITLES[name]) name = "console";
   if (name !== "runs" && selectedRun) closeRun(false);
   if (name !== "console") { closeTerm(); syncFull(false); }
   activeTab = name;
-  const pages = {
-    console: ["Console", "Your live sessions, and a terminal to talk to them."],
-    agents: ["Agents", "A clear view of your active sessions and what they’re working on."],
-    apps: ["Apps", "Keep your services and local tools within reach."],
-    workflows: ["Workflows", "Build repeatable routines. Know exactly what runs next."],
-    runs: ["Run history", "Follow live progress and pick up where you left off."],
-    types: ["Process types", "Configure the tools that power your workspace."],
-  };
-  const page = pages[name] || pages.console;
-  $("#page-title").textContent = page[0];
-  $("#page-location").textContent = page[0];
-  $("#page-description").textContent = page[1];
-  $$("nav button").forEach(b => b.setAttribute("aria-current", b.dataset.tab === name ? "page" : "false"));
-  $$("nav button").forEach((b) => b.classList.toggle("active", b.dataset.tab === name));
+  const advanced = ADVANCED.includes(name);
+  if (advanced) localStorage.setItem("ac_advanced", name);
+  $("#page-title").textContent = TITLES[name];
+  $("#subnav").hidden = !advanced;
+  $$("#subnav button").forEach((b) => { const on = b.dataset.sub === name; b.classList.toggle("active", on); b.setAttribute("aria-selected", String(on)); });
+  const navOf = advanced ? "advanced" : name;
+  $$("nav button").forEach((b) => { b.classList.toggle("active", b.dataset.tab === navOf); b.setAttribute("aria-current", b.dataset.tab === navOf ? "page" : "false"); });
   $$(".tab").forEach((t) => t.classList.toggle("active", t.id === `tab-${name}`));
   // Which tab you're on is view state, not a location: only run/session deep links go in the URL, so
   // reopening the console doesn't drop you back into whatever you last inspected.
@@ -210,7 +209,7 @@ const loadMe = guard(async () => {
   el.hidden = false;
 });
 /** " · by lucas" for a run someone started (blank for scheduled runs and older ones). */
-const byWho = (r) => (r.meta?.started_by ? ` · by ${r.meta.started_by}` : "");
+const byWho = (r) => (r.meta?.started_by ? ` · by ${r.meta.started_by.replace(/^key:/, "")}` : "");
 
 // ---------------------------------------------------------------- system info
 let systemInfo = null;
@@ -231,11 +230,13 @@ const appUrl = (t) => (t.url ? t.url.replace("{host}", location.hostname) : "");
 // ---------------------------------------------------------------- types
 const loadTypes = guard(async () => {
   types = await get("/process-types");
-  for (const sel of [$("#start-form [name=type]"), $("#wf-form [name=type]")]) {
-    if (sel.closest("#start-dialog[open]")) continue;
-    const cur = sel.value;
-    sel.replaceChildren(...types.map((t) => h("option", { value: t.name }, `${t.name} (${t.kind})` + (t.available ? "" : " · not found"))));
-    if (cur && typeByName(cur)) sel.value = cur;
+  // Workflows pick from agents first; apps can be scheduled too.
+  const wsel = $("#wf-form [name=type]");
+  if (!wsel.closest("dialog[open]")) {
+    const cur = wsel.value;
+    const sorted = [...types].sort((a, b) => (a.kind === b.kind ? 0 : a.kind === "agent" ? -1 : 1));
+    wsel.replaceChildren(...sorted.map((t) => h("option", { value: t.name }, t.name + (t.kind === "app" ? " (app)" : "") + (t.available ? "" : " · not found"))));
+    if (cur && typeByName(cur)) wsel.value = cur;
   }
   const rt = $("#runs-type"); const cur = rt.value;
   rt.replaceChildren(h("option", { value: "" }, "All types"), ...types.map((t) => h("option", { value: t.name }, t.name))); rt.value = cur;
@@ -325,7 +326,6 @@ const loadAgents = guard(async () => {
 });
 $("#hide-children").checked = localStorage.getItem("ac_hide_children") !== "false";
 $("#hide-children").onchange = () => { localStorage.setItem("ac_hide_children", String($("#hide-children").checked)); loadAgents(); };
-$("#start-agent-btn").onclick = () => openStartDialog({ kind: "agent" });
 
 // ---------------------------------------------------------------- apps tab
 const loadApps = guard(async () => {
@@ -358,13 +358,14 @@ const loadApps = guard(async () => {
 
 // ---------------------------------------------------------------- start dialog
 const dlg = $("#start-dialog"), sf = $("#start-form");
-function openStartDialog({ kind, type, interactive = false } = {}) {
+function openStartDialog({ kind, type } = {}) {
   const sel = sf.type;
   const allowed = type ? types.filter((t) => t.name === type) : types.filter((t) => !kind || t.kind === kind);
   sel.replaceChildren(...allowed.map((t) => h("option", { value: t.name }, `${t.name}` + (t.available ? "" : " · not found"))));
   sel.disabled = allowed.length <= 1;
-  sf.prompt.value = ""; sf.extra_args.value = ""; sf.timeout_sec.value = 0; sf.interactive.checked = Boolean(interactive) && Boolean(systemInfo?.tmux); $("#preview").textContent = "";
-  $("#start-title").textContent = type ? `Start ${type}` : kind === "agent" ? "Start an agent" : "Start a process";
+  sf.prompt.value = ""; sf.extra_args.value = ""; sf.timeout_sec.value = 0; $("#preview").textContent = "";
+  $("#start-title").textContent = type ? `Start ${type}` : kind === "agent" ? "New session" : "Start a process";
+  $(".more", sf).open = false;
   $("#start-feedback").hidden = true;
   applyStartType();
   dlg.showModal();
@@ -372,27 +373,23 @@ function openStartDialog({ kind, type, interactive = false } = {}) {
   // Prefill the folder with the one most recently used, so a test start is a single click.
   if (!sf.cwd.value) get("/paths?limit=1").then(({ paths }) => { if (dlg.open && !sf.cwd.value && paths?.[0]) sf.cwd.value = paths[0].path; }).catch(() => {});
 }
+/** Agents always start interactive (when tmux is here); apps run headless. The server applies the same default. */
+const startsInteractive = (t) => t?.kind === "agent" && Boolean(systemInfo?.tmux);
 function applyStartType() {
   const t = typeByName(sf.type.value);
-  const interactive = sf.interactive.checked;
+  const interactive = startsInteractive(t);
   const needsPrompt = t && (t.args.some((a) => a.includes("{prompt}")) || t.command.includes("{prompt}")) && !interactive;
   sf.prompt.required = Boolean(needsPrompt);
-  $("#prompt-label").hidden = t && !needsPrompt && t.kind === "app" && !interactive;
-  sf.prompt.placeholder = interactive ? "Optional first message — or leave empty and drive it from the Claude app / the screen below" : "What should the agent do?";
-  $("#interactive-label").style.display = systemInfo?.tmux ? "" : "none";   // .row's display:flex would override `hidden`
-  const iargs = Array.isArray(t?.interactive_args) && t.interactive_args.length ? t.interactive_args : t?.args || [];
-  const perms = iargs.includes("--dangerously-skip-permissions") ? "permissions bypassed and " : "";
-  $("#interactive-hint").textContent = t?.name === "claude" ? `— stays open in a tmux session and a terminal window on the machine; claude starts with ${perms}Remote Control on, so it appears in the Claude app`
-    : t?.name === "codex" ? "— opens the Codex TUI in a tmux session, and a terminal window on the machine" : "— runs in a tmux session that stays open (and a terminal window on the machine); uses the type's interactive args";
+  $("#prompt-label").hidden = t && !needsPrompt && t.kind === "app";
+  sf.prompt.placeholder = interactive ? "Optional first message" : "What should it do?";
   sf.cwd.value = t?.default_cwd || sf.cwd.value;
   sf.cwd.placeholder = t?.default_cwd ? t.default_cwd : "start typing to search";
   sf.extra_args.placeholder = t?.name === "claude" ? "--permission-mode acceptEdits" : t?.name === "codex" ? "--full-auto" : "";
 }
 sf.type.onchange = applyStartType;
-sf.interactive.onchange = applyStartType;
 $("#start-cancel").onclick = () => dlg.close();
 function startFormBody() {
-  return { type: sf.type.value, cwd: sf.cwd.value.trim(), prompt: sf.prompt.value, extra_args: sf.extra_args.value, timeout_sec: Number(sf.timeout_sec.value || 0), interactive: sf.interactive.checked };
+  return { type: sf.type.value, cwd: sf.cwd.value.trim(), prompt: sf.prompt.value, extra_args: sf.extra_args.value, timeout_sec: Number(sf.timeout_sec.value || 0), interactive: startsInteractive(typeByName(sf.type.value)) };
 }
 $("#preview-btn").onclick = guard(async () => {
   if (!sf.reportValidity()) return;
@@ -476,43 +473,152 @@ rf.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.isComposing 
 $("#resume-agent-btn").onclick = openResumeDialog;
 
 // ---------------------------------------------------------------- workflows
+const PRESETS = ["", "@hourly", "0 9 * * *", "0 9 * * 1-5", "0 9 * * 1"];
+const presetLabel = (cron) => ({ "@hourly": "Every hour", "@daily": "Every day", "0 9 * * *": "Daily 9:00", "0 9 * * 1-5": "Weekdays 9:00", "0 9 * * 1": "Mondays 9:00" })[cron] || cron;
+const runLink = (r, text) => h("a", { class: "link", href: `#runs/${r.id}`, onclick: (e) => { e.preventDefault(); openRunOrSession(r); } }, text);
+/** A live interactive run opens in Sessions; anything else in the run history. */
+function openRunOrSession(r) {
+  if (r.status === "running" && (r.meta?.interactive ?? true)) { selectConsoleRunId(r.id); switchTab("console"); return; }
+  openRun(r.id);
+}
+const runWorkflowNow = (w) => guard(async () => {
+  const r = await post(`/workflows/${w.id}/run`);
+  toast(`started ${w.name} (run #${r.id})`, true);
+  if (r.meta?.interactive) { selectConsoleRunId(r.id); switchTab("console"); } else loadWorkflows();
+})();
+
 const loadWorkflows = guard(async () => {
   workflows = await get("/workflows");
   const rw = $("#runs-workflow"); const cur = rw.value;
   rw.replaceChildren(h("option", { value: "" }, "All workflows"), ...workflows.map((w) => h("option", { value: w.id }, w.name))); rw.value = cur;
+  const on = workflows.filter((w) => w.enabled && w.schedule).length;
+  $("#wf-count").textContent = workflows.length ? `${workflows.length} workflow${workflows.length === 1 ? "" : "s"}${on ? ` · ${on} scheduled` : ""}` : "";
   $("#wf-table tbody").replaceChildren(...workflows.map((w) => h("tr", {},
-    h("td", { class: "full" }, h("b", {}, w.name), w.prompt ? h("div", { class: "muted trunc", style: "max-width:260px;font-size:12px", title: w.prompt }, w.prompt) : ""),
-    h("td", { "data-l": "type" }, w.type_name),
-    h("td", { class: "mono trunc", title: w.cwd }, shortCwd(w.cwd)),
-    h("td", { class: "mono", "data-l": "cron" }, w.schedule || h("span", { class: "pill" }, "Manual only")),
-    h("td", { "data-l": "next", title: fmtTime(w.next_run_at) }, w.enabled && w.schedule ? fmtRel(w.next_run_at) : "–"),
-    h("td", { "data-l": "last", title: fmtTime(w.last_run_at) }, fmtRel(w.last_run_at)),
-    h("td", {}, h("button", { class: `on-toggle ${w.enabled ? "on" : ""}`, role: "switch", "aria-checked": String(w.enabled), "aria-label": `Enable ${w.name}`, title: w.enabled ? "enabled" : "disabled", onclick: () => guard(async () => { await put(`/workflows/${w.id}`, { enabled: !w.enabled }); loadWorkflows(); })() })),
+    h("td", { class: "full" },
+      h("button", { class: "wf-name", onclick: () => editWorkflow(w) }, w.name),
+      h("div", { class: "muted wf-sub", title: w.prompt || "" }, `${w.type_name} · ${shortCwd(w.cwd)}`, w.prompt ? ` · ${w.prompt.split("\n")[0]}` : "")),
+    h("td", { "data-l": "schedule", title: w.schedule ? `${w.schedule}\nnext: ${fmtTime(w.next_run_at)}` : "" },
+      w.schedule ? h("span", {}, presetLabel(w.schedule), h("div", { class: "muted wf-sub" }, w.enabled ? `next ${fmtRel(w.next_run_at)}` : "paused")) : h("span", { class: "muted" }, "Manual")),
+    h("td", { "data-l": "last" }, w.last_run ? runLink(w.last_run, [badge(w.last_run.status), ` ${fmtRel(w.last_run.started_at)}`]) : h("span", { class: "muted" }, "never")),
+    h("td", {}, h("button", { class: `on-toggle ${w.enabled ? "on" : ""}`, role: "switch", "aria-checked": String(w.enabled), "aria-label": `Enable ${w.name}`, title: w.enabled ? "enabled" : "paused", onclick: () => guard(async () => { await put(`/workflows/${w.id}`, { enabled: !w.enabled }); loadWorkflows(); })() })),
     h("td", { class: "row" },
-      h("button", { class: "small primary", onclick: () => guard(async () => { const r = await post(`/workflows/${w.id}/run`); toast(`started run #${r.id}`, true); loadWorkflows(); })() }, "Run now"),
-      h("button", { class: "small", onclick: () => { $("#runs-workflow").value = w.id; switchTab("runs"); } }, "Runs"),
+      h("button", { class: "small primary", onclick: () => runWorkflowNow(w) }, "Run now"),
+      h("button", { class: "small", onclick: () => { $("#runs-workflow").value = w.id; switchTab("runs"); } }, "History"),
       h("button", { class: "small", onclick: () => editWorkflow(w) }, "Edit"),
-      h("button", { class: "small danger", onclick: () => confirmDo(`Delete workflow "${w.name}"? Past runs are kept.`, async () => { await del(`/workflows/${w.id}`); toast("deleted", true); loadWorkflows(); }) }, "Delete"),
     ),
   )));
-  if (!workflows.length) $("#wf-table tbody").replaceChildren(h("tr", {}, h("td", { colspan: 8, class: "muted" }, "No workflows yet. Create one above.")));
+  if (!workflows.length) $("#wf-table tbody").replaceChildren(h("tr", {}, h("td", { colspan: 5, class: "muted empty" }, "No workflows yet. Make one, or have an agent make them from the Connect page.")));
 });
-function editWorkflow(w) {
-  const f = $("#wf-form");
-  f.elements.namedItem("id").value = w.id; f.elements.namedItem("name").value = w.name; f.type.value = w.type_name; f.cwd.value = w.cwd; f.prompt.value = w.prompt;
-  f.extra_args.value = quoteArgs(w.extra_args); f.env.value = envText(w.env);
-  f.schedule.value = w.schedule; f.timeout_sec.value = w.timeout_sec; f.enabled.checked = w.enabled; f.allow_overlap.checked = w.allow_overlap;
-  $("#wf-panel-title").textContent = `Edit workflow: ${w.name}`; $("#wf-panel").open = true; f.elements.namedItem("name").focus();
+
+const wdlg = $("#wf-dialog"), wf = $("#wf-form");
+function setSchedule(cron) {
+  wf.preset.value = PRESETS.includes(cron) ? cron : "custom";
+  wf.schedule.value = cron;
+  syncPreset();
 }
-function resetWfForm() { const f = $("#wf-form"); f.reset(); f.elements.namedItem("id").value = ""; $("#wf-panel-title").textContent = "New workflow"; $("#wf-panel").open = false; }
-$("#wf-cancel").onclick = resetWfForm;
-$("#wf-form").addEventListener("submit", guard(async (e) => {
+function syncPreset() {
+  const custom = wf.preset.value === "custom";
+  $("#cron-label").hidden = !custom;
+  if (!custom) wf.schedule.value = wf.preset.value;
+}
+wf.preset.onchange = () => { syncPreset(); if (wf.preset.value === "custom") wf.schedule.focus(); };
+function openWorkflowDialog(w) {
+  wf.reset(); $("#wf-feedback").hidden = true;
+  wf.elements.namedItem("id").value = w?.id ?? "";
+  $("#wf-title").textContent = w ? `Edit ${w.name}` : "New workflow";
+  $(".more", wf).open = false;
+  if (w) {
+    wf.elements.namedItem("name").value = w.name; wf.type.value = w.type_name; wf.cwd.value = w.cwd; wf.prompt.value = w.prompt;
+    wf.extra_args.value = quoteArgs(w.extra_args); wf.env.value = envText(w.env);
+    wf.timeout_sec.value = w.timeout_sec; wf.enabled.checked = w.enabled; wf.allow_overlap.checked = w.allow_overlap;
+    $(".more", wf).open = Boolean(w.extra_args.length || Object.keys(w.env || {}).length || w.timeout_sec || w.allow_overlap);
+  } else {
+    wf.type.value = typeByName("claude") ? "claude" : wf.type.options[0]?.value;
+  }
+  setSchedule(w?.schedule ?? "");
+  // The delete button only makes sense on an existing workflow.
+  $("#wf-delete")?.remove();
+  if (w) $("#wf-cancel").before(h("button", { type: "button", id: "wf-delete", class: "danger", onclick: () => confirmDo(`Delete workflow "${w.name}"? Past runs are kept.`, async () => { await del(`/workflows/${w.id}`); toast("deleted", true); wdlg.close(); loadWorkflows(); }) }, "Delete"));
+  wdlg.showModal();
+  wf.elements.namedItem("name").focus();
+}
+const editWorkflow = (w) => openWorkflowDialog(w);
+$("#wf-new-btn").onclick = () => openWorkflowDialog(null);
+$("#wf-cancel").onclick = () => wdlg.close();
+async function saveWorkflow() {
+  if (!wf.reportValidity()) return null;
+  $("#wf-feedback").hidden = true;
+  const body = { name: wf.elements.namedItem("name").value.trim(), type: wf.type.value, cwd: wf.cwd.value.trim(), prompt: wf.prompt.value, extra_args: wf.extra_args.value, env: parseEnv(wf.env.value), schedule: wf.schedule.value.trim(), timeout_sec: Number(wf.timeout_sec.value || 0), enabled: wf.enabled.checked, allow_overlap: wf.allow_overlap.checked };
+  const id = wf.elements.namedItem("id").value;
+  try { return id ? await put(`/workflows/${id}`, body) : await post("/workflows", body); }
+  catch (e) { $("#wf-feedback").textContent = e.message; $("#wf-feedback").hidden = false; return null; }
+}
+wf.addEventListener("submit", async (e) => {
   e.preventDefault();
-  const f = e.target;
-  const body = { name: f.elements.namedItem("name").value.trim(), type: f.type.value, cwd: f.cwd.value.trim(), prompt: f.prompt.value, extra_args: f.extra_args.value, env: parseEnv(f.env.value), schedule: f.schedule.value.trim(), timeout_sec: Number(f.timeout_sec.value || 0), enabled: f.enabled.checked, allow_overlap: f.allow_overlap.checked };
-  if (f.elements.namedItem("id").value) await put(`/workflows/${f.elements.namedItem("id").value}`, body); else await post("/workflows", body);
-  toast("saved", true); resetWfForm(); loadWorkflows();
+  const w = await saveWorkflow();
+  if (w) { toast("saved", true); wdlg.close(); loadWorkflows(); }
+});
+$("#wf-save-run").onclick = async () => {
+  const w = await saveWorkflow();
+  if (w) { wdlg.close(); runWorkflowNow(w); }
+};
+
+// ---------------------------------------------------------------- connect (API docs URL + API keys)
+const docsUrl = () => `${location.origin}/api/docs`;
+const agentPrompt = (key) => `Read ${docsUrl()} and use the lofiwave API with the header "Authorization: Bearer ${key || "<API key>"}". `;
+function copy(text, what) { navigator.clipboard?.writeText(text).then(() => toast(`copied ${what}`, true), () => toast("couldn't copy; select it and copy by hand")); }
+$("#copy-docs-url").onclick = () => copy(docsUrl(), "the URL");
+$("#copy-agent-prompt").onclick = () => copy(agentPrompt(lastKey), "the prompt");
+let lastKey = "";
+const loadConnect = guard(async () => {
+  $("#docs-url").textContent = docsUrl();
+  $("#agent-prompt").textContent = agentPrompt(lastKey ? lastKey.slice(0, 9) + "…" : "");
+  let keys;
+  try { keys = await get("/keys"); } catch (e) { $("#key-table tbody").replaceChildren(h("tr", {}, h("td", { colspan: 5, class: "muted empty" }, e.message))); return; }
+  $("#key-table tbody").replaceChildren(...keys.map((k) => h("tr", {},
+    h("td", { class: "full" }, h("b", {}, k.name), k.created_by ? h("div", { class: "muted wf-sub" }, `by ${k.created_by}`) : ""),
+    h("td", { class: "mono", "data-l": "key" }, `${k.prefix}…`),
+    h("td", { "data-l": "created", title: fmtTime(k.created_at) }, fmtRel(k.created_at)),
+    h("td", { "data-l": "used", title: fmtTime(k.last_used_at) }, k.last_used_at ? fmtRel(k.last_used_at) : h("span", { class: "muted" }, "never")),
+    h("td", { class: "row" }, h("button", { class: "small danger", onclick: () => confirmDo(`Revoke "${k.name}"? Anything using it stops working.`, async () => { await del(`/keys/${k.id}`); toast("revoked", true); loadConnect(); }) }, "Revoke")),
+  )));
+  if (!keys.length) $("#key-table tbody").replaceChildren(h("tr", {}, h("td", { colspan: 5, class: "muted empty" }, "No keys yet.")));
+});
+$("#key-form").addEventListener("submit", guard(async (e) => {
+  e.preventDefault();
+  const k = await post("/keys", { name: e.target.elements.name.value.trim() });
+  e.target.reset();
+  lastKey = k.key;
+  $("#new-key").replaceChildren(
+    h("div", {}, h("b", {}, `Key for ${k.name}`), h("span", { class: "muted" }, " · shown once, copy it now")),
+    h("div", { class: "copy-row" }, h("code", { class: "mono" }, k.key), h("button", { class: "small primary", onclick: () => copy(k.key, "the key") }, "Copy key"), h("button", { class: "small", onclick: () => copy(agentPrompt(k.key), "the prompt with the key") }, "Copy prompt with key")),
+  );
+  $("#new-key").hidden = false;
+  loadConnect();
 }));
+
+// ---------------------------------------------------------------- settings (color scheme, kept per browser)
+const THEMES = [
+  { id: "system", name: "System", note: "Wave, light or dark like your OS", swatch: ["#16131a", "#f6c9a6", "#fbf6f3", "#8a5ea2"] },
+  { id: "wave", name: "Wave", note: "Dark plum, peach", swatch: ["#16131a", "#1f1a25", "#f6c9a6", "#a985b8"] },
+  { id: "wave-light", name: "Wave light", note: "Warm paper, lavender", swatch: ["#fbf6f3", "#ffffff", "#8a5ea2", "#f6c9a6"] },
+  { id: "forest", name: "Forest", note: "The original green", swatch: ["#111312", "#191c1a", "#c4ef91", "#719653"] },
+];
+const themePref = () => { try { return localStorage.getItem("ac_theme") || "system"; } catch { return "system"; } };
+const systemLight = matchMedia("(prefers-color-scheme: light)");
+function applyTheme(pref = themePref()) {
+  document.documentElement.dataset.theme = pref === "system" ? (systemLight.matches ? "wave-light" : "wave") : pref;
+  const meta = $('meta[name="theme-color"]'); if (meta) meta.content = getComputedStyle(document.documentElement).getPropertyValue("--sidebar").trim();
+  if (liveTerm) { liveTerm.term.options.theme = termTheme(); if (liveTerm.hist) liveTerm.hist.term.options.theme = termTheme(); }
+}
+systemLight.addEventListener("change", () => themePref() === "system" && applyTheme());
+function renderSettings() {
+  const pref = themePref();
+  $("#theme-picker").replaceChildren(...THEMES.map((t) => h("button", { class: "theme", role: "radio", "aria-checked": String(pref === t.id), onclick: () => { try { localStorage.setItem("ac_theme", t.id); } catch {} applyTheme(t.id); renderSettings(); } },
+    h("span", { class: "theme-swatch", "aria-hidden": "true" }, ...t.swatch.map((c) => h("span", { style: `background:${c}` }))),
+    h("span", { class: "theme-name" }, t.name, h("small", {}, t.note)),
+  )));
+}
 
 // ---------------------------------------------------------------- runs
 const loadRuns = guard(async () => {
@@ -701,14 +807,14 @@ function renderRail() {
       h("span", {}, live.length ? `${live.length} live session${live.length === 1 ? "" : "s"}` : "No live sessions"),
       h("span", { class: "row" },
         h("button", { class: "small", title: "Reopen a claude or codex session from its id", onclick: openResumeDialog }, "Resume"),
-        h("button", { class: "small primary", onclick: () => openStartDialog({ kind: "agent", interactive: true }) }, "+ New"),
+        h("button", { class: "small primary", onclick: () => openStartDialog({ kind: "agent" }) }, "+ New"),
       ),
     ),
     ...live.map((r) => {
       const s = sessOf(r);
       return h("button", { class: `rail-item ${consoleRun?.id === r.id ? "active" : ""}`, "data-run": r.id, "aria-current": consoleRun?.id === r.id ? "true" : "false", onclick: () => selectConsoleRun(r) },
         h("div", { class: "rail-title" }, h("span", { class: `dot ${s?.status || ""}`, title: s?.status || "" }), runLabel(r)),
-        h("div", { class: "rail-sub" }, `${r.type_name} · ${shortCwd(r.cwd)}${byWho(r)}`),
+        h("div", { class: "rail-sub" }, r.workflow_name ? h("span", { class: "wf-tag" }, `⌁ ${r.workflow_name}`) : "", `${r.type_name} · ${shortCwd(r.cwd)}${byWho(r)}`),
         h("div", { class: "rail-sub dim rail-up" }, railUp(r)),
       );
     }),
@@ -847,7 +953,7 @@ function paneFor(r) {
 // never sees the fn key, so the Terminal.app habit doesn't work here.
 const isMac = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
 function copyHint() {
-  return `To copy: click "Select text", drag over what you want, let go — it's on your clipboard. Click "Done selecting" to give the mouse back to tmux. Scrolling up shows the history to you only; scroll back down or press Esc to return to the live screen. Shortcut: ${isMac ? "⌥ Option" : "Shift"}-drag does the same without the button.`;
+  return `Copy: "Select text", then drag (or ${isMac ? "⌥" : "Shift"}-drag). Scrolling up shows history to you only; Esc returns.`;
 }
 
 // Select mode: xterm stops reporting the mouse to tmux, so a plain drag is a normal text selection. We switch
@@ -905,7 +1011,8 @@ function isBareMotion(d) {
   return d.length === 6 && d.startsWith("\x1b[M") && ((d.charCodeAt(3) - 32) & 35) === 35;
 }
 
-const termOptions = (extra) => ({ fontFamily: getComputedStyle(document.body).getPropertyValue("--mono") || "monospace", fontSize: 13, macOptionClickForcesSelection: true, altClickMovesCursor: false, theme: { background: "#0d110e" }, ...extra });
+const termTheme = () => ({ background: getComputedStyle(document.documentElement).getPropertyValue("--term-bg").trim() || "#110e14" });
+const termOptions = (extra) => ({ fontFamily: getComputedStyle(document.body).getPropertyValue("--mono") || "monospace", fontSize: 13, macOptionClickForcesSelection: true, altClickMovesCursor: false, theme: termTheme(), ...extra });
 
 // ---------------------------------------------------------------- private scrollback
 // Scrolling inside tmux (copy-mode) belongs to the pane, so one viewer scrolling moved everyone's screen. Instead the
@@ -1051,10 +1158,9 @@ document.addEventListener("visibilitychange", () => {
 function emptyPane() {
   const n = consoleData.adoptable.length;
   return h("div", { class: "pane-empty" },
-    h("h2", {}, "No live session"),
-    h("p", { class: "muted" }, "An interactive run keeps a terminal open that you can type into from here — the agent also shows up in the Claude app."),
-    h("div", { class: "row" }, h("button", { class: "primary", onclick: () => openStartDialog({ kind: "agent", interactive: true }) }, "+ Start an agent"), h("button", { onclick: openResumeDialog }, "Resume by ID")),
-    n ? h("p", { class: "muted" }, `${n} agent session${n === 1 ? "" : "s"} on this machine started outside the console, so there is no pane to type into. Take one over from the list to open one.`) : "",
+    h("h2", {}, "No live sessions"),
+    h("div", { class: "row" }, h("button", { class: "primary", onclick: () => openStartDialog({ kind: "agent" }) }, "+ New session"), h("button", { onclick: openResumeDialog }, "Resume by ID")),
+    n ? h("p", { class: "muted" }, `${n} running elsewhere on this machine — take one over from the list.`) : "",
   );
 }
 
@@ -1065,6 +1171,8 @@ function refresh() {
   else if (activeTab === "agents") loadAgents();
   else if (activeTab === "apps") loadTypes().then(loadApps);
   else if (activeTab === "workflows") loadWorkflows();
+  else if (activeTab === "connect") loadConnect();
+  else if (activeTab === "settings") renderSettings();
   else if (activeTab === "runs") { loadRuns(); if (selectedRun) refreshRunDetail(); }
   else if (activeTab === "types") loadTypes();
 }
@@ -1074,19 +1182,20 @@ setInterval(() => !document.hidden && loadMe(), 10000);
 document.addEventListener("visibilitychange", () => !document.hidden && refresh());
 
 (async () => {
+  applyTheme(); // the page head already set the scheme; this syncs theme-color
   await Promise.all([loadSystem(), loadTypes(), loadWorkflows(), loadMe()]);
   const m = location.hash.match(/^#(\w+)(?:\/(\w+))?/);
   if (m && m[1] === "runs" && m[2]) openRun(Number(m[2]));
   else if (m && m[1] === "console" && /^\d+$/.test(m[2] || "")) { selectConsoleRunId(Number(m[2])); switchTab("console", false); }
-  else if (m && m[1] === "agents" && m[2] === "start") { switchTab("agents", false); openStartDialog({ kind: "agent" }); }
+  else if (m && m[1] === "agents" && m[2] === "start") { switchTab("console", false); openStartDialog({ kind: "agent" }); }
   else if (m && m[1] === "processes") switchTab("agents", false);
-  else switchTab(m && $(`#tab-${m[1]}`) ? m[1] : "console", false);
+  else switchTab(m && ($(`#tab-${m[1]}`) || m[1] === "advanced") ? m[1] : "console", false);
 })();
 
 $("#refresh-btn").onclick = () => { refresh(); loadSystem(); };
 window.addEventListener("hashchange", () => {
   const [tab, id] = location.hash.slice(1).split("/");
   if (tab === "runs" && /^\d+$/.test(id || "")) openRun(Number(id));
-  else if ($(`#tab-${tab}`)) { if (selectedRun) closeRun(false); switchTab(tab, false); }
+  else if ($(`#tab-${tab}`) || tab === "advanced") { if (selectedRun) closeRun(false); switchTab(tab, false); }
 });
-document.addEventListener("keydown", e => { if (e.key === "Escape" && selectedRun && !dlg.open) closeRun(); });
+document.addEventListener("keydown", e => { if (e.key === "Escape" && selectedRun && !$("dialog[open]")) closeRun(); });

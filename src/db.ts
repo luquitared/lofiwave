@@ -78,6 +78,17 @@ CREATE TABLE IF NOT EXISTS sessions (
   UNIQUE(run_id, session_id)
 );
 CREATE INDEX IF NOT EXISTS sessions_run_idx ON sessions(run_id, started_at);
+
+-- Named API keys for agents and scripts, made and revoked from the UI. Only a hash is kept; the key is shown once.
+CREATE TABLE IF NOT EXISTS api_keys (
+  id           INTEGER PRIMARY KEY,
+  name         TEXT NOT NULL,
+  prefix       TEXT NOT NULL,              -- first characters, to tell keys apart in the list
+  hash         TEXT NOT NULL UNIQUE,       -- sha256 of the key, hex
+  created_by   TEXT NOT NULL DEFAULT '',
+  created_at   INTEGER NOT NULL,
+  last_used_at INTEGER
+);
 `);
 
 // ---- migrations for columns added after the first release
@@ -138,6 +149,8 @@ export type RunRow = {
   started_at: number; ended_at: number | null; exit_code: number | null; log_path: string | null;
   output: string; error: string; meta: string;
 };
+
+export type ApiKeyRow = { id: number; name: string; prefix: string; hash: string; created_by: string; created_at: number; last_used_at: number | null };
 
 export const ACTIVE_STATUSES = ["running"];
 

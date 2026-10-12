@@ -5,8 +5,9 @@
  *    That makes the console multiplayer: runs record who started them, and everyone sees who else is online.
  */
 import { AsyncLocalStorage } from "node:async_hooks";
-import { createHash, createHmac, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { config } from "./config";
+import { db, now, type ApiKeyRow } from "./db";
 
 export const COOKIE = "ac_session";
 const SESSION_DAYS = 30;
@@ -22,6 +23,33 @@ const safeEq = (a: string, b: string) => {
 };
 
 export const tokenMatches = (t: string | null | undefined) => Boolean(t) && safeEq(t!, config.authToken);
+
+// ---- API keys: named, revocable, made in the UI. Requests with one act as "key:<name>".
+export const KEY_ACTOR_PREFIX = "key:";
+const keyHash = (k: string) => createHash("sha256").update(k).digest("hex");
+
+export function createApiKey(name: string, by: string): { key: string; row: ApiKeyRow } {
+  const key = `lw_${randomBytes(24).toString("base64url")}`;
+  const id = Number(db.prepare("INSERT INTO api_keys (name, prefix, hash, created_by, created_at) VALUES (?, ?, ?, ?, ?)")
+    .run(name, key.slice(0, 9), keyHash(key), by, now()).lastInsertRowid);
+  return { key, row: db.query<ApiKeyRow, [number]>("SELECT * FROM api_keys WHERE id = ?").get(id)! };
+}
+
+/** The key's name when `t` is a live API key (and note that it was used, at most once a minute). */
+function apiKeyName(t: string | null | undefined): string | null {
+  if (!t || !t.startsWith("lw_")) return null;
+  const row = db.query<ApiKeyRow, [string]>("SELECT * FROM api_keys WHERE hash = ?").get(keyHash(t));
+  if (!row) return null;
+  if (!row.last_used_at || now() - row.last_used_at > 60_000) db.prepare("UPDATE api_keys SET last_used_at = ? WHERE id = ?").run(now(), row.id);
+  return row.name;
+}
+
+/** The token or an API key: the identity it carries, or null. */
+function bearerIdentity(t: string | null | undefined): string | null {
+  if (tokenMatches(t)) return TOKEN_ACTOR;
+  const k = apiKeyName(t?.trim());
+  return k ? KEY_ACTOR_PREFIX + k : null;
+}
 
 // Changing the password (or the token) signs everyone out.
 const key = createHash("sha256").update(`ac-session\0${config.authToken}\0${config.password}`).digest();
@@ -66,9 +94,9 @@ export function sessionCookie(req: Request, value: string, maxAge: number): stri
  */
 export function identify(req: Request, url: URL): string | null {
   const h = req.headers.get("authorization") ?? "";
-  if (h.toLowerCase().startsWith("bearer ") && tokenMatches(h.slice(7).trim())) return TOKEN_ACTOR;
-  if (tokenMatches(req.headers.get("x-auth-token"))) return TOKEN_ACTOR;
-  if (tokenMatches(url.searchParams.get("token"))) return TOKEN_ACTOR;
+  const bearer = h.toLowerCase().startsWith("bearer ") ? bearerIdentity(h.slice(7).trim()) : null;
+  const viaToken = bearer ?? bearerIdentity(req.headers.get("x-auth-token")) ?? bearerIdentity(url.searchParams.get("token"));
+  if (viaToken) return viaToken;
   const name = readSession(cookieOf(req, COOKIE));
   if (!name) return null;
   if (req.method !== "GET" && req.method !== "HEAD") {
@@ -94,7 +122,7 @@ export function loginFailed(ip: string) { (failures.get(ip) ?? failures.set(ip, 
 // ---- presence: who has made a request recently.
 const seen = new Map<string, number>();
 const ONLINE_MS = 45_000;
-export function touch(name: string) { if (name !== TOKEN_ACTOR) seen.set(name, Date.now()); }
+export function touch(name: string) { if (name !== TOKEN_ACTOR && !name.startsWith(KEY_ACTOR_PREFIX)) seen.set(name, Date.now()); }
 export function online(): { name: string; last_seen: number }[] {
   const cutoff = Date.now() - ONLINE_MS;
   return [...seen].filter(([, t]) => t > cutoff).map(([name, last_seen]) => ({ name, last_seen })).sort((a, b) => a.name.localeCompare(b.name));

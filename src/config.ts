@@ -50,6 +50,11 @@ export const config = {
    */
   claudePermissionMode: process.env.CLAUDE_PERMISSION_MODE?.trim() || "",
   schedulerIntervalMs: Number(process.env.SCHEDULER_INTERVAL_MS ?? 15_000),
+  /**
+   * A workflow's interactive claude run ends once the agent has finished and stayed idle this long, with nobody
+   * watching its terminal in the browser. Anything typed into it makes it busy again and restarts the wait.
+   */
+  idleStopSec: Number(process.env.IDLE_STOP_SEC ?? 120),
   /** How much of the end of a run's log is copied into runs.output when it finishes. */
   outputTailBytes: Number(process.env.OUTPUT_TAIL_BYTES ?? 64 * 1024),
 };
