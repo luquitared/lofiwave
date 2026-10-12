@@ -17,12 +17,10 @@ and types into the pane. It also ends the terminal scrolling back-and-forth (`81
 Six phases, one PR each (in the doc). Phase 1 is in: the Chat view for Claude runs and, read-only in a dialog,
 for Claude sessions lofiwave didn't start. Still open from phase 1's checklist: warning when two live runs share
 a session id, nested subagents, the phone layout on a real device. Before phases 2 and 3, the five spikes at the
-end of the doc:
-- Does pasting an image path into a live TUI with `tmux paste-buffer -p` attach it?
-- Do `--settings` hooks merge with the user's own hooks or replace them?
-- Do HTTP hooks need `allowedHttpHookUrls`, and can their headers carry the token?
-- What does `MessageDisplay` send, and how often?
-- Is a Codex TUI's rollout written item by item, and does pasting an image path work there?
+end of the doc. All five ran on 2026-10-11 (results at the end of the doc). Image paste, hook merging, HTTP hooks
+with the token, and the approval race all work. `MessageDisplay` streams by paragraph but blocks the TUI
+until it returns, so lofiwave's endpoint must reply at once. Still untested: ExitPlanMode through the hook, and
+`deny` with a message.
 
 ### #2 Codex: untested paths
 *Opened 2026-10-09 · audit against `codex-cli 0.153.4`; see #1 for what's confirmed broken*
@@ -33,7 +31,7 @@ Never exercised end to end:
 - [ ] Restarting a Codex run
 - [ ] Cleaning up Codex's child processes when a run is killed
 - [ ] `codex exec resume`
-- [ ] Image attachment (`exec -i`, and pasting a path into the TUI)
+- [ ] Image attachment with `exec -i` (pasting a path into the TUI works on 0.162.1, see `docs/rendered-view.md`)
 - [ ] The xterm view with Codex (scrolling, resizing)
 - [ ] Approval and trust menus on the phone view
 - [ ] Codex on Linux

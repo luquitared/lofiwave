@@ -81,9 +81,11 @@ Claude-specific facts the parser depends on (from the source and real transcript
 `waitingFor`, for example `"approve Bash"`. I checked that it updates live on 2.1.296. Map it from the pane's
 pid. This is what drives the working spinner and the "the terminal needs you" banner (see Input).
 
-**Streaming text (later phase):** the new `MessageDisplay` hook sends assistant text in line batches while it
+**Streaming text (later phase):** the `MessageDisplay` hook sends assistant text a paragraph at a time while it
 streams (`{turn_id, message_id, index, final, delta}`). Without it, text shows up a whole block at a time, which
-is acceptable for v1.
+is acceptable for v1, because the transcript gets the message only once it's finished. **The TUI waits for this
+hook before drawing each paragraph,** so lofiwave's hook has to answer at once and do its work afterwards (see
+the spike results).
 
 **Usage and context % (optional):** the statusline command receives a JSON object on each update, and an
 injected statusline script can POST it to lofiwave. Todos are in `~/.claude/tasks/<sid>/*.json` and can also
@@ -160,7 +162,9 @@ Everything goes through the run's tmux pane, which gets a new helper in `runner.
 
 **Images and files:** the Claude TUI turns any pasted absolute path ending in
 `.png/.jpg/.jpeg/.gif/.webp` into an image attachment. The rule is in `usePasteHandler.ts` and unchanged in
-2.1.296.
+2.1.296. Confirmed live: it has to be a bracketed paste (`paste-buffer -p`), since `send-keys -l` leaves the
+path as text. Paths with spaces work. Pasting text and a path together also attaches the image, but the TUI
+moves the `[Image #N]` chip to the front, so paste each image on its own as step 3 says.
 1. The browser uploads by drag-drop, paste or the `+` button to `POST /api/runs/:id/uploads`. Enforce a
    size cap.
 2. The server saves it to `data/uploads/<run>/<sha>.<ext>` with mode 600.
@@ -173,14 +177,15 @@ Everything goes through the run's tmux pane, which gets a new helper in `runner.
 5. Clean up uploads after the run ends, using the same retention as logs.
 
 **Approvals, questions and plan approval:** start Claude with an injected `--settings` that adds a
-`PermissionRequest` hook calling lofiwave. The hook can be `http` or a command hook like the existing session
-hook.
+`PermissionRequest` hook calling lofiwave. Use an `http` hook: it needs no `allowedHttpHookUrls` entry, and
+`"Authorization": "Bearer $AGENT_CONSOLE_TOKEN"` works with `"allowedEnvVars": ["AGENT_CONSOLE_TOKEN"]`.
+The injected hooks run alongside the user's own hooks and the project's (they merge, they don't replace).
 - **How it works:** lofiwave holds the request open, shows a card above the composer (T3's pattern, with keys
   1–9 for options), and answers with `{behavior:"allow"|"deny", updatedInput?, updatedPermissions?, message?}`.
   The TUI shows the same dialog at the same time, and whichever is answered first wins; Claude removes the other
   (`interactiveHandler.ts`, the `claim()` race).
-- **AskUserQuestion:** allow with `updatedInput.answers = {"<question>": "<label>"}`. For multiple choices,
-  separate the labels with commas.
+- **AskUserQuestion:** allow with `updatedInput.answers = {"<question>": "<label>"}` (confirmed: the TUI then
+  shows "User answered Claude's questions"). For multiple choices, separate the labels with commas.
 - **Plan approval (ExitPlanMode):** allow with `updatedPermissions: [{type:"setMode", mode, destination:"session"}]`
   to pick the mode after the plan, or deny with a `message` to give feedback.
 - **The hook input has no `tool_use_id`,** so match it to the open tool_use by tool name and input.
@@ -288,7 +293,7 @@ status list. The plan for the view:
 - **Not in the rollout:** streaming text, commands still running, and approval or trust prompts. So for Codex,
   `capabilities.approvals = false`, and approvals go through the "terminal needs you" banner, detected from
   `capture-pane`, with key buttons.
-- **Input:** tmux paste, the same as for Claude. Image paste into the Codex TUI is untested.
+- **Input:** tmux paste, the same as for Claude. Pasting an image path into the Codex TUI attaches it (0.162.1).
 - **Finding the rollout:** `~/.codex/state_5.sqlite` (the `threads` table, opened `immutable=1`) or `lsof` on
   the pane's process tree, instead of today's "newest rollout in the same cwd" guess.
 - **Later, the proper route:** `codex app-server` as a daemon, with the TUI attached through `--remote` and
@@ -315,14 +320,58 @@ status list. The plan for the view:
 6. **Codex:** the issues.md #1 fixes, then a read-only rollout adapter, then the composer, then the
    app-server spike.
 
-## Spikes to run before phase 2 and 3
+## Spike results (2026-10-11, Claude Code 2.1.296, codex-cli 0.162.1)
 
-1. Paste an absolute `.png` path into a live TUI with `tmux paste-buffer -p`. Does `[Image #1]` appear?
-   Does it also work with `send-keys -l`?
-2. `--settings '{"hooks":{…}}'`: is it merged with the user's own hooks, or does it replace them? T3 issue
-   #15073 saw a replacement happen through the SDK.
-3. HTTP hooks: do they need an `allowedHttpHookUrls` entry? Can headers interpolate `$AGENT_CONSOLE_TOKEN`? If
-   either answer is no, use a command hook (curl, plus the token from the environment).
-4. `MessageDisplay`: payload shape and how often it fires on 2.1.296.
-5. Codex 0.153 TUI: is the rollout paginated-mode and flushed per item when started from tmux? Does pasting
-   an image path attach it?
+Each spike was run against a real TUI in tmux, with a local listener standing in for lofiwave.
+
+1. **Image paste: works with bracketed paste.** `tmux load-buffer` + `paste-buffer -p` with an absolute
+   `.png` path gives `[Image #1]` in both the Claude and the Codex TUI. A path with a space works.
+   `send-keys -l` with the same path stays plain text. A paste mixing text and a path attaches the image but
+   puts the chip before the text.
+2. **`--settings` hooks merge.** With a `SessionStart` hook in `--settings`, another in the project's
+   `.claude/settings.json` and the user's own global one (lofiwave's session hook), all three fired. Injecting
+   hooks doesn't disable lofiwave's existing session hook or anyone else's.
+3. **HTTP hooks: no allowlist needed, and the token gets through.**
+   - A hook posting to `http://127.0.0.1:<port>` was sent with no `allowedHttpHookUrls` entry. That key is a
+     managed-settings restriction: it only blocks URLs when an admin sets it.
+   - Header values interpolate `$VAR` only for names in the hook's own `allowedEnvVars`. An unlisted variable
+     arrives as an empty string. `$AGENT_CONSOLE_TOKEN` came through, despite the binary having a "credential,
+     not interpolated" check.
+   - The answer goes in the response body: `{"hookSpecificOutput":{"hookEventName":"PermissionRequest",
+     "decision":{"behavior":"allow"}}}` approves the tool, and the TUI shows "Allowed by PermissionRequest
+     hook". `{}` means no decision, and the TUI dialog stays up.
+   - **The race works both ways.** While the hook is held open, the TUI dialog is already on screen. Answer in
+     the terminal first and the late `allow` is dropped (the command never ran). Let the hook answer first and
+     the open dialog closes and the tool runs.
+   - **AskUserQuestion goes through PermissionRequest too**, with `tool_input.questions`. Answering with
+     `updatedInput.answers` worked.
+   - The payload has `tool_name`, `tool_input`, `permission_suggestions`, `permission_mode` and `prompt_id`,
+     and no `tool_use_id`.
+   - ExitPlanMode and `deny` with a `message` weren't tried.
+4. **`MessageDisplay` streams by paragraph, and blocks the screen.**
+   - One call per paragraph (split at blank lines), ~0.1–1.5s apart. A 900-word answer made 52 calls over
+     26s. The payload is `{turn_id, message_id, prompt_id, index, final, delta}`, with `final: true` on the
+     last delta of each message.
+   - Short answers can arrive as one or two calls right at the end.
+   - The transcript gets the assistant message only once it's complete, so live text has to come from this
+     hook.
+   - **The TUI waits for the hook before drawing each paragraph.** With a 3s hook, the last paragraph showed
+     4.6s after the message was already in the transcript. Calls overlap rather than queue.
+   - So lofiwave must answer the hook immediately (an HTTP hook to an endpoint that returns `{}` straight
+     away, with a short `timeout`) and never do work inline. The binary also suggests the hook can rewrite
+     the text it's given, via `displayContent`. Don't return that.
+5. **Codex rollout: written item by item, from tmux too.**
+   - The file only appears when the first prompt is sent, not when the TUI starts.
+   - It's appended as each item completes: the user message (with the pasted image), each assistant message,
+     the tool call, its output, then `task_complete`. There's no streaming inside a message.
+   - The format has moved since the 0.153 audit:
+     - tool calls are `custom_tool_call` / `custom_tool_call_output` response items
+     - `item_completed` event_msgs sit alongside them
+     - there are new top-level `world_state`, `turn_context` and `token_usage_record` lines
+   - The Codex adapter should key off `item_completed` and treat unknown types as raw rows, as the Claude one
+     does.
+
+**What this changes for phase 2:** nothing in the composer design. Images go in as a bracketed paste of the
+path on its own, then the text. **For phase 3:** use an HTTP `PermissionRequest` hook with the token header, and
+reply `{}` when lofiwave has nothing to say. **For phase 5:** the `MessageDisplay` endpoint must reply
+immediately.
