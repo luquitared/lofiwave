@@ -9,8 +9,9 @@
  * Wire protocol, server → client JSON text frames:
  *   {t:"hello", session_id, cwd, read_only, capabilities, status, waiting_for, items, floor, has_earlier}
  *   {t:"items", upsert: Item[], remove: string[]}
- *   {t:"status", status, waiting_for}
- * The client sends nothing. Older turns come from GET …/chat?before=<ordinal>, big payloads from GET …/chat/blob?ref=.
+ *   {t:"status", status, waiting_for, read_only}
+ * The client sends nothing on the socket. Older turns come from GET …/chat?before=<ordinal>, big payloads from
+ * GET …/chat/blob?ref=, and typing goes through POST /api/runs/:id/chat/send (see ./input.ts).
  */
 import type { ServerWebSocket } from "bun";
 import { existsSync, readFileSync, statSync } from "node:fs";
@@ -32,7 +33,8 @@ export type ChatData = { kind: "chat"; key: string; user: string };
 // ---------------------------------------------------------------- sources
 
 type Located = { path: string; sessionId: string; pid: number | null };
-type Source = { key: string; readOnly: boolean; locate(): Located };
+/** readOnly(): nothing can be typed into it (not our run, or its pane is gone). */
+type Source = { key: string; readOnly(): boolean; locate(): Located };
 
 /** The run's current Claude session: the newest of what the session hook recorded and what the pid file says. */
 function runSource(runId: number): Source {
@@ -44,7 +46,10 @@ function runSource(runId: number): Source {
     throw new ApiError(400, "the chat view reads Claude Code sessions; Codex support comes later");
   return {
     key: `run:${runId}`,
-    readOnly: true, // phase 1: nothing is typed from the chat view yet
+    readOnly() {
+      const cur = db.query<RunRow, [number]>("SELECT * FROM runs WHERE id = ?").get(runId);
+      return !(cur?.status === "running" && JSON.parse(cur.meta || "{}").tmux);
+    },
     locate() {
       const cur = db.query<RunRow, [number]>("SELECT * FROM runs WHERE id = ?").get(runId);
       const pid = cur?.status === "running" ? cur.pid : null;
@@ -69,7 +74,7 @@ function sessionSource(sid: string): Source {
   if (!path) throw new ApiError(404, `no Claude transcript for session ${sid} on this machine`);
   return {
     key: `session:${sid}`,
-    readOnly: true,
+    readOnly: () => true,
     locate: () => ({ path, sessionId: sid, pid: claudeRegistry().bySession.get(sid)?.pid ?? null }),
   };
 }
@@ -119,13 +124,13 @@ class Transcript {
 
 // ---------------------------------------------------------------- feeds
 
-type Status = { status: string; waiting_for: string };
+type Status = { status: string; waiting_for: string; read_only: boolean };
 
 class Feed {
   subs = new Set<ServerWebSocket<ChatData>>();
   transcript: Transcript | null = null;
   located: Located = { path: "", sessionId: "", pid: null };
-  status: Status = { status: "", waiting_for: "" };
+  status: Status = { status: "", waiting_for: "", read_only: true };
   /** What each item looked like when last sent, to send only what changed. */
   private sent = new Map<string, string>();
   private timer: ReturnType<typeof setInterval>;
@@ -164,8 +169,8 @@ class Feed {
 
   private pollStatus() {
     const reg = this.located.pid ? claudeRegistry().byPid.get(this.located.pid) : this.located.sessionId ? claudeRegistry().bySession.get(this.located.sessionId) : undefined;
-    const next: Status = { status: reg?.status ?? "", waiting_for: (reg as any)?.waitingFor ?? "" };
-    if (next.status === this.status.status && next.waiting_for === this.status.waiting_for) return;
+    const next: Status = { status: reg?.status ?? "", waiting_for: (reg as any)?.waitingFor ?? "", read_only: this.source.readOnly() };
+    if (next.status === this.status.status && next.waiting_for === this.status.waiting_for && next.read_only === this.status.read_only) return;
     this.status = next;
     this.send({ t: "status", ...next });
   }
@@ -193,7 +198,7 @@ class Feed {
     const items = this.transcript?.items ?? [];
     const { slice, floor, hasEarlier } = windowBefore(items, Infinity);
     ws.send(JSON.stringify({
-      t: "hello", session_id: this.located.sessionId, cwd: this.transcript?.cwd ?? "", read_only: this.source.readOnly,
+      t: "hello", session_id: this.located.sessionId, cwd: this.transcript?.cwd ?? "",
       capabilities, ...this.status, items: slice, floor, has_earlier: hasEarlier, waiting_for_file: !this.transcript || !existsSync(this.located.path),
     }));
   }

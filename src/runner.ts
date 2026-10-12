@@ -13,7 +13,8 @@ import { actor } from "./auth";
 import { ttyViewers } from "./tty";
 
 export class ApiError extends Error {
-  constructor(public status: number, message: string) { super(message); }
+  /** `extra`: more fields for the JSON error body, next to `error`. */
+  constructor(public status: number, message: string, public extra?: Record<string, unknown>) { super(message); }
 }
 
 /** In-memory handles for runs started by this server process. */
@@ -80,7 +81,7 @@ export function recordSession(runId: number, s: { session_id: string; agent?: st
 export function tmuxPath(): string | null { return Bun.which("tmux"); }
 export const tmuxSessionName = (runId: number) => `ac-${runId}`;
 
-async function tmux(...args: string[]): Promise<{ code: number; out: string; err: string }> {
+export async function tmux(...args: string[]): Promise<{ code: number; out: string; err: string }> {
   const p = Bun.spawn(["tmux", ...args], { stdout: "pipe", stderr: "pipe" });
   const [out, err, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
   return { code, out: out.replace(/\n$/, ""), err: err.trim() };

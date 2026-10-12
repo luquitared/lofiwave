@@ -1,6 +1,7 @@
 /*
  * Chat view: a Claude Code session as messages, tool rows, diffs and images, read live from its transcript
- * (server: src/chat, design: docs/rendered-view.md). Read-only for now: typing still happens in the Terminal view.
+ * (server: src/chat, design: docs/rendered-view.md). On a live run of ours it has a composer, which types into the
+ * TUI through the server (src/chat/input.ts); sessions lofiwave didn't start are read-only.
  * Uses app.js's helpers (h, token, toast, fmtDur, shortCwd), which are loaded by the time a view opens.
  */
 
@@ -42,6 +43,17 @@ const plural = (n, one, many = one + "s") => `${n} ${n === 1 ? one : many}`;
 const isOmitted = (v) => v && typeof v === "object" && v.omitted;
 const textOf = (v) => (v == null ? "" : typeof v === "string" ? v : isOmitted(v) ? v.preview : JSON.stringify(v, null, 2));
 const failed = (it) => it.status === "failed" || (it.kind === "command" && it.exitCode > 0);
+
+/** A JSON call that hands back the error body too (api() keeps only the message): the composer needs {draft}. */
+async function call(method, path, body, type) {
+  const headers = token ? { "x-auth-token": token } : {};
+  if (type) headers["content-type"] = type;
+  else if (body !== undefined) headers["content-type"] = "application/json";
+  const res = await fetch("/api" + path, { method, headers, body: body === undefined || type ? body : JSON.stringify(body) });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw Object.assign(new Error(data.error || `${res.status} ${res.statusText}`), { status: res.status, data });
+  return data;
+}
 
 async function fetchText(path) {
   const headers = token ? { "x-auth-token": token } : {};
@@ -90,8 +102,13 @@ class ChatView {
     this.banner = h("div", { class: "chat-banner", hidden: true });
     this.jump = h("button", { class: "chat-jump small", hidden: true, title: "jump to the latest message", onclick: () => this.toBottom(true) }, "↓ Latest");
     this.state = h("div", { class: "chat-state muted" }, "connecting…");
-    this.scroller.append(this.top, this.list, this.state);
-    this.root.append(this.scroller, this.jump, this.banner, this.footer());
+    /** Messages sent from here that the transcript doesn't show yet: {id, text, images, state, at}. */
+    this.pending = [];
+    this.pendingEl = h("div", { class: "chat-list chat-pending" });
+    this.readOnly = true;
+    this.scroller.append(this.top, this.list, this.pendingEl, this.state);
+    this.composer = base.startsWith("/runs/") ? new Composer(this) : null;
+    this.root.append(h("div", { class: "chat-main" }, this.scroller, this.jump), this.banner, this.composer?.el ?? "", this.footer());
     this.scroller.addEventListener("scroll", () => { this.atBottom = this.nearBottom(); this.jump.hidden = this.atBottom; ChatView.scrolls.set(this.base, this.atBottom ? null : this.scroller.scrollTop); });
     this.atBottom = true;
     this.connect();
@@ -100,12 +117,20 @@ class ChatView {
   footer() {
     return h("div", { class: "chat-foot muted" },
       h("span", { class: "chat-pill" }, h("span", { class: "dot" }), h("span", { class: "chat-pill-text" }, "")),
-      h("span", { class: "chat-foot-note" }, this.onTerminal ? "Read-only for now: type in the Terminal view." : "Read-only: this session runs outside lofiwave."),
+      h("span", { class: "chat-foot-note" }, this.composer ? "" : "Read-only: this session runs outside lofiwave."),
       this.onTerminal ? h("button", { class: "small", onclick: () => this.onTerminal() }, "Open terminal") : "",
     );
   }
 
-  close() { this.closed = true; clearTimeout(this.retry); try { this.ws?.close(); } catch {} }
+  footNote() {
+    if (!this.composer) return;
+    $(".chat-foot-note", this.root).textContent = this.readOnly ? "Read-only: this run has ended."
+      : this.status === "waiting" ? "Claude is waiting on the terminal; sending is paused."
+      : this.status === "busy" ? "Messages sent now are queued until Claude finishes the current step."
+      : matchMedia("(pointer: coarse)").matches ? "" : "Enter to send · Shift+Enter for a new line · / for commands";
+  }
+
+  close() { this.closed = true; clearTimeout(this.retry); clearTimeout(this.screenTimer); this.composer?.close(); try { this.ws?.close(); } catch {} }
 
   connect() {
     if (this.closed) return;
@@ -130,8 +155,10 @@ class ChatView {
       this.items = new Map(m.items.map((i) => [i.id, i]));
       this.floor = m.floor; this.hasEarlier = m.has_earlier;
       this.turnEls.clear(); this.list.replaceChildren();
+      this.readOnly = m.read_only;
       this.setStatus(m.status, m.waiting_for);
       this.loaded = true;
+      this.composer?.update(); this.footNote();
       this.setState(m.items.length ? "" : m.waiting_for_file ? "No messages yet. The conversation appears here once the first prompt is sent." : "Nothing to show yet.");
       if (switched) toast("the session switched to a new conversation (/clear or a new session)", true);
       this.render({ restore: true });
@@ -144,8 +171,10 @@ class ChatView {
       }
       for (const id of m.remove) { const old = this.items.get(id); if (old) { this.dirty.add(old.turnId); this.items.delete(id); } }
       if (this.items.size) this.setState("");
+      this.settlePending(m.upsert);
       this.render();
     } else if (m.t === "status") {
+      if (m.read_only !== undefined) this.readOnly = m.read_only;
       this.setStatus(m.status, m.waiting_for);
     }
   }
@@ -155,15 +184,74 @@ class ChatView {
     this.status = status || ""; this.waitingFor = waitingFor || "";
     const pill = $(".chat-pill", this.root);
     $(".dot", pill).className = `dot ${this.status}`;
-    $(".chat-pill-text", pill).textContent = { busy: "Working…", idle: "Idle", waiting: "Waiting for you" }[this.status] || (this.sessionId ? "Not running" : "");
-    // Claude is blocked on a dialog (permission, question, plan). Answering from here comes later: point at the terminal.
+    // "shell": the turn is over but a background command it started still runs. Newer statuses show as they are.
+    $(".chat-pill-text", pill).textContent = { busy: "Working…", idle: "Idle", waiting: "Waiting for you", shell: "Idle · background task running" }[this.status]
+      || (this.status ? this.status[0].toUpperCase() + this.status.slice(1) : this.sessionId ? "Not running" : "");
+    // Claude is blocked on a dialog (permission, question, plan, a menu). Answering from here comes later (phase 3):
+    // show what the terminal shows, and a way there.
     const waiting = this.status === "waiting";
     this.banner.hidden = !waiting;
-    if (waiting) this.banner.replaceChildren(
-      h("span", {}, h("b", {}, "Claude is waiting"), `: ${this.waitingFor || "it needs an answer"}. `, this.onTerminal ? "Answer it in the terminal." : "Answer it where the session runs."),
-      this.onTerminal ? h("button", { class: "small primary", onclick: () => this.onTerminal() }, "Open terminal") : "",
-    );
+    if (waiting && (was !== "waiting" || !this.banner.firstChild)) {
+      this.screenEl = this.composer && !this.readOnly ? h("pre", { class: "chat-screen", hidden: true }) : null;
+      this.banner.replaceChildren(
+        h("div", { class: "chat-banner-head" },
+          h("span", {}, h("b", {}, "The terminal needs you"), `: Claude is waiting (${this.waitingFor || "it needs an answer"}). `, this.onTerminal ? "Answer it in the terminal." : "Answer it where the session runs."),
+          this.onTerminal ? h("button", { class: "small primary", onclick: () => this.onTerminal() }, "Open terminal") : ""),
+        this.screenEl ?? "");
+      this.pollScreen();
+    } else if (waiting) $(".chat-banner-head b", this.banner).nextSibling.textContent = `: Claude is waiting (${this.waitingFor || "it needs an answer"}). `;
     if (was !== this.status) { const last = this.turnOrder().at(-1); if (last) { this.dirty.add(last); this.render(); } }
+    if (was === "busy" && this.status !== "busy") this.expirePending();
+    this.composer?.update();
+    this.footNote();
+  }
+
+  /** While Claude waits, a live snapshot of the bottom of the terminal, so a phone can see what it's asking. */
+  async pollScreen() {
+    clearTimeout(this.screenTimer);
+    if (this.closed || this.status !== "waiting" || !this.screenEl) return;
+    try {
+      const r = await api("GET", `${this.base}/chat/screen?lines=16`);
+      if (this.screenEl) { this.screenEl.textContent = r.text; this.screenEl.hidden = !r.text.trim(); }
+    } catch { /* the run may just have ended */ }
+    this.screenTimer = setTimeout(() => this.pollScreen(), 1500);
+  }
+
+  // ---------------------------------------------------------------- sent from here, not in the transcript yet
+  addPending(p) { this.pending.push(p); this.renderPending(); this.toBottom(); }
+  updatePending(id, patch) { const p = this.pending.find((x) => x.id === id); if (p) Object.assign(p, patch); this.renderPending(); }
+  dropPending(id) { this.pending = this.pending.filter((x) => x.id !== id); this.renderPending(); }
+
+  /** A sent message is done once a user entry with the same text lands (the TUI adds [Image #N] chips and keeps @refs). */
+  settlePending(upsert) {
+    if (!this.pending.length) return;
+    const norm = (s) => (s || "").replace(/\[Image #\d+\]/g, "").replace(/(^|\s)@\S+/g, " ").replace(/\s+/g, " ").trim();
+    for (const it of upsert) {
+      if (it.kind !== "user" || it.notification) continue;
+      const t = norm(it.text || it.command);
+      const p = this.pending.find((x) => x.state !== "sending" && (it.startedAt || 0) >= x.at - 10_000 && (norm(x.text) ? t === norm(x.text) || t.includes(norm(x.text)) : true));
+      if (p) this.pending = this.pending.filter((x) => x !== p);
+    }
+    this.renderPending();
+  }
+
+  /** Claude finished and a "sent" row never matched (a slash command, say): let it go after a moment. */
+  expirePending() {
+    setTimeout(() => {
+      const old = Date.now() - 8000;
+      const before = this.pending.length;
+      this.pending = this.pending.filter((p) => p.state === "sending" || p.state === "failed" || p.at > old || this.status === "busy");
+      if (this.pending.length !== before) this.renderPending();
+    }, 8000);
+  }
+
+  renderPending() {
+    const label = { sending: "Sending…", queued: "Queued: Claude reads it when it finishes the current step", sent: "Sent", failed: "Not sent" };
+    this.pendingEl.replaceChildren(...this.pending.map((p) => h("div", { class: `chat-user pending ${p.state}` },
+      p.text ? h("div", { class: "chat-user-text" }, p.text) : "",
+      p.images ? h("div", { class: "muted" }, plural(p.images, "attachment")) : "",
+      h("div", { class: "chat-pending-state" }, p.state === "sending" ? h("span", { class: "chat-spin" }) : "", label[p.state] + (p.error ? `: ${p.error}` : ""),
+        p.state === "failed" ? h("button", { class: "small", onclick: () => this.dropPending(p.id) }, "Dismiss") : ""))));
   }
 
   // ---------------------------------------------------------------- turns
@@ -312,7 +400,7 @@ class ChatView {
   // ---------------------------------------------------------------- rows
   renderUser(it) {
     if (it.notification) return h("div", { class: "chat-event info" }, h("span", {}, "⚙"), h("span", {}, it.text));
-    return h("div", { class: "chat-user" },
+    return h("div", { class: `chat-user${it.queued ? " queued" : ""}`, title: it.queued ? "sent while Claude was working, and read mid-turn" : null },
       it.command ? h("code", { class: "chat-cmd" }, it.command) : "",
       it.text ? h("div", { class: "chat-user-text" }, it.text) : "",
       it.images?.length ? h("div", { class: "chat-images" }, ...it.images.map((im) => this.image(im))) : "",
@@ -484,3 +572,174 @@ function diffView(hunks) {
   }
   return h("div", { class: "chat-diff" }, ...rows);
 }
+
+// ---------------------------------------------------------------- the composer (live runs of ours)
+/** Built-in commands' menu flag lives on the server too; this is the fallback before the list loads. */
+const isMenuCommand = (cmds, text) => {
+  const m = /^(\/[\w:-]+)(\s+\S)?/.exec(text.trim());
+  const c = m && cmds?.find((x) => x.name === m[1]);
+  return Boolean(c?.menu && !(m[2] && (c.name === "/model" || c.name === "/effort")));
+};
+
+class Composer {
+  constructor(view) {
+    this.view = view;
+    this.files = []; // {key, name, kind, url, id?, error?}
+    this.commands = null; this.slashSel = 0;
+    this.input = h("textarea", { class: "chat-input", rows: 1, placeholder: "Message Claude…", "aria-label": "message", spellcheck: "true" });
+    this.input.value = Composer.drafts.get(view.base) || "";
+    this.picker = h("input", { type: "file", multiple: true, hidden: true, onchange: () => { this.add([...this.picker.files]); this.picker.value = ""; } });
+    this.attach = h("button", { class: "chat-attach", title: "attach images or files (or paste / drop them here)", "aria-label": "attach files", onclick: () => this.picker.click() }, "+");
+    this.stop = h("button", { class: "chat-stop small", title: "interrupt Claude (Esc in the terminal)", onclick: () => this.interrupt() }, "■ Stop");
+    this.send = h("button", { class: "chat-send primary", onclick: () => this.submit() }, "Send");
+    this.chips = h("div", { class: "chat-chips" });
+    this.slash = h("div", { class: "chat-slash", role: "listbox", hidden: true });
+    this.ask = h("div", { class: "chat-ask", hidden: true });
+    this.el = h("div", { class: "chat-compose" }, this.ask, this.slash, this.chips,
+      h("div", { class: "chat-input-row" }, this.attach, this.input, this.stop, this.send), this.picker);
+    this.input.addEventListener("input", () => { Composer.drafts.set(view.base, this.input.value); this.grow(); this.slashUpdate(); this.update(); });
+    this.input.addEventListener("keydown", (e) => this.key(e));
+    this.input.addEventListener("paste", (e) => {
+      const files = [...(e.clipboardData?.files || [])];
+      if (files.length) { e.preventDefault(); this.add(files); }
+    });
+    view.root.addEventListener("dragover", (e) => { if (!this.disabled() && [...(e.dataTransfer?.types || [])].includes("Files")) { e.preventDefault(); view.root.classList.add("drop"); } });
+    view.root.addEventListener("dragleave", (e) => { if (e.target === view.root || !view.root.contains(e.relatedTarget)) view.root.classList.remove("drop"); });
+    view.root.addEventListener("drop", (e) => { view.root.classList.remove("drop"); if (e.dataTransfer?.files?.length && !this.disabled()) { e.preventDefault(); this.add([...e.dataTransfer.files]); } });
+    this.update();
+    nextFrame(() => this.grow());
+  }
+
+  close() { for (const f of this.files) if (f.url) URL.revokeObjectURL(f.url); }
+
+  disabled() { return this.view.readOnly || !this.view.loaded; }
+
+  update() {
+    const v = this.view, off = this.disabled();
+    const uploading = this.files.some((f) => !f.id && !f.error);
+    this.input.disabled = off;
+    this.attach.disabled = off;
+    this.input.placeholder = off ? (v.loaded ? "This run has ended" : "connecting…") : v.status === "waiting" ? "Claude is waiting on the terminal…" : v.status === "busy" ? "Queue a message for Claude…" : "Message Claude…";
+    this.send.disabled = off || this.sending || uploading || v.status === "waiting" || (!this.input.value.trim() && !this.files.some((f) => f.id));
+    this.send.textContent = v.status === "busy" ? "Queue" : "Send";
+    this.stop.hidden = off || v.status !== "busy";
+  }
+
+  grow() { const t = this.input; t.style.height = "auto"; t.style.height = Math.min(t.scrollHeight + 2, 220) + "px"; }
+
+  key(e) {
+    if (!this.slash.hidden) {
+      const opts = this.slashMatches();
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") { e.preventDefault(); this.slashSel = (this.slashSel + (e.key === "ArrowDown" ? 1 : -1) + opts.length) % opts.length; this.slashRender(opts); return; }
+      if ((e.key === "Tab" || (e.key === "Enter" && !e.shiftKey)) && opts.length) { e.preventDefault(); this.slashPick(opts[this.slashSel]); return; }
+      if (e.key === "Escape") { e.preventDefault(); this.slash.hidden = true; return; }
+    }
+    if (e.key !== "Enter" || e.isComposing) return;
+    // On a phone Enter is a new line (there's a Send button); elsewhere Shift/Alt+Enter is.
+    const send = e.metaKey || e.ctrlKey || (!e.shiftKey && !e.altKey && !matchMedia("(pointer: coarse)").matches);
+    if (send) { e.preventDefault(); this.submit(); }
+  }
+
+  // ---- the / list
+  async slashUpdate() {
+    const m = /^\/[\w:-]*$/.exec(this.input.value);
+    if (!m) { this.slash.hidden = true; return; }
+    if (!this.commands) {
+      this.commands = [];
+      try { this.commands = (await api("GET", `${this.view.base}/chat/commands`)).commands; } catch { this.commands = null; return; }
+    }
+    this.slashSel = 0;
+    this.slashRender(this.slashMatches());
+  }
+  slashMatches() {
+    const q = this.input.value.slice(1).toLowerCase();
+    const all = this.commands || [];
+    const starts = all.filter((c) => c.name.slice(1).toLowerCase().startsWith(q));
+    const has = all.filter((c) => !starts.includes(c) && c.name.toLowerCase().includes(q));
+    return [...starts, ...has].slice(0, 40);
+  }
+  slashRender(opts) {
+    this.slash.hidden = !opts.length;
+    this.slash.replaceChildren(...opts.map((c, i) => {
+      const el = h("button", { class: `chat-slash-item${i === this.slashSel ? " sel" : ""}`, role: "option", "aria-selected": String(i === this.slashSel), onmousedown: (e) => { e.preventDefault(); this.slashPick(c); } },
+        h("span", { class: "name" }, c.name),
+        h("span", { class: "desc" }, c.description),
+        c.menu ? h("span", { class: "chat-badge", title: "opens a menu: the view switches to the terminal" }, "terminal") : c.source !== "built-in" ? h("span", { class: "chat-badge" }, c.source) : "");
+      if (i === this.slashSel) nextFrame(() => el.scrollIntoView({ block: "nearest" }));
+      return el;
+    }));
+  }
+  slashPick(c) {
+    this.input.value = c.name + " ";
+    Composer.drafts.set(this.view.base, this.input.value);
+    this.slash.hidden = true;
+    this.input.focus();
+    this.update();
+  }
+
+  // ---- attachments: uploaded as soon as they're added, sent as upload ids
+  add(list) {
+    for (const file of list) {
+      const f = { key: Math.random().toString(36).slice(2), name: file.name || "pasted image", kind: /^image\//.test(file.type) ? "image" : "file", url: /^image\/(png|jpeg|gif|webp)$/.test(file.type) ? URL.createObjectURL(file) : "" };
+      this.files.push(f);
+      const name = file.name || `pasted.${(file.type.split("/")[1] || "png").replace("jpeg", "jpg")}`;
+      call("POST", `${this.view.base}/uploads?name=${encodeURIComponent(name)}`, file, file.type || "application/octet-stream")
+        .then((r) => { f.id = r.id; f.kind = r.kind; f.name = r.name; })
+        .catch((e) => { f.error = e.message; toast(`couldn't upload ${f.name}: ${e.message}`); })
+        .finally(() => { this.renderChips(); this.update(); });
+    }
+    this.renderChips(); this.update();
+  }
+  renderChips() {
+    this.chips.replaceChildren(...this.files.map((f) => h("span", { class: `chat-chip${f.error ? " bad" : ""}`, title: f.error || f.name },
+      f.url ? h("img", { src: f.url, alt: "" }) : h("span", { class: "chat-icon" }, "▤"),
+      h("span", { class: "name" }, f.name),
+      !f.id && !f.error ? h("span", { class: "chat-spin" }) : "",
+      h("button", { class: "x", "aria-label": `remove ${f.name}`, onclick: () => { this.files = this.files.filter((x) => x !== f); if (f.url) URL.revokeObjectURL(f.url); this.renderChips(); this.update(); } }, "×"))));
+  }
+
+  // ---- sending
+  async submit(draft = "") {
+    if (this.send.disabled && !draft) return;
+    const v = this.view;
+    const text = this.input.value.replace(/\s+$/, "");
+    const files = this.files.filter((f) => f.id);
+    if (!text.trim() && !files.length) return;
+    const p = draft ? this.retrying : { id: Math.random().toString(36).slice(2), text, images: files.length, state: "sending", at: Date.now() };
+    this.ask.hidden = true;
+    this.sending = true; this.update();
+    if (!draft) v.addPending(p); else v.updatePending(p.id, { state: "sending", error: "" });
+    try {
+      const r = await call("POST", `${v.base}/chat/send`, { text, files: files.map((f) => f.id), draft });
+      v.updatePending(p.id, { state: r.queued ? "queued" : "sent", at: Date.now() });
+      this.input.value = ""; Composer.drafts.delete(v.base); this.grow();
+      for (const f of files) if (f.url) URL.revokeObjectURL(f.url);
+      this.files = this.files.filter((f) => !files.includes(f)); this.renderChips();
+      if (r.opens_menu || isMenuCommand(this.commands, text)) { v.dropPending(p.id); if (v.onTerminal) { toast(`${text.split(/\s/)[0]} opens a menu: it's in the terminal`, true); v.onTerminal(); } }
+    } catch (e) {
+      if (e.status === 409 && e.data?.draft !== undefined) { this.retrying = p; v.updatePending(p.id, { state: "sending", error: "" }); this.askDraft(e.data.draft); }
+      else v.updatePending(p.id, { state: "failed", error: e.message });
+    } finally { this.sending = false; this.update(); }
+  }
+
+  /** Someone left text in the terminal's input box without sending it: our paste would land after it. */
+  askDraft(draft) {
+    const cancel = () => { this.ask.hidden = true; this.view.dropPending(this.retrying.id); this.retrying = null; this.input.focus(); };
+    this.ask.hidden = false;
+    this.ask.replaceChildren(
+      h("div", {}, h("b", {}, "The terminal has an unsent draft: "), h("span", { class: "chat-ask-draft" }, draft.length > 240 ? draft.slice(0, 240) + "…" : draft)),
+      h("div", { class: "row" },
+        h("button", { class: "small primary", onclick: () => this.submit("replace") }, "Replace it"),
+        h("button", { class: "small", onclick: () => this.submit("append") }, "Add mine after it"),
+        h("button", { class: "small", onclick: cancel }, "Cancel")));
+  }
+
+  async interrupt() {
+    this.stop.disabled = true;
+    try { await call("POST", `${this.view.base}/chat/interrupt`); }
+    catch (e) { toast(`couldn't stop: ${e.message}`); }
+    finally { this.stop.disabled = false; }
+  }
+}
+/** Unsent composer text per run, so flipping to the terminal and back keeps it. */
+Composer.drafts = new Map();
