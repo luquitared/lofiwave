@@ -10,8 +10,10 @@
  *   {t:"hello", session_id, cwd, read_only, capabilities, status, waiting_for, items, floor, has_earlier}
  *   {t:"items", upsert: Item[], remove: string[]}
  *   {t:"status", status, waiting_for, read_only}
+ *   {t:"requests", requests}   (runs only: the approvals waiting on the browser, see ./approvals.ts; also in hello)
  * The client sends nothing on the socket. Older turns come from GET …/chat?before=<ordinal>, big payloads from
- * GET …/chat/blob?ref=, and typing goes through POST /api/runs/:id/chat/send (see ./input.ts).
+ * GET …/chat/blob?ref=, typing goes through POST /api/runs/:id/chat/send (see ./input.ts), and answers through
+ * POST /api/runs/:id/chat/requests/:rid.
  */
 import type { ServerWebSocket } from "bun";
 import { existsSync, readFileSync, statSync } from "node:fs";
@@ -21,6 +23,7 @@ import { ApiError } from "../runner";
 import { claudeRegistry, claudeTranscriptPath } from "../agents";
 import { JsonlTail, readLineAt, type LineLoc } from "./tail";
 import { activeChain, capabilities, extractBlob, ingest, project, type Item, type Rec } from "./claude";
+import { onRequests, requestsFor, settleAnswered } from "./approvals";
 
 /** How much of the conversation a viewer gets on connect; "Load earlier" fetches the rest. */
 const WINDOW_TURNS = 30;
@@ -33,8 +36,8 @@ export type ChatData = { kind: "chat"; key: string; user: string };
 // ---------------------------------------------------------------- sources
 
 type Located = { path: string; sessionId: string; pid: number | null };
-/** readOnly(): nothing can be typed into it (not our run, or its pane is gone). */
-type Source = { key: string; readOnly(): boolean; locate(): Located };
+/** readOnly(): nothing can be typed into it (not our run, or its pane is gone). approvals: started with our hook. */
+type Source = { key: string; runId?: number; approvals?: boolean; readOnly(): boolean; locate(): Located };
 
 /** The run's current Claude session: the newest of what the session hook recorded and what the pid file says. */
 function runSource(runId: number): Source {
@@ -46,6 +49,8 @@ function runSource(runId: number): Source {
     throw new ApiError(400, "the chat view reads Claude Code sessions; Codex support comes later");
   return {
     key: `run:${runId}`,
+    runId,
+    approvals: Boolean(meta.approvals),
     readOnly() {
       const cur = db.query<RunRow, [number]>("SELECT * FROM runs WHERE id = ?").get(runId);
       return !(cur?.status === "running" && JSON.parse(cur.meta || "{}").tmux);
@@ -89,6 +94,7 @@ class Transcript {
   byUuid = new Map<string, Rec>();
   order: string[] = [];
   items: Item[] = [];
+  chain: Rec[] = [];
   cwd = "";
   private tail: JsonlTail;
   private timer: ReturnType<typeof setTimeout> | null = null;
@@ -117,7 +123,13 @@ class Transcript {
     this.timer = setTimeout(() => { this.timer = null; this.recompute(); this.onItems(); }, 80);
   }
 
-  recompute() { this.items = project(activeChain(this.byUuid, this.order)); }
+  recompute() { this.chain = activeChain(this.byUuid, this.order); this.items = project(this.chain); }
+
+  /** The active chain's tool calls, oldest first, and whether each has finished (for matching approval requests). */
+  calls() {
+    const status = new Map(this.items.map((i) => [i.id, i.status]));
+    return this.chain.flatMap((r) => (r.blocks ?? []).flatMap((b) => b.type === "tool_use" ? [{ id: b.id, name: b.name, input: b.input, done: status.get(b.id) !== "running" }] : []));
+  }
 
   loc(uuid: string): LineLoc | undefined { return this.byUuid.get(uuid)?.loc; }
 }
@@ -135,9 +147,11 @@ class Feed {
   private sent = new Map<string, string>();
   private timer: ReturnType<typeof setInterval>;
   private ticks = 0;
+  private unlisten = () => {};
   lastUsed = Date.now();
 
   constructor(readonly source: Source) {
+    if (source.runId) this.unlisten = onRequests((runId) => { if (runId === source.runId) { this.linkRequests(); this.sendRequests(); } });
     this.relocate();
     this.pollStatus();
     this.timer = setInterval(() => {
@@ -150,6 +164,7 @@ class Feed {
 
   close() {
     clearInterval(this.timer);
+    this.unlisten();
     this.transcript?.close();
     feeds.delete(this.source.key);
   }
@@ -180,7 +195,15 @@ class Feed {
     for (const ws of this.subs) if (ws.readyState === 1) ws.send(s);
   }
 
+  /** Tie open approval requests to their tool calls, and drop the ones the terminal already answered. */
+  private linkRequests(): boolean {
+    return Boolean(this.source.runId && this.transcript && settleAnswered(this.source.runId, this.transcript.calls()));
+  }
+
+  private sendRequests() { if (this.source.runId) this.send({ t: "requests", requests: requestsFor(this.source.runId) }); }
+
   private broadcastItems() {
+    if (this.linkRequests()) this.sendRequests();
     const items = this.transcript?.items ?? [];
     const upsert: Item[] = [];
     const seen = new Set<string>();
@@ -197,9 +220,11 @@ class Feed {
   hello(ws: ServerWebSocket<ChatData>) {
     const items = this.transcript?.items ?? [];
     const { slice, floor, hasEarlier } = windowBefore(items, Infinity);
+    this.linkRequests();
     ws.send(JSON.stringify({
       t: "hello", session_id: this.located.sessionId, cwd: this.transcript?.cwd ?? "",
-      capabilities, ...this.status, items: slice, floor, has_earlier: hasEarlier, waiting_for_file: !this.transcript || !existsSync(this.located.path),
+      capabilities: { ...capabilities, approvals: Boolean(this.source.approvals) }, ...this.status,
+      requests: this.source.runId ? requestsFor(this.source.runId) : [], items: slice, floor, has_earlier: hasEarlier, waiting_for_file: !this.transcript || !existsSync(this.located.path),
     }));
   }
 

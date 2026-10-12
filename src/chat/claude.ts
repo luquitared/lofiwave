@@ -19,6 +19,7 @@ export type Item = {
   status: "pending" | "running" | "waiting" | "completed" | "failed" | "interrupted";
   native: { agent: "claude" | "codex"; ref: string };
   startedAt?: number; completedAt?: number;
+  denied?: boolean; // a tool call refused at its permission prompt (status "interrupted")
 } & (
   | { kind: "user"; text: string; images: ImageRef[]; command?: string; output?: Omitted<string>; notification?: boolean; queued?: boolean; turnDurationMs?: number }
   | { kind: "assistant"; text: string; streaming?: boolean }
@@ -33,6 +34,7 @@ export type Item = {
   | { kind: "event"; event: "compact" | "clear" | "interrupt" | "error" | "info" | "raw"; text: string; detail?: Omitted<string> }
 );
 
+/** `approvals` is per run: true when the run was started with lofiwave's PermissionRequest hook (see ./approvals.ts). */
 export const capabilities = { streaming: false, approvals: false, images: true, interrupt: true, composer: true };
 
 /** Outputs longer than this arrive as `omitted` with a preview, and are fetched when a row is expanded. */
@@ -74,7 +76,7 @@ const textOf = (c: any): string =>
   typeof c === "string" ? c : Array.isArray(c) ? c.filter((b) => b?.type === "text").map((b) => b.text ?? "").join("\n") : "";
 
 /** Shorten every long string in a tool's input (a Write's file body, say) so the record stays small. */
-function shrinkInput(v: any, depth = 0): any {
+export function shrinkInput(v: any, depth = 0): any {
   if (typeof v === "string") return v.length > INLINE ? v.slice(0, PREVIEW) + `\n… (${v.length - PREVIEW} more characters)` : v;
   if (depth > 4 || v === null || typeof v !== "object") return v;
   if (Array.isArray(v)) return v.slice(0, 200).map((x) => shrinkInput(x, depth + 1));
@@ -271,8 +273,11 @@ function applyResult(item: any, r: ToolResult) {
   const text = asText(r.text);
   const t = r.tur ?? {};
   item.completedAt = item.completedAt ?? 0;
-  if (r.isError) item.status = isInterruptText(text) || /doesn't want to proceed|was rejected/.test(text) ? "interrupted" : "failed";
+  // Denied at the prompt (in the TUI, or from the chat view: see ./approvals.ts) is not a failure.
+  const denied = r.isError && /doesn't want to proceed|was rejected|^(Error: )?The user (denied this from lofiwave|wants to keep planning)/.test(text);
+  if (r.isError) item.status = isInterruptText(text) || denied ? "interrupted" : "failed";
   else item.status = "completed";
+  if (denied) item.denied = true;
   switch (item.kind) {
     case "command": {
       const out = [asText(t.stdout), asText(t.stderr)].filter(Boolean).join("\n");

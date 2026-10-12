@@ -1,7 +1,7 @@
 # Rendered view: a chat UI you can toggle with the terminal
 
-Status: **phases 1 and 2 built** (2026-10-09: read-only chat view, `src/chat/`, `public/chat.js`; 2026-10-11: the
-composer, `src/chat/input.ts`); phases 3–6 open.
+Status: **phases 1–3 built** (2026-10-09: read-only chat view, `src/chat/`, `public/chat.js`; 2026-10-11: the
+composer, `src/chat/input.ts`; 2026-10-11: approvals, `src/chat/approvals.ts`); phases 4–6 open.
 Tracked as issues.md #3. Research behind it: claude-code-viewer (upstream v0.8.2),
 T3 Code (pingdotgg/t3code), claude.ai/code, the Claude Code source (2026-03 snapshot) checked against the
 installed 2.1.296, and Codex CLI 0.153.4.
@@ -274,10 +274,13 @@ Input:
 - [ ] Two browsers typing at once (fine, same as tmux), plus one in Terminal and one in Chat
 
 Approvals:
-- [ ] The web and the TUI both answering (first answer wins; clear the loser)
-- [ ] The hook timing out, the server restarting while a request is held, or the run ending while held
-- [ ] Bypass mode (only questions and plans prompt), `acceptEdits`, plan mode
+- [x] The web and the TUI both answering (first answer wins; clear the loser)
+- [ ] The hook timing out, or the server restarting while a request is held
+- [x] The run ending while a request is held
+- [ ] Bypass mode (only questions and plans prompt), `acceptEdits`
+- [x] Plan mode
 - [ ] Prompts not handled through hooks (trust, MCP auth, `/config`): fall back to the terminal banner
+- [ ] Permission requests from inside a subagent (no matching row in the main transcript)
 
 Display:
 - [x] Untrusted markdown and HTML in transcripts: sanitize; images only from our blob endpoint
@@ -344,6 +347,33 @@ Checked against a live TUI in tmux while building the composer:
 - **Stop:** Escape interrupts the turn, and the TUI then sends any queued message straight away.
 - **Status `shell`:** the pid file says `shell` when the turn is over but a background command it started is
   still running. It accepts messages like `idle`.
+
+## Phase 3 findings (2026-10-11, Claude Code 2.1.296)
+
+Checked against a live TUI in tmux while building the approval cards:
+
+- **The hook settings go in a file,** `data/claude-approvals.json`, passed with `--settings` to interactive claude
+  runs (not to runs that bring their own `--settings`). The run id reaches the hook as a header,
+  `X-Lofiwave-Run: $AGENT_CONSOLE_RUN_ID`, next to the token, so one file serves every run. The hook's
+  `timeout` is 1800s and lofiwave lets go 20s before that.
+- **Bun's idle timeout** (10s) would close a held request: the server turns it off for `/api/hooks/permission`.
+- **ExitPlanMode needs `updatedInput`.** An `allow` without it (with or without `setMode`) is accepted by the
+  hook and then ignored: the plan dialog stays up. With `updatedInput` set to the original input, the plan is
+  approved and `setMode` applies. `deny` with a `message` sends Claude back to planning with that feedback.
+- **AskUserQuestion with several questions** works with `updatedInput.answers`, one entry per question;
+  multiple choices are comma-separated ("Pear, Plum").
+- **`deny` with a `message`** reaches Claude as the tool's error text, with nothing marking it as a denial. The
+  message starts with "The user denied this from lofiwave", which is how the chat view labels the row "denied"
+  instead of "failed". (Claude may treat an odd-looking message as suspicious, so it's phrased as the user's.)
+- **`permission_suggestions`** are the TUI's own "Yes, and always …" options (`addRules`, `addDirectories`,
+  `setMode`). Sending one back as `updatedPermissions` applies it.
+- **The pid file says `waiting`, with `waitingFor: "permission prompt"`,** while the hook is held, for permissions,
+  questions and plans alike.
+- **Matching a request to its tool call:** the tool_use is in the transcript before the hook fires, but its input's
+  keys can be in a different order from the hook's `tool_input`, so they're compared with sorted keys.
+- **When the terminal answers first,** the tool_result lands and the card goes within a second. Claude doesn't
+  always hang up on the held hook, so lofiwave also watches the pid file (waiting → not waiting) and the
+  transcript.
 
 ## Spike results (2026-10-11, Claude Code 2.1.296, codex-cli 0.162.1)
 
