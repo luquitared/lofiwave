@@ -189,7 +189,8 @@ function switchTab(name, push = true) {
   $$("nav button").forEach((b) => { b.classList.toggle("active", b.dataset.tab === navOf); b.setAttribute("aria-current", b.dataset.tab === navOf ? "page" : "false"); });
   $$(".tab").forEach((t) => t.classList.toggle("active", t.id === `tab-${name}`));
   // Which tab you're on is view state, not a location: only run/session deep links go in the URL, so
-  // reopening the console doesn't drop you back into whatever you last inspected.
+  // reopening the console doesn't drop you back into whatever you last inspected. Sessions puts the
+  // selected session back once it loads (syncConsoleHash).
   if (push && location.hash) history.replaceState(null, "", location.pathname);
   refresh();
 }
@@ -778,14 +779,33 @@ function runLabel(r) {
   return s?.title || s?.name || (r.prompt || "").split("\n")[0].slice(0, 70) || `${r.type_name} run #${r.id}`;
 }
 function selectConsoleRunId(id) { localStorage.setItem("ac_console_run", String(id)); consoleRun = null; railSig = paneSig = ""; }
+/** The session a #sessions/<id> link asked for, until the console has loaded and either shown it or found it ended. */
+let linkedRun = null;
+/** Keep the selected session in the address bar, so the link can be shared. */
+function syncConsoleHash() {
+  if (activeTab !== "console") return;
+  const want = consoleRun ? `#sessions/${consoleRun.id}` : "";
+  if (location.hash !== want) history.replaceState(null, "", location.pathname + want);
+}
+/** Open a session from a link: its terminal if it is still live, else its run in the history. */
+function openSessionLink(id) {
+  linkedRun = id;
+  selectConsoleRunId(id);
+  switchTab("console", false);
+}
 
 const loadConsole = guard(async () => {
   consoleData = await get("/console");
   const live = consoleData.live;
+  if (linkedRun) {
+    const id = linkedRun; linkedRun = null;
+    if (!live.some((r) => r.id === id)) { toast(`session #${id} isn't live; showing its run`, true); return openRun(id); }
+  }
   // Keep the selected session if it is still live; otherwise the one we last used, else the newest.
   const remembered = Number(localStorage.getItem("ac_console_run") || 0);
   consoleRun = live.find((r) => r.id === consoleRun?.id) || live.find((r) => r.id === remembered) || live[0] || null;
   if (consoleRun) localStorage.setItem("ac_console_run", String(consoleRun.id));
+  syncConsoleHash();
   renderRail();
   renderPane();
 });
@@ -794,6 +814,7 @@ function selectConsoleRun(run) {
   if (run.id === consoleRun?.id) return;
   consoleRun = run; paneSig = "";
   localStorage.setItem("ac_console_run", String(run.id));
+  syncConsoleHash();
   patchRail(); renderPane();
 }
 
@@ -1186,7 +1207,7 @@ document.addEventListener("visibilitychange", () => !document.hidden && refresh(
   await Promise.all([loadSystem(), loadTypes(), loadWorkflows(), loadMe()]);
   const m = location.hash.match(/^#(\w+)(?:\/(\w+))?/);
   if (m && m[1] === "runs" && m[2]) openRun(Number(m[2]));
-  else if (m && m[1] === "console" && /^\d+$/.test(m[2] || "")) { selectConsoleRunId(Number(m[2])); switchTab("console", false); }
+  else if (m && (m[1] === "sessions" || m[1] === "console") && /^\d+$/.test(m[2] || "")) openSessionLink(Number(m[2]));
   else if (m && m[1] === "agents" && m[2] === "start") { switchTab("console", false); openStartDialog({ kind: "agent" }); }
   else if (m && m[1] === "processes") switchTab("agents", false);
   else switchTab(m && ($(`#tab-${m[1]}`) || m[1] === "advanced") ? m[1] : "console", false);
@@ -1196,6 +1217,7 @@ $("#refresh-btn").onclick = () => { refresh(); loadSystem(); };
 window.addEventListener("hashchange", () => {
   const [tab, id] = location.hash.slice(1).split("/");
   if (tab === "runs" && /^\d+$/.test(id || "")) openRun(Number(id));
+  else if ((tab === "sessions" || tab === "console") && /^\d+$/.test(id || "")) openSessionLink(Number(id));
   else if ($(`#tab-${tab}`) || tab === "advanced") { if (selectedRun) closeRun(false); switchTab(tab, false); }
 });
 document.addEventListener("keydown", e => { if (e.key === "Escape" && selectedRun && !$("dialog[open]")) closeRun(); });
