@@ -163,7 +163,7 @@ function attachPathPicker(input) {
 $$("input[data-pathpicker]").forEach(attachPathPicker);
 
 // ---------------------------------------------------------------- state
-let types = [], workflows = [], selectedRun = null, logOffset = 0, activeTab = "console";
+let types = [], workflows = [], targets = [], selectedRun = null, logOffset = 0, activeTab = "console";
 // Console (session-first working view) state.
 let consoleData = { live: [], headless: [], adoptable: [] }, consoleRun = null, railSig = "", paneSig = "";
 const typeByName = (n) => types.find((t) => t.name === n);
@@ -483,8 +483,8 @@ function openRunOrSession(r) {
 }
 const runWorkflowNow = (w) => guard(async () => {
   const r = await post(`/workflows/${w.id}/run`);
-  toast(`started ${w.name} (run #${r.id})`, true);
-  if (r.meta?.interactive) { selectConsoleRunId(r.id); switchTab("console"); } else loadWorkflows();
+  toast(`started ${w.name} (run #${r.id})${r.meta?.target ? ` on ${r.meta.target}` : ""}`, true);
+  if (r.meta?.interactive) { selectConsoleRunId(r.id); switchTab("console"); } else if (r.meta?.target) openRun(r.id); else loadWorkflows();
 })();
 
 const loadWorkflows = guard(async () => {
@@ -496,7 +496,7 @@ const loadWorkflows = guard(async () => {
   $("#wf-table tbody").replaceChildren(...workflows.map((w) => h("tr", {},
     h("td", { class: "full" },
       h("button", { class: "wf-name", onclick: () => editWorkflow(w) }, w.name),
-      h("div", { class: "muted wf-sub", title: w.prompt || "" }, `${w.type_name} · ${shortCwd(w.cwd)}`, w.prompt ? ` · ${w.prompt.split("\n")[0]}` : "")),
+      h("div", { class: "muted wf-sub", title: w.prompt || "" }, w.target ? h("span", { class: "pill" }, `☁ ${w.target}`) : "", w.target ? " " : "", `${w.type_name}${w.target ? "" : ` · ${shortCwd(w.cwd)}`}`, w.prompt ? ` · ${w.prompt.split("\n")[0]}` : "")),
     h("td", { "data-l": "schedule", title: w.schedule ? `${w.schedule}\nnext: ${fmtTime(w.next_run_at)}` : "" },
       w.schedule ? h("span", {}, presetLabel(w.schedule), h("div", { class: "muted wf-sub" }, w.enabled ? `next ${fmtRel(w.next_run_at)}` : "paused")) : h("span", { class: "muted" }, "Manual")),
     h("td", { "data-l": "last" }, w.last_run ? runLink(w.last_run, [badge(w.last_run.status), ` ${fmtRel(w.last_run.started_at)}`]) : h("span", { class: "muted" }, "never")),
@@ -531,10 +531,13 @@ function openWorkflowDialog(w) {
     wf.elements.namedItem("name").value = w.name; wf.type.value = w.type_name; wf.cwd.value = w.cwd; wf.prompt.value = w.prompt;
     wf.extra_args.value = quoteArgs(w.extra_args); wf.env.value = envText(w.env);
     wf.timeout_sec.value = w.timeout_sec; wf.enabled.checked = w.enabled; wf.allow_overlap.checked = w.allow_overlap;
+    fillTargetSelect(w.target);
     $(".more", wf).open = Boolean(w.extra_args.length || Object.keys(w.env || {}).length || w.timeout_sec || w.allow_overlap);
   } else {
     wf.type.value = typeByName("claude") ? "claude" : wf.type.options[0]?.value;
+    fillTargetSelect("");
   }
+  syncTarget();
   setSchedule(w?.schedule ?? "");
   // The delete button only makes sense on an existing workflow.
   $("#wf-delete")?.remove();
@@ -543,12 +546,27 @@ function openWorkflowDialog(w) {
   wf.elements.namedItem("name").focus();
 }
 const editWorkflow = (w) => openWorkflowDialog(w);
+function fillTargetSelect(cur) {
+  wf.target.replaceChildren(h("option", { value: "" }, "This machine"), ...targets.map((t) => h("option", { value: t.name }, `${t.name} (Cloud Run, ${t.config.region})`)));
+  if (cur && !targets.some((t) => t.name === cur)) wf.target.append(h("option", { value: cur }, `${cur} (missing)`));
+  wf.target.value = cur || "";
+}
+/** On a target the agent works in the target's folder, runs are headless, and the folder here is where its conversation is filed to resume. */
+function syncTarget() {
+  const remote = Boolean(wf.target.value);
+  $("#wf-cwd-label").firstChild.textContent = remote ? "Folder here (to resume the conversation in) " : "Folder ";
+  wf.cwd.placeholder = remote ? "optional: the local checkout of the same repo" : "blank = the type's default folder";
+  $("#wf-hint").textContent = remote
+    ? "Each run starts a Cloud Run Job and runs the agent headless there; follow it in the run's log. Claude's conversation comes back at the end, to resume here. Nobody can answer permission prompts: give claude e.g. --permission-mode acceptEdits in Extra args."
+    : "Each run opens as a live session you can watch and type into. Claude runs close once the agent is done and idle.";
+}
+wf.target.onchange = syncTarget;
 $("#wf-new-btn").onclick = () => openWorkflowDialog(null);
 $("#wf-cancel").onclick = () => wdlg.close();
 async function saveWorkflow() {
   if (!wf.reportValidity()) return null;
   $("#wf-feedback").hidden = true;
-  const body = { name: wf.elements.namedItem("name").value.trim(), type: wf.type.value, cwd: wf.cwd.value.trim(), prompt: wf.prompt.value, extra_args: wf.extra_args.value, env: parseEnv(wf.env.value), schedule: wf.schedule.value.trim(), timeout_sec: Number(wf.timeout_sec.value || 0), enabled: wf.enabled.checked, allow_overlap: wf.allow_overlap.checked };
+  const body = { name: wf.elements.namedItem("name").value.trim(), type: wf.type.value, cwd: wf.cwd.value.trim(), prompt: wf.prompt.value, target: wf.target.value, extra_args: wf.extra_args.value, env: parseEnv(wf.env.value), schedule: wf.schedule.value.trim(), timeout_sec: Number(wf.timeout_sec.value || 0), enabled: wf.enabled.checked, allow_overlap: wf.allow_overlap.checked };
   const id = wf.elements.namedItem("id").value;
   try { return id ? await put(`/workflows/${id}`, body) : await post("/workflows", body); }
   catch (e) { $("#wf-feedback").textContent = e.message; $("#wf-feedback").hidden = false; return null; }
@@ -612,7 +630,63 @@ function applyTheme(pref = themePref()) {
   if (liveTerm) { liveTerm.term.options.theme = termTheme(); if (liveTerm.hist) liveTerm.hist.term.options.theme = termTheme(); }
 }
 systemLight.addEventListener("change", () => themePref() === "system" && applyTheme());
+// ---------------------------------------------------------------- run targets (Settings)
+const loadTargets = guard(async () => {
+  const r = await get("/targets");
+  targets = r.targets;
+  $("#target-table tbody").replaceChildren(...targets.map((t) => h("tr", {},
+    h("td", { class: "full" }, h("b", {}, t.name), h("div", { class: "muted wf-sub" }, "Cloud Run")),
+    h("td", { "data-l": "where" }, t.config.region, t.config.project ? h("div", { class: "muted wf-sub" }, t.config.project) : ""),
+    h("td", { class: "mono trunc", "data-l": "image", title: t.config.image }, t.config.image, t.config.repo ? h("div", { class: "muted wf-sub", title: t.config.repo }, `+ ${t.config.repo}`) : ""),
+    h("td", { "data-l": "used by" }, t.workflows ? `${t.workflows} workflow${t.workflows === 1 ? "" : "s"}` : h("span", { class: "muted" }, "–")),
+    h("td", { class: "row" },
+      h("button", { class: "small", onclick: () => checkTarget(t.name) }, "Check"),
+      h("button", { class: "small", onclick: () => openTargetDialog(t) }, "Edit"),
+      h("button", { class: "small danger", onclick: () => confirmDo(`Delete target "${t.name}"?`, async () => { await del(`/targets/${encodeURIComponent(t.name)}`); toast("deleted", true); loadTargets(); }) }, "Delete"),
+    ),
+  )));
+  if (!targets.length) $("#target-table tbody").replaceChildren(h("tr", {}, h("td", { colspan: 5, class: "muted empty" }, r.gcloud ? "No targets yet. Workflows run on this machine." : "No targets yet. Cloud Run targets need the gcloud CLI on this machine, which isn't installed.")));
+});
+const checkTarget = (name) => guard(async () => {
+  const c = await post(`/targets/${encodeURIComponent(name)}/check`);
+  toast(c.ok ? `${name}: ok (${c.account}, ${c.project})` : `${name}: ${c.error}`, c.ok);
+})();
+const tdlg = $("#target-dialog"), tf = $("#target-form");
+const linesOf = (map) => Object.entries(map || {}).map(([k, v]) => `${k}=${v}`).join("\n");
+function openTargetDialog(t) {
+  tf.reset(); $("#target-feedback").hidden = true;
+  tf.orig.value = t?.name ?? "";
+  tf.elements.namedItem("name").value = t?.name ?? ""; tf.elements.namedItem("name").disabled = Boolean(t);
+  $("#target-title").textContent = t ? `Edit ${t.name}` : "New Cloud Run target";
+  for (const k of ["region", "image", "project", "service_account", "repo", "cpu", "memory", "workdir"]) tf.elements.namedItem(k).value = t?.config[k] ?? "";
+  tf.secrets.value = linesOf(t?.config.secrets); tf.env.value = linesOf(t?.config.env);
+  $(".more", tf).open = Boolean(t && (t.config.workdir || Object.keys(t.config.env || {}).length));
+  tdlg.showModal();
+  (t ? tf.region : tf.elements.namedItem("name")).focus();
+}
+async function saveTarget() {
+  if (!tf.reportValidity()) return null;
+  $("#target-feedback").hidden = true;
+  const config = Object.fromEntries(["region", "image", "project", "service_account", "repo", "cpu", "memory", "workdir"].map((k) => [k, tf.elements.namedItem(k).value.trim()]));
+  config.secrets = parseEnv(tf.secrets.value); config.env = parseEnv(tf.env.value);
+  const orig = tf.orig.value;
+  try { return orig ? await put(`/targets/${encodeURIComponent(orig)}`, { config }) : await post("/targets", { name: tf.elements.namedItem("name").value.trim(), kind: "cloud-run", config }); }
+  catch (e) { $("#target-feedback").textContent = e.message; $("#target-feedback").hidden = false; return null; }
+}
+$("#target-new-btn").onclick = () => openTargetDialog(null);
+$("#target-cancel").onclick = () => tdlg.close();
+tf.addEventListener("submit", async (e) => { e.preventDefault(); const t = await saveTarget(); if (t) { toast("saved", true); tdlg.close(); loadTargets(); } });
+$("#target-check").onclick = async () => {
+  const t = await saveTarget();
+  if (!t) return;
+  tf.orig.value = t.name; tf.elements.namedItem("name").disabled = true; loadTargets();
+  const c = await post(`/targets/${encodeURIComponent(t.name)}/check`).catch((e) => ({ ok: false, error: e.message }));
+  if (c.ok) { toast(`${t.name}: ok (${c.account}, ${c.project})`, true); tdlg.close(); }
+  else { $("#target-feedback").textContent = `Saved, but the check failed: ${c.error}`; $("#target-feedback").hidden = false; }
+};
+
 function renderSettings() {
+  loadTargets();
   const pref = themePref();
   $("#theme-picker").replaceChildren(...THEMES.map((t) => h("button", { class: "theme", role: "radio", "aria-checked": String(pref === t.id), onclick: () => { try { localStorage.setItem("ac_theme", t.id); } catch {} applyTheme(t.id); renderSettings(); } },
     h("span", { class: "theme-swatch", "aria-hidden": "true" }, ...t.swatch.map((c) => h("span", { style: `background:${c}` }))),
@@ -657,7 +731,7 @@ const refreshRunDetail = guard(async (full = false) => {
   const r = await get(`/runs/${id}`);
   if (!selectedRun || selectedRun.id !== id) return;
   const sig = (x) => JSON.stringify((x.sessions || []).map((s) => [s.session_id, s.title, s.name, s.status, s.web_url, s.ended_at]));
-  const changed = full || r.status !== selectedRun.status || (r.meta?.remote_url && !selectedRun.meta?.remote_url) || sig(r) !== sig(selectedRun);
+  const changed = full || r.status !== selectedRun.status || (r.meta?.remote_url && !selectedRun.meta?.remote_url) || (r.meta?.cloud_run && !selectedRun.meta?.cloud_run) || sig(r) !== sig(selectedRun);
   selectedRun = r;
   if (changed || !$("#run-log")) {
     $("#run-detail").replaceChildren(
@@ -666,6 +740,7 @@ const refreshRunDetail = guard(async (full = false) => {
         h("summary", { class: "muted" }, `${r.type_name} · ${shortCwd(r.cwd)} · ${r.trigger} · ${fmtRel(r.started_at)}${r.meta?.remote_url ? " · " : ""}`, r.meta?.remote_url ? h("a", { href: r.meta.remote_url, target: "_blank", onclick: (e) => e.stopPropagation() }, "open on web ↗") : ""),
       h("dl", {},
         h("dt", {}, "type"), h("dd", {}, r.type_name),
+        r.meta?.target ? h("dt", {}, "target") : "", r.meta?.target ? h("dd", {}, `${r.meta.target} (Cloud Run)`, r.meta.cloud_run ? [" · ", h("a", { href: r.meta.cloud_run.console_url, target: "_blank", rel: "noopener" }, `execution ${r.meta.cloud_run.execution} ↗`)] : h("span", { class: "muted" }, "  (starting the job…)")) : "",
         h("dt", {}, "cwd"), h("dd", {}, r.cwd),
         h("dt", {}, "command"), h("dd", {}, quoteArgs([r.command, ...r.args])),
         r.prompt ? h("dt", {}, "prompt") : "", r.prompt ? h("dd", { style: "white-space:pre-wrap" }, r.prompt) : "",
@@ -752,7 +827,12 @@ function sessionsBlock(r) {
         ),
         h("span", { class: "row", style: "gap:6px;flex-wrap:wrap" },
           s.web_url ? h("a", { href: s.web_url, target: "_blank" }, h("button", { class: "small" }, "Open on web")) : "",
-          !live ? h("button", { class: "small primary", title: `${s.resume_cmd} — in a tmux session here, with the type's resume args (claude: --remote-control)`, onclick: () => guard(async () => { const n = await post(`/runs/${r.id}/sessions/${encodeURIComponent(s.session_id)}/resume`); toast(`resumed as run #${n.id}`, true); openRun(n.id); })() }, "Resume here") : "",
+          !live ? h("button", { class: "small primary", title: `${s.resume_cmd} — in a tmux session here, with the type's resume args (claude: --remote-control)`, onclick: () => {
+            const go = guard(async () => { const n = await post(`/runs/${r.id}/sessions/${encodeURIComponent(s.session_id)}/resume`); toast(`resumed as run #${n.id}`, true); openRun(n.id); });
+            // The conversation came back from the cloud; the files it changed did not.
+            if (s.source === "cloud-run") confirmDo(`This conversation ran on ${r.meta?.target || "a cloud target"}. It continues here in ${s.cwd}, but files the agent changed in the container are gone unless it pushed them: pull or check out its branch first.\n\nResume it?`, go);
+            else go();
+          } }, "Resume here") : "",
           h("button", { class: "small", title: s.resume_cmd, onclick: () => navigator.clipboard?.writeText(s.resume_cmd).then(() => toast("copied: " + s.resume_cmd, true)) }, "Copy resume"),
           s.transcript_path ? h("a", { href: `/api/runs/${r.id}/sessions/${encodeURIComponent(s.session_id)}/transcript${tokenQ}`, target: "_blank" }, h("button", { class: "small" }, "Transcript")) : "",
         ),
@@ -1183,7 +1263,7 @@ document.addEventListener("visibilitychange", () => !document.hidden && refresh(
 
 (async () => {
   applyTheme(); // the page head already set the scheme; this syncs theme-color
-  await Promise.all([loadSystem(), loadTypes(), loadWorkflows(), loadMe()]);
+  await Promise.all([loadSystem(), loadTypes(), loadWorkflows(), loadMe(), loadTargets()]);
   const m = location.hash.match(/^#(\w+)(?:\/(\w+))?/);
   if (m && m[1] === "runs" && m[2]) openRun(Number(m[2]));
   else if (m && m[1] === "console" && /^\d+$/.test(m[2] || "")) { selectConsoleRunId(Number(m[2])); switchTab("console", false); }
