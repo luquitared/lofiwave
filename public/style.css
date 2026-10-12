@@ -286,6 +286,7 @@ select { font-family:inherit; }
 .rail-sub { margin-top:4px; color:var(--muted); font-size:11px; overflow-wrap:anywhere; }
 .rail-sub.dim { color:var(--dim); }
 .rail-item.flat button { width:100%; margin-top:10px; }
+.rail-item.flat .row { gap:6px; margin-top:10px; }.rail-item.flat .row button { flex:1 1 auto; width:auto; margin-top:0; }
 .pane { display:flex; flex-direction:column; gap:10px; position:sticky; top:20px; max-height:calc(100dvh - 40px); padding:14px 16px; background:var(--panel); border:1px solid var(--line); border-radius:12px; }
 .pane-head { display:flex; align-items:flex-start; justify-content:space-between; gap:14px; flex-wrap:wrap; }
 .pane-id { min-width:0; }
@@ -311,6 +312,7 @@ body.term-full .term-hint { margin-top:-4px; }
   .rail-head:not(:first-child) { margin:0; padding:0 6px; border:0; border-left:1px solid var(--line); }
   .rail-item { flex:0 0 230px; }
   .rail-item.flat button { margin-top:8px; }
+  .rail-item.flat .row { margin-top:8px; }.rail-item.flat .row button { margin-top:0; }
   .pane { position:static; max-height:none; }
 }
 @media (max-width:900px) {
