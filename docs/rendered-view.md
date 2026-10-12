@@ -1,7 +1,8 @@
 # Rendered view: a chat UI you can toggle with the terminal
 
-Status: **phases 1–3 built** (2026-10-09: read-only chat view, `src/chat/`, `public/chat.js`; 2026-10-11: the
-composer, `src/chat/input.ts`; 2026-10-11: approvals, `src/chat/approvals.ts`); phases 4–6 open.
+Status: **phases 1–4 built** (2026-10-09: read-only chat view, `src/chat/`, `public/chat.js`; 2026-10-11: the
+composer, `src/chat/input.ts`; 2026-10-11: approvals, `src/chat/approvals.ts`; 2026-10-11: the files panel,
+`src/chat/files.ts`); phases 5–6 open.
 Tracked as issues.md #3. Research behind it: claude-code-viewer (upstream v0.8.2),
 T3 Code (pingdotgg/t3code), claude.ai/code, the Claude Code source (2026-03 snapshot) checked against the
 installed 2.1.296, and Codex CLI 0.153.4.
@@ -224,7 +225,8 @@ earlier", rather than a virtualization library.
 
 **Files panel (the "click the edited markdown file" request):**
 - **What opens it:** clicking an edited file row, or any `path:line` in assistant text (linkify paths that exist).
-- **The file:** `GET /api/runs/:id/file?path=` returns the current contents from disk, with a 1MB cap.
+- **The file:** `GET /api/runs/:id/chat/file?path=` returns the current contents from disk, with a 1MB cap
+  (`&raw=1` serves an image's bytes). `POST …/chat/paths {paths}` says which paths in the text are files to link.
   - The path must resolve inside the run's cwd or `$HOME`. Use `realpath` so symlinks can't escape.
 - **Tabs:** *Diff* (this edit's hunks), *Current* (highlighted, scrolled to the line), and **Preview** for `.md`
   (rendered markdown) and images. claude-code-viewer has no markdown preview, so that is ours to add.
@@ -284,7 +286,7 @@ Approvals:
 
 Display:
 - [x] Untrusted markdown and HTML in transcripts: sanitize; images only from our blob endpoint
-- [ ] Linkify only paths that exist; file reads restricted to cwd or `$HOME` through `realpath`
+- [x] Linkify only paths that exist; file reads restricted to cwd or `$HOME` through `realpath`
 - [x] Scroll anchoring with late-rendering markdown, images and syntax highlighting
 - [ ] Mobile layout and the composer under the on-screen keyboard
 
@@ -347,6 +349,25 @@ Checked against a live TUI in tmux while building the composer:
 - **Stop:** Escape interrupts the turn, and the TUI then sends any queued message straight away.
 - **Status `shell`:** the pid file says `shell` when the turn is over but a background command it started is
   still running. It accepts messages like `idle`.
+
+## Phase 4 findings (2026-10-11, Claude Code 2.1.296)
+
+Checked against a live TUI in tmux while building the files panel:
+
+- **Parallel tool results branch off the chain.** With two Edits in one message, the transcript's chain runs
+  through the *last* call's result; the first call's result has the first `tool_use` as its parent and nothing
+  after it. Walking parents from the newest entry missed it, so the first edit stayed "running" forever (a
+  phase 1 bug). `activeChain` now puts a result whose parent is on the chain back right after that parent.
+- **Paths in Claude's text** come as inline code (`` `src/x.ts:12` ``), plain text, or markdown links to a
+  relative path (`[x.ts](src/x.ts#L12)`). All three are linked, but only after the server says the file exists
+  (one batched `POST …/chat/paths` per render), so `and/or` or a path in another worktree stays plain text.
+- **Edits made through Bash** (`printf >> file`, `sed -i`) leave no `file_change` item, so they don't show in the
+  turn's "Edited N files" card. Git checkpoints (phase 5) would catch them.
+- **The panel is opened, not inline:** an edit row now opens the panel on its diff instead of expanding in
+  place. A diff's new line numbers jump to that line of the file as it is now. When Claude edits the open file
+  again, the Current and Preview tabs reload.
+- **Markdown preview images:** relative images are served through `…/chat/file?raw=1` (same cwd/`$HOME` rule).
+  Remote images are not loaded: the viewer's browser would fetch whatever URL the file names.
 
 ## Phase 3 findings (2026-10-11, Claude Code 2.1.296)
 

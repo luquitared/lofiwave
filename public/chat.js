@@ -2,7 +2,8 @@
  * Chat view: a Claude Code session as messages, tool rows, diffs and images, read live from its transcript
  * (server: src/chat, design: docs/rendered-view.md). On a live run of ours it has a composer, which types into the
  * TUI through the server (src/chat/input.ts), and cards that answer Claude's permission prompts, questions and plans
- * (src/chat/approvals.ts); sessions lofiwave didn't start are read-only.
+ * (src/chat/approvals.ts); sessions lofiwave didn't start are read-only. Edited files and paths in Claude's text open in a
+ * files panel beside the conversation (src/chat/files.ts).
  * Uses app.js's helpers (h, token, toast, fmtDur, shortCwd), which are loaded by the time a view opens.
  */
 
@@ -24,12 +25,24 @@ function markdown(text) {
   const el = h("div", { class: "md" });
   if (html === null) { el.textContent = text; el.style.whiteSpace = "pre-wrap"; return el; }
   el.innerHTML = html;
+  highlightBlocks(el);
+  return el;
+}
+function highlightBlocks(el) {
   if (window.hljs) for (const code of el.querySelectorAll("pre code[class*='language-']")) {
     const lang = (code.className.match(/language-([\w+-]+)/) || [])[1];
     if (lang && hljs.getLanguage(lang)) { try { hljs.highlightElement(code); } catch {} }
   }
-  return el;
 }
+
+// ---------------------------------------------------------------- paths in Claude's text
+/** A whole string that is a path, with an optional :line or #L12. Groups: path, line, line. */
+const PATH_WHOLE = /^((?:~\/|\.{0,2}\/)?[\w@.+-]+(?:\/[\w@.+-]+)*)(?:#L(\d+)(?:-L?\d+)?|:(\d+)(?::\d+)?)?$/;
+const EXTS = "md|markdown|mdx|txt|ts|tsx|js|jsx|mjs|cjs|json|jsonc|jsonl|py|rb|go|rs|java|kt|swift|c|h|cc|cpp|hpp|cs|php|sh|bash|zsh|ya?ml|toml|ini|cfg|conf|css|scss|html|xml|svg|sql|lua|vue|svelte|env|lock|png|jpe?g|gif|webp";
+/** Paths inside prose: anything with a slash, or a bare file name with a known extension. */
+const PATH_IN_TEXT = new RegExp(`(?<![\\w@.+/:~-])((?:~/|\\.{0,2}/)?(?:[\\w@.+-]+/)+[\\w@.+-]+|[\\w@+-][\\w@.+-]*\\.(?:${EXTS}))(?::(\\d+)(?::\\d+)?|#L(\\d+))?(?![\\w/])`, "g");
+/** Worth asking the server about: not a version number, a URL piece, or a lone word. */
+const looksLikePath = (p) => p.length >= 3 && p.length <= 400 && /[/.]/.test(p) && !/^[\d.]+$/.test(p) && !p.includes("//") && !/^\.+$/.test(p);
 
 // ---------------------------------------------------------------- small pieces
 /** Next frame, or a short timer when frames don't come (a background tab gets none). */
@@ -113,9 +126,21 @@ class ChatView {
     this.cardsEl = h("div", { class: "chat-cards", hidden: true });
     this.scroller.append(this.top, this.list, this.pendingEl, this.state);
     this.composer = base.startsWith("/runs/") ? new Composer(this) : null;
-    this.root.append(h("div", { class: "chat-main" }, this.scroller, this.jump), this.cardsEl, this.banner, this.composer?.el ?? "", this.footer());
+    this.files = new FilesPanel(this);
+    this.root.append(h("div", { class: "chat-body" },
+      h("div", { class: "chat-col" }, h("div", { class: "chat-main" }, this.scroller, this.jump), this.cardsEl, this.banner, this.composer?.el ?? ""),
+      this.files.el), this.footer());
+    /** Which paths in Claude's text are files (from the server): path as written → absolute path, or false. */
+    this.paths = new Map();
+    this.list.addEventListener("click", (e) => {
+      const a = e.target.closest?.("a[data-path]");
+      if (!a || e.metaKey || e.ctrlKey) return;
+      e.preventDefault();
+      this.files.open({ path: a.dataset.path, line: Number(a.dataset.line) || 0 });
+    });
     // Keys 1–9 pick an option on the oldest card, unless you're typing somewhere.
     this.onKey = (e) => {
+      if (e.key === "Escape" && this.files.isOpen && this.root.offsetParent && !e.target?.closest?.("input, textarea, select, [contenteditable]")) { e.preventDefault(); this.files.close(); return; }
       if (!this.requests.length || e.metaKey || e.ctrlKey || e.altKey || !/^[1-9]$/.test(e.key)) return;
       if (!this.root.isConnected || !this.root.offsetParent || e.target?.closest?.("input, textarea, select, [contenteditable]")) return;
       const card = this.cardEls.get(this.requests[0].id);
@@ -188,6 +213,7 @@ class ChatView {
       for (const id of m.remove) { const old = this.items.get(id); if (old) { this.dirty.add(old.turnId); this.items.delete(id); } }
       if (this.items.size) this.setState("");
       this.settlePending(m.upsert);
+      if (this.files.isOpen && m.upsert.some((it) => it.kind === "file_change" && it.path === this.files.path && it.status !== "running")) this.files.changed();
       this.render();
     } else if (m.t === "status") {
       if (m.read_only !== undefined) this.readOnly = m.read_only;
@@ -501,7 +527,91 @@ class ChatView {
       el.append(...this.renderBody(work, turnId, live));
     }
     el.append(...this.renderBody(tail, turnId, live));
+    if (!live) { const card = this.editedCard(body); if (card) el.append(card); }
     return el;
+  }
+
+  /** "Edited 3 files": what a finished turn changed, each file with its +/− counts; a click opens the turn's diff. */
+  editedCard(items) {
+    const by = new Map();
+    for (const it of items) {
+      if (it.kind !== "file_change" || !it.path || it.status !== "completed") continue;
+      const f = by.get(it.path) || { path: it.path, added: 0, removed: 0, created: it.op === "write" && it.removed === 0, edits: [] };
+      f.added += it.added || 0; f.removed += it.removed || 0; f.edits.push(it);
+      by.set(it.path, f);
+    }
+    if (!by.size) return null;
+    const agent = this.agent;
+    return h("div", { class: "chat-edited" },
+      h("div", { class: "chat-edited-head muted" }, `${by.size === 1 ? "Edited 1 file" : `Edited ${by.size} files`}`),
+      ...[...by.values()].map((f) => h("button", { class: "chat-row", title: f.path, onclick: () => this.files.open({ path: f.path, edits: f.edits, agent, tab: "diff" }) },
+        h("span", { class: "chat-icon" }, f.created ? "+" : "✎"), h("span", { class: "chat-label" }, this.rel(f.path)),
+        h("span", { class: "chat-diffstat" }, h("span", { class: "add" }, `+${f.added}`), " ", h("span", { class: "del" }, `−${f.removed}`)))));
+  }
+
+  /**
+   * Paths in rendered text (`src/x.ts:12`, a bare `README.md`, a markdown link to a file) become links into the files
+   * panel, but only once the server says the file exists. Answers are cached, so a redraw links at once.
+   */
+  linkify(el) {
+    const found = [];
+    for (const a of el.querySelectorAll("a[href]")) {
+      const href = a.getAttribute("href");
+      if (/^([a-z][\w+.-]*:|#|\/\/)/i.test(href)) continue;
+      const m = /^(.*?)(?:#L(\d+)(?:-L?\d+)?|:(\d+)(?::\d+)?)?$/.exec(decodeURI(href));
+      if (m) found.push({ node: a, path: m[1], line: Number(m[2] || m[3]) || 0, whole: true });
+    }
+    for (const code of el.querySelectorAll(":not(pre) > code")) {
+      if (code.closest("a")) continue;
+      const m = PATH_WHOLE.exec(code.textContent.trim());
+      if (m && looksLikePath(m[1])) found.push({ node: code, path: m[1], line: Number(m[2] || m[3]) || 0, whole: true });
+    }
+    const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT, { acceptNode: (n) => n.parentElement.closest("a, code, pre") ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT });
+    for (let n; (n = walker.nextNode());) {
+      PATH_IN_TEXT.lastIndex = 0;
+      for (let m; (m = PATH_IN_TEXT.exec(n.data));) {
+        let path = m[1];
+        if (!m[2] && !m[3]) path = path.replace(/[.,;:]+$/, "");
+        if (looksLikePath(path)) found.push({ node: n, path, line: Number(m[2] || m[3]) || 0, at: m.index, text: m[2] || m[3] ? m[0] : path });
+      }
+    }
+    if (!found.length) return el;
+    const apply = () => {
+      // Text nodes are split from the end, so earlier offsets stay right.
+      for (const f of found.reverse()) {
+        const abs = this.paths.get(f.path);
+        if (!abs) continue;
+        if (f.whole) {
+          if (f.node.tagName === "A") { f.node.dataset.path = abs; f.node.dataset.line = f.line; f.node.removeAttribute("target"); f.node.classList.add("chat-path"); f.node.title = abs; }
+          else f.node.replaceWith(h("a", { href: "#", class: "chat-path", "data-path": abs, "data-line": f.line, title: abs }, f.node.cloneNode(true)));
+          continue;
+        }
+        if (!f.node.parentNode) continue;
+        const after = f.node.splitText(f.at);
+        after.splitText(f.text.length);
+        after.replaceWith(h("a", { href: "#", class: "chat-path", "data-path": abs, "data-line": f.line, title: abs }, f.text));
+      }
+    };
+    const unknown = [...new Set(found.map((f) => f.path))].filter((p) => !this.paths.has(p));
+    if (!unknown.length) apply();
+    else this.askPaths(unknown).then(apply);
+    return el;
+  }
+
+  /** One request for all the paths a render turns up; each is asked about once per view. */
+  askPaths(paths) {
+    if (!this.pathAsk) {
+      const ask = this.pathAsk = { paths: new Set() };
+      ask.done = new Promise((r) => setTimeout(r, 30)).then(() => {
+        this.pathAsk = null;
+        const list = [...ask.paths].slice(0, 300);
+        return call("POST", `${this.base}/chat/paths`, { paths: list })
+          .then((r) => { for (const [p, abs] of Object.entries(r.files || {})) this.paths.set(p, abs); })
+          .catch(() => { for (const p of list) this.paths.delete(p); });
+      });
+    }
+    for (const p of paths) { this.paths.set(p, false); this.pathAsk.paths.add(p); }
+    return this.pathAsk.done;
   }
 
   /** Assistant text in full; runs of tool calls fold into one summary row (unless `flat`: already inside a fold). */
@@ -509,7 +619,7 @@ class ChatView {
     const out = [];
     for (let i = 0; i < items.length;) {
       const it = items[i];
-      if (it.kind === "assistant") { out.push(h("div", { class: "chat-assistant" }, markdown(it.text))); i++; continue; }
+      if (it.kind === "assistant") { out.push(h("div", { class: "chat-assistant" }, this.linkify(markdown(it.text)))); i++; continue; }
       if (it.kind === "plan") { out.push(this.renderPlan(it)); i++; continue; }
       if (it.kind === "event") { out.push(this.renderEvent(it)); i++; continue; }
       if (it.kind === "user") { out.push(this.renderUser(it)); i++; continue; }
@@ -578,7 +688,7 @@ class ChatView {
   renderPlan(it) {
     return h("div", { class: "chat-plan" },
       h("div", { class: "chat-plan-head" }, h("b", {}, "Plan"), it.decision ? h("span", { class: `chat-badge ${it.decision === "approved" ? "ok" : "bad"}` }, it.decision) : it.status === "running" ? h("span", { class: "chat-badge" }, "awaiting approval") : ""),
-      markdown(it.markdown || ""));
+      this.linkify(markdown(it.markdown || "")));
   }
 
   /** What a tool row says when folded: an icon, a label, and badges. */
@@ -609,8 +719,13 @@ class ChatView {
     if (it.background) badges.push(h("span", { class: "chat-badge" }, "background"));
     if (this.requests?.some((r) => r.item_id === it.id)) badges.push(h("span", { class: "chat-badge warn" }, "needs your answer"));
     else if (running) badges.push(this.status === "busy" || this.status === "waiting" || it.kind === "subagent" ? h("span", { class: "chat-spin", title: "running" }) : h("span", { class: "chat-badge" }, "no result"));
-    const head = h(expandable ? "button" : "div", { class: `chat-row${open ? " open" : ""}${failed(it) ? " failed" : ""}`, ...(expandable ? { "aria-expanded": String(open), onclick: () => this.toggle(it.id, turnId) } : {}) },
-      h("span", { class: expandable ? "chev" : "chev none" }), h("span", { class: "chat-icon" }, icon), h("span", { class: "chat-label" }, label), ...badges);
+    // An edit opens in the files panel (its diff, the file now, a preview) rather than inline.
+    const panel = it.kind === "file_change" && it.path;
+    const agent = this.agent;
+    const head = h(expandable ? "button" : "div", { class: `chat-row${open ? " open" : ""}${failed(it) ? " failed" : ""}`,
+      ...(panel ? { title: `${it.path}: open the diff and the file`, onclick: () => this.files.open({ path: it.path, edits: [it], agent, tab: "diff" }) }
+        : expandable ? { "aria-expanded": String(open), onclick: () => this.toggle(it.id, turnId) } : {}) },
+      h("span", { class: panel ? "chev none" : expandable ? "chev" : "chev none" }), h("span", { class: "chat-icon" }, icon), h("span", { class: "chat-label" }, label), ...badges);
     const row = h("div", { class: `chat-item k-${it.kind}` }, head);
     if (open) row.append(this.details(it));
     else if (it.kind === "todo" && it.steps.length > 1) row.append(this.todoList(it.steps));
@@ -631,6 +746,7 @@ class ChatView {
         else d.append(h("div", { class: "muted" }, it.status === "running" ? "waiting for the edit…" : "no diff recorded"));
         break;
       case "read": case "search": case "web":
+        if (it.kind === "read" && it.label) d.append(h("button", { class: "small chat-more", onclick: () => this.files.open({ path: it.label.replace(/ · \d+ lines$/, "") }) }, "Open the file"));
         if (it.images?.length) d.append(h("div", { class: "chat-images" }, ...it.images.map((im) => this.image(im))));
         if (it.detail !== undefined) d.append(this.output(it.detail, it));
         break;
@@ -660,10 +776,10 @@ class ChatView {
   }
 
   /** A button that fetches a payload left in the transcript and swaps in what `make` builds from it. */
-  lazy(label, ref, make) {
+  lazy(label, ref, make, agent = this.agent) {
     const btn = h("button", { class: "small chat-more", onclick: async () => {
       btn.disabled = true; btn.textContent = "loading…";
-      try { const out = make(await fetchText(this.blobPath(ref))); if (out) btn.replaceWith(out); else btn.remove(); }
+      try { const out = make(await fetchText(this.blobPath(ref, agent))); if (out) btn.replaceWith(out); else btn.remove(); }
       catch (e) { btn.disabled = false; btn.textContent = label; toast(e.message); }
     } }, label);
     return btn;
@@ -714,8 +830,11 @@ function kvTable(obj) {
   return h("dl", { class: "chat-kv" }, ...Object.entries(obj).flatMap(([k, v]) => [h("dt", {}, k), h("dd", {}, typeof v === "string" ? v : JSON.stringify(v, null, 2))]));
 }
 
-/** A unified diff from structuredPatch hunks, with old and new line numbers (`bare`: no numbers, for an edit not made yet). */
-function diffView(hunks, bare = false) {
+/**
+ * A unified diff from structuredPatch hunks, with old and new line numbers (`bare`: no numbers, for an edit not made
+ * yet). `onLine(n)`: a click on a new line number (the files panel jumps to that line of the file).
+ */
+function diffView(hunks, bare = false, onLine = null) {
   const rows = [];
   for (const hk of hunks || []) {
     let o = hk.oldStart, n = hk.newStart;
@@ -725,12 +844,164 @@ function diffView(hunks, bare = false) {
       const s = line[0], tx = line.slice(1);
       if (s === "\\") continue;
       const cls = s === "+" ? "add" : s === "-" ? "del" : "";
-      rows.push(h("div", { class: `dl ${cls}` }, h("span", { class: "ln" }, s === "+" || bare ? "" : o), h("span", { class: "ln" }, s === "-" || bare ? "" : n), h("span", { class: "tx" }, (s === "+" || s === "-" ? s : " ") + tx)));
+      const at = n;
+      const newLn = s === "-" || bare ? h("span", { class: "ln" }) : onLine ? h("span", { class: "ln go", title: `line ${at} of the file now`, onclick: () => onLine(at) }, at) : h("span", { class: "ln" }, at);
+      rows.push(h("div", { class: `dl ${cls}` }, h("span", { class: "ln" }, s === "+" || bare ? "" : o), newLn, h("span", { class: "tx" }, (s === "+" || s === "-" ? s : " ") + tx)));
       if (s !== "+") o++;
       if (s !== "-") n++;
     }
   }
   return h("div", { class: "chat-diff" }, ...rows);
+}
+
+// ---------------------------------------------------------------- the files panel
+const isMarkdownPath = (p) => /\.(md|markdown|mdx)$/i.test(p);
+const isImagePath = (p) => /\.(png|jpe?g|gif|webp|svg)$/i.test(p);
+const LANGS = { ts: "typescript", tsx: "typescript", mts: "typescript", js: "javascript", jsx: "javascript", mjs: "javascript", cjs: "javascript", jsonc: "json", jsonl: "json", py: "python", rb: "ruby", rs: "rust", sh: "bash", zsh: "bash", yml: "yaml", md: "markdown", mdx: "markdown", html: "xml", svg: "xml", h: "c", cc: "cpp", hpp: "cpp", kt: "kotlin", toml: "ini", cfg: "ini", conf: "ini" };
+function langOf(p) {
+  const base = p.split("/").pop();
+  const name = base === "Dockerfile" ? "dockerfile" : base === "Makefile" ? "makefile" : LANGS[(/\.(\w+)$/.exec(base) || [])[1]?.toLowerCase()] || (/\.(\w+)$/.exec(base) || [])[1]?.toLowerCase();
+  return name && window.hljs?.getLanguage(name) ? name : null;
+}
+/** `rel` against folder `dir`, with . and .. resolved (absolute `rel` stays as is). */
+function resolvePath(dir, rel) {
+  const out = [];
+  for (const part of (rel.startsWith("/") ? rel : `${dir}/${rel}`).split("/")) {
+    if (part === "..") out.pop(); else if (part && part !== ".") out.push(part);
+  }
+  return "/" + out.join("/");
+}
+/** The file view's line height and top padding, in px: the highlighted line is placed from them. */
+const LINE_PX = 18, CODE_PAD = 8;
+
+/**
+ * A file beside the conversation: the diff of the edits it was opened from, the file as it is on disk now (scrolled
+ * to a line), and a preview for markdown and images. Opened from an edit row, a turn's "Edited N files" card, or a
+ * path in Claude's text.
+ */
+class FilesPanel {
+  constructor(view) {
+    this.view = view;
+    this.isOpen = false;
+    this.el = h("aside", { class: "chat-files", hidden: true, "aria-label": "file" });
+  }
+
+  /** edits: the file_change items whose diff to show (from a link: every edit of the file in what's loaded). */
+  open({ path, line = 0, edits = null, agent = "", tab = "" }) {
+    this.path = path; this.line = line; this.agent = agent;
+    this.edits = edits || this.view.sorted().filter((i) => i.kind === "file_change" && i.path === path && i.status === "completed");
+    this.file = null;
+    this.tab = tab === "diff" && this.edits.length ? "diff" : !line && (isMarkdownPath(path) || isImagePath(path)) ? "preview" : "current";
+    this.isOpen = true; this.el.hidden = false;
+    this.view.root.classList.add("files-open");
+    this.render();
+  }
+
+  close() {
+    this.isOpen = false; this.el.hidden = true; this.el.replaceChildren();
+    this.view.root.classList.remove("files-open");
+  }
+
+  /** Claude changed the open file: what's on disk is news. */
+  changed() { this.file = null; if (this.tab !== "diff") this.render(); }
+
+  show(tab, line = 0) { this.tab = tab; if (line) this.line = line; this.render(); }
+
+  render() {
+    const p = this.path, rel = this.view.rel(p);
+    const tabs = [this.edits.length ? ["diff", this.edits.length > 1 ? `Diff (${this.edits.length} edits)` : "Diff"] : null, ["current", "Current"], isMarkdownPath(p) || isImagePath(p) ? ["preview", "Preview"] : null].filter(Boolean);
+    this.body = h("div", { class: "chat-files-body" });
+    this.el.replaceChildren(
+      h("div", { class: "chat-files-head" },
+        h("div", { class: "chat-files-path", title: p }, h("b", {}, p.split("/").pop()), rel.includes("/") ? h("span", { class: "muted" }, "\u200e" + rel.replace(/\/[^/]*$/, "") + "\u200e") : ""),
+        h("button", { class: "small", title: p, onclick: () => navigator.clipboard?.writeText(p).then(() => toast("path copied"), () => toast(p)) }, "Copy path"),
+        h("button", { class: "chat-files-x", "aria-label": "close the file", title: "close (Esc)", onclick: () => this.close() }, "×")),
+      h("div", { class: "chat-files-bar" },
+        h("div", { class: "seg", role: "tablist" }, ...tabs.map(([k, label]) => h("button", { class: k === this.tab ? "on" : "", role: "tab", "aria-selected": String(k === this.tab), onclick: () => this.show(k) }, label))),
+        this.tab !== "diff" ? h("button", { class: "small", title: "read the file from disk again", onclick: () => { this.file = null; this.render(); } }, "Reload") : ""),
+      this.body);
+    if (this.tab === "diff") this.renderDiff(); else this.renderFile();
+  }
+
+  /** Each edit's hunks, in order. A new line number jumps to that line of the file as it is now. */
+  renderDiff() {
+    const jump = (n) => this.show("current", n);
+    this.edits.forEach((it, i) => {
+      const box = h("div", { class: "chat-files-edit" });
+      if (this.edits.length > 1) box.append(h("div", { class: "chat-files-edit-head muted" }, `Edit ${i + 1} of ${this.edits.length}`,
+        h("span", { class: "chat-diffstat" }, h("span", { class: "add" }, `+${it.added}`), " ", h("span", { class: "del" }, `−${it.removed}`))));
+      if (it.error) box.append(h("pre", { class: "chat-out bad" }, it.error));
+      if (isOmitted(it.patch)) box.append(this.view.lazy(`Load the diff (${fmtBytes(it.patch.bytes)})`, it.patch.blob, (t) => diffView(JSON.parse(t), false, jump), this.agent));
+      else if (it.patch) box.append(diffView(it.patch, false, jump));
+      else box.append(h("div", { class: "muted" }, "no diff recorded"));
+      this.body.append(box);
+    });
+  }
+
+  rawUrl(p) {
+    const q = new URLSearchParams({ path: p, raw: "1" }); if (token) q.set("token", token);
+    return `/api${this.view.base}/chat/file?${q}`;
+  }
+
+  async renderFile() {
+    const body = this.body, p = this.path;
+    if (!this.file) {
+      body.append(h("div", { class: "chat-files-note muted" }, "loading…"));
+      let f;
+      try { f = await call("GET", `${this.view.base}/chat/file?path=${encodeURIComponent(p)}`); }
+      catch (e) { f = { error: e.message }; }
+      if (this.path === p) this.file = f;
+      if (this.body !== body) return; // redrawn, or another file opened, while this loaded
+      body.replaceChildren();
+    }
+    const f = this.file;
+    if (f.error) return body.append(h("div", { class: "chat-files-note bad" }, f.error));
+    if (f.image) return body.append(h("div", { class: "chat-files-img" }, h("img", { src: `${this.rawUrl(p)}&v=${f.mtime}`, alt: p })));
+    if (f.binary) return body.append(h("div", { class: "chat-files-note muted" }, `A binary file (${fmtBytes(f.size)}): nothing to show.`));
+    body.append(this.tab === "preview" ? this.preview(f.text) : this.code(f.text));
+  }
+
+  /** The file with line numbers, highlighted (up to a size), the chosen line marked and scrolled to. */
+  code(text) {
+    const lines = text.split("\n");
+    if (lines.length > 1 && lines.at(-1) === "") lines.pop();
+    const code = h("code", {});
+    const lang = text.length <= 300_000 ? langOf(this.path) : null;
+    if (lang) { try { code.innerHTML = hljs.highlight(text, { language: lang, ignoreIllegals: true }).value; } catch { code.textContent = text; } }
+    else code.textContent = text;
+    const line = Math.min(this.line, lines.length);
+    const box = h("div", { class: "chat-code" },
+      line ? h("div", { class: "chat-code-mark", style: `top:${(line - 1) * LINE_PX + CODE_PAD}px` }) : "",
+      h("pre", { class: "chat-code-ln", "aria-hidden": "true" }, lines.map((_, i) => i + 1).join("\n")),
+      h("pre", { class: "chat-code-tx" }, code));
+    if (line) nextFrame(() => { this.body.scrollTop = Math.max(0, (line - 1) * LINE_PX - this.body.clientHeight / 3); });
+    return box;
+  }
+
+  /** Rendered markdown. Images next to the file show (through the file endpoint); links to other files open here. */
+  preview(text) {
+    const el = h("div", { class: "md chat-files-md" });
+    if (!window.marked || !window.DOMPurify) { el.textContent = text; el.style.whiteSpace = "pre-wrap"; return el; }
+    el.innerHTML = DOMPurify.sanitize(marked.parse(text, { gfm: true }), { FORBID_TAGS: ["style", "form", "input", "button", "iframe", "video", "audio"], FORBID_ATTR: ["style"] });
+    highlightBlocks(el);
+    const dir = this.path.replace(/\/[^/]*$/, "");
+    const external = (u) => /^([a-z][\w+.-]*:|\/\/)/i.test(u);
+    for (const img of el.querySelectorAll("img")) {
+      const src = img.getAttribute("src") || "";
+      // Remote images would be fetched from the viewer's browser on Claude's say-so: show what they are instead.
+      if (!src || external(src)) { img.replaceWith(h("span", { class: "muted" }, `[image: ${img.getAttribute("alt") || src}]`)); continue; }
+      let path; try { path = decodeURI(src.split(/[?#]/)[0]); } catch { path = src; }
+      img.src = this.rawUrl(resolvePath(dir, path)); img.loading = "lazy";
+    }
+    for (const a of el.querySelectorAll("a[href]")) {
+      const href = a.getAttribute("href");
+      if (external(href)) continue;
+      a.removeAttribute("target");
+      let m; try { m = /^([^#?]*)(?:#L(\d+))?/.exec(decodeURI(href)); } catch { m = null; }
+      a.addEventListener("click", (e) => { e.preventDefault(); if (m?.[1]) this.open({ path: resolvePath(dir, m[1]), line: Number(m[2]) || 0 }); });
+    }
+    return el;
+  }
 }
 
 // ---------------------------------------------------------------- the composer (live runs of ours)
