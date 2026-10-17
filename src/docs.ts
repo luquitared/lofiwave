@@ -52,6 +52,16 @@ curl -X POST ${api}/workflows -H "authorization: Bearer $KEY" -H 'content-type: 
 - \`GET ${api}/runs?workflow_id=<id>\` is its history; \`GET ${api}/runs/<run id>/screen\` shows the live terminal and \`POST ${api}/runs/<run id>/keys\` types into it.
 - Claude asks before editing files or running commands; for a run nobody watches, add \`"extra_args": "--permission-mode acceptEdits"\`.
 
+## Quickstart: a swarm (a controller starting workers and collecting their results)
+
+Start each worker with \`POST ${api}/processes\`: the same \`"group"\` for all of them, \`"parent_run": <your AGENT_CONSOLE_RUN_ID>\` if you are a lofiwave run yourself, its inputs in \`"files"\` (\`{"BRIEF.md": "..."}\`), \`"mkdir_cwd": true\` for a fresh folder, and \`"queue": true\` so that a full machine queues it (status \`queued\`) instead of answering 429. Each run has \`LOFIWAVE_OUT_DIR\` (\`<cwd>/out\`) in its environment: tell workers to leave their results there.
+
+- \`GET ${api}/runs?group=<g>\` (or \`GET ${api}/groups\` for counts by status) shows how the swarm is doing.
+- \`GET ${api}/runs/<id>/results\` returns what a worker left in \`out/\`, small text files inlined.
+- \`PUT ${api}/runs/<id>/files?path=<rel>\` puts a file (or, with \`&extract=1\`, a tar.gz) in a run's folder; \`GET\` the same URL reads a file, lists a folder, or with \`&archive=1\` downloads it as a tar.gz.
+
+Details are under *Swarms* below.
+
 ## Quickstart: register an app so it can be monitored, started and stopped from the console
 
 An **app** is a process type: a command with optional args, a default working directory, and a regex that recognizes already-running instances. Once registered it appears on the console's *Apps* tab.
@@ -103,7 +113,8 @@ export function apiIndex(base: string) {
       processes: [`GET ${api}/processes?type=&kind=`, `POST ${api}/processes`, `POST ${api}/processes/preview`, `DELETE ${api}/processes/:pid?force=1`, `POST ${api}/processes/:pid/remote-control {replace?}`],
       keys: [`GET|POST ${api}/keys`, `DELETE ${api}/keys/:id`],
       workflows: [`GET|POST ${api}/workflows`, `GET|PUT|DELETE ${api}/workflows/:id`, `POST ${api}/workflows/:id/run`],
-      runs: [`GET ${api}/runs?workflow_id=&status=&type=&limit=&offset=`, `GET|DELETE ${api}/runs/:id`, `GET ${api}/runs/:id/log?offset=|raw=1`, `POST ${api}/runs/:id/kill?force=1`, `POST ${api}/runs/:id/restart`],
+      runs: [`GET ${api}/runs?workflow_id=&status=&type=&group=&parent_run=&limit=&offset=`, `GET|DELETE ${api}/runs/:id`, `GET ${api}/runs/:id/log?offset=|raw=1`, `POST ${api}/runs/:id/kill?force=1`, `POST ${api}/runs/:id/restart`],
+      swarms: [`POST ${api}/processes {group?, parent_run?, files?, mkdir_cwd?, queue?}`, `GET ${api}/groups`, `GET|PUT ${api}/runs/:id/files?path=&recursive=1|archive=1|extract=1`, `GET ${api}/runs/:id/results`, `GET ${api}/system (capacity)`],
       interactive: [`POST ${api}/processes {interactive: true}`, `GET ${api}/runs/:id/screen?lines=200`, `GET ${api}/runs/:id/history?lines=5000`, `POST ${api}/runs/:id/keys {text, keys, enter}`],
       sessions: [`GET|POST ${api}/runs/:id/sessions`, `PUT ${api}/runs/:id/sessions/:session_id`, `POST ${api}/runs/:id/sessions/:session_id/resume`, `POST ${api}/sessions/resume {session_id, agent?, cwd?}`, `GET ${api}/sessions/:session_id?agent=`, `GET ${api}/runs/:id/sessions/:session_id/transcript`, `GET ${api}/runs/:id/sessions/:session_id/messages`],
     },

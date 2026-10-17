@@ -3,7 +3,8 @@
  * console — ad-hoc or from a workflow — is a row in `runs` with its own log file.
  */
 import { join, basename } from "node:path";
-import { existsSync, statSync, openSync, readSync, closeSync, appendFileSync } from "node:fs";
+import { existsSync, statSync, openSync, readSync, closeSync, appendFileSync, mkdirSync } from "node:fs";
+import { homedir } from "node:os";
 import { db, now, hydrate, type ProcessTypeRow, type RunRow, type WorkflowRow } from "./db";
 import { config, logDir } from "./config";
 import { killTree, pidAlive } from "./procs";
@@ -11,6 +12,7 @@ import { discoverCodexSession, codexRolloutPath, claudeRegistry, claudeWebUrl, c
 import { openTerminalForTmux } from "./terminal";
 import { actor } from "./auth";
 import { ttyViewers } from "./tty";
+import { admissionBlocker } from "./capacity";
 
 export class ApiError extends Error {
   constructor(public status: number, message: string) { super(message); }
@@ -62,7 +64,14 @@ export type StartOptions = {
   terminal?: string;
   /** Interactive claude runs: end the run once the agent has finished its work and sat idle (config.idleStopSec). */
   stopWhenIdle?: boolean;
+  /** Set on the run's meta before launch: group, parent_run, and a queued run's started_by. */
+  meta?: Record<string, any>;
+  /** Launch into this queued run's row instead of inserting a new one (see src/jobs.ts). */
+  runId?: number;
 };
+
+/** Where a run is asked to leave its results (LOFIWAVE_OUT_DIR); GET /api/runs/:id/results lists it. */
+export const outDirOf = (cwd: string) => join(cwd, "out");
 
 /** Record (or refresh) an agent session on a run. Keyed by (run, session id) so a resumed session can belong to several runs. */
 export function recordSession(runId: number, s: { session_id: string; agent?: string; cwd?: string; transcript_path?: string; model?: string; source?: string }) {
@@ -122,26 +131,41 @@ export async function startRun(opts: StartOptions): Promise<RunRow> {
   const interactive = Boolean(opts.interactive) || Boolean(opts.resumeSession);
   if (interactive && !tmuxPath()) throw new ApiError(400, "interactive runs need tmux on PATH (brew install tmux / apt install tmux)");
   const { command, args, template_len } = buildCommand(type, opts);
+  // Too many agents (or too little memory) and one more could take the machine down: refuse; the caller may queue.
+  const blocked = type.kind === "agent" ? admissionBlocker() : null;
+  if (blocked) throw new ApiError(429, `machine is full: ${blocked}. Try again later, or pass "queue": true to start it when there is room.`);
   const typeEnv: Record<string, string> = JSON.parse(type.env || "{}");
-  const env = { ...typeEnv, ...(opts.env ?? {}) };
+  // Results go in <cwd>/out/. Not made in the home folder or / (a session reopened there), where it would just be litter.
+  const outDir = outDirOf(cwd);
+  if (!opts.resumeSession && cwd !== homedir() && cwd !== "/") { try { mkdirSync(outDir, { recursive: true }); } catch { /* read-only cwd: the run still starts */ } }
+  const env: Record<string, string> = { LOFIWAVE_OUT_DIR: outDir, ...typeEnv, ...(opts.env ?? {}) };
   const t = now();
   const timeoutSec = opts.timeoutSec ?? opts.workflow?.timeout_sec ?? 0;
-  const meta: Record<string, any> = { timeout_sec: timeoutSec, template_len };
+  const meta: Record<string, any> = { ...(opts.meta ?? {}), timeout_sec: timeoutSec, template_len };
   if (opts.resumeSession) meta.resume_session = opts.resumeSession;
   if (opts.stopWhenIdle && interactive) meta.stop_when_idle = true;
   // Who started it: the logged-in person (or "api" for the token), when it comes from a request; scheduled runs have none.
-  const by = actor.getStore();
+  const by = actor.getStore() ?? opts.meta?.started_by;
   if (by) meta.started_by = by;
   const isCodex = basename(command) === "codex";
 
-  const ins = db.prepare(
-    `INSERT INTO runs (workflow_id, workflow_name, type_name, cwd, command, args, prompt, env, trigger, status, started_at, meta)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?)`,
-  ).run(
-    opts.workflow?.id ?? null, opts.workflow?.name ?? null, type.name, cwd, command, JSON.stringify(args),
-    opts.prompt ?? "", JSON.stringify(env), opts.trigger, t, JSON.stringify(meta),
-  );
-  const id = Number(ins.lastInsertRowid);
+  let id: number;
+  if (opts.runId) {
+    const upd = db.prepare(
+      "UPDATE runs SET command = ?, args = ?, env = ?, status = 'running', started_at = ?, meta = ? WHERE id = ? AND status = 'queued'",
+    ).run(command, JSON.stringify(args), JSON.stringify(env), t, JSON.stringify(meta), opts.runId);
+    if (!upd.changes) throw new ApiError(409, `run ${opts.runId} is no longer queued`);
+    id = opts.runId;
+  } else {
+    const ins = db.prepare(
+      `INSERT INTO runs (workflow_id, workflow_name, type_name, cwd, command, args, prompt, env, trigger, status, started_at, meta)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?)`,
+    ).run(
+      opts.workflow?.id ?? null, opts.workflow?.name ?? null, type.name, cwd, command, JSON.stringify(args),
+      opts.prompt ?? "", JSON.stringify(env), opts.trigger, t, JSON.stringify(meta),
+    );
+    id = Number(ins.lastInsertRowid);
+  }
   starting.add(id);
   const logPath = join(logDir, `run-${id}.log`);
   if (interactive) { meta.interactive = true; meta.tmux = tmuxSessionName(id); }
@@ -357,6 +381,11 @@ export async function sendKeys(run: RunRow, text: string, keys: string[], enter:
 
 export async function killRun(id: number, force = false): Promise<RunRow> {
   const run = getRun(id);
+  if (run.status === "queued") {
+    // Never started: just take it out of the queue.
+    db.prepare("UPDATE runs SET status = 'killed', ended_at = ?, error = 'cancelled while queued' WHERE id = ? AND status = 'queued'").run(now(), id);
+    return getRun(id);
+  }
   if (run.status !== "running" || !run.pid) throw new ApiError(409, `run ${id} is not running`);
   const entry = live.get(id);
   if (entry) entry.killedBy = "user";
@@ -396,6 +425,7 @@ export async function restartRun(id: number): Promise<RunRow> {
     typeName: run.type_name, cwd: run.cwd, prompt: run.prompt, extraArgs,
     env: JSON.parse(run.env || "{}"), trigger: "restart", workflow: wf, timeoutSec: meta.timeout_sec ?? 0,
     interactive: Boolean(meta.interactive), resumeSession: meta.resume_session, stopWhenIdle: Boolean(meta.stop_when_idle),
+    meta: { group: meta.group, parent_run: meta.parent_run },   // a restarted worker stays in its swarm
   });
 }
 

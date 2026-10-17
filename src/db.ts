@@ -48,7 +48,7 @@ CREATE TABLE IF NOT EXISTS runs (
   prompt        TEXT NOT NULL DEFAULT '',
   env           TEXT NOT NULL DEFAULT '{}',
   trigger       TEXT NOT NULL,              -- manual | schedule | restart | api
-  status        TEXT NOT NULL,              -- running | success | failed | killed | timeout | lost | error
+  status        TEXT NOT NULL,              -- queued | running | success | failed | killed | timeout | lost | error
   pid           INTEGER,
   started_at    INTEGER NOT NULL,
   ended_at      INTEGER,
@@ -127,6 +127,8 @@ if (sessionsUniqueOnIdOnly) {
   `);
 }
 db.exec("UPDATE process_types SET kind = 'agent' WHERE builtin = 1 AND kind = 'app'");
+// Runs started together for one job (a swarm) share meta.group; GET /api/runs?group= and /api/groups read it.
+db.exec("CREATE INDEX IF NOT EXISTS runs_group_idx ON runs(json_extract(meta, '$.group'))");
 
 export const now = () => Date.now();
 
