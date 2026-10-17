@@ -11,12 +11,10 @@ const preference = (process.env.OPEN_TERMINAL ?? process.env.AGENT_CONSOLE_TERMI
 
 export type TerminalResult = { opened: boolean; app: string; error?: string };
 
-const quiet = (cmd: string[]) => Bun.spawn(cmd, { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
-
-async function run(cmd: string[]): Promise<{ code: number; err: string }> {
-  const p = quiet(cmd);
-  const [err, code] = await Promise.all([new Response(p.stderr).text(), p.exited]);
-  return { code, err: err.trim() };
+async function run(cmd: string[], timeout?: number): Promise<{ code: number; out: string; err: string }> {
+  const p = Bun.spawn(cmd, { stdin: "ignore", stdout: "pipe", stderr: "pipe", timeout });
+  const [out, err, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
+  return { code, out: out.trim(), err: err.trim() || (p.signalCode ? `timed out after ${timeout} ms (is macOS asking for permission to control the app?)` : "") };
 }
 
 /** Detached: the emulator must outlive this call (and the console process). */
@@ -57,6 +55,95 @@ end tell`;
     return { opened: false, app: "Terminal", error: r.err };
   }
   return { opened: false, app: want, error: "iTerm is not installed" };
+}
+
+/** A tab in iTerm or Terminal.app, by its terminal device (e.g. /dev/ttys003). */
+export type MacTab = { app: "iTerm" | "Terminal"; tty: string };
+
+// Each script takes the tty as its first argument and never launches the app: it only looks if it is running.
+const FIND_TAB: Record<MacTab["app"], string> = {
+  iTerm: `on run argv
+  if application "iTerm" is not running then return ""
+  tell application "iTerm"
+    repeat with w in windows
+      repeat with t in tabs of w
+        repeat with s in sessions of t
+          if tty of s is item 1 of argv then return "found"
+        end repeat
+      end repeat
+    end repeat
+  end tell
+  return ""
+end run`,
+  Terminal: `on run argv
+  if application "Terminal" is not running then return ""
+  tell application "Terminal"
+    repeat with w in windows
+      repeat with t in tabs of w
+        if tty of t is item 1 of argv then return "found"
+      end repeat
+    end repeat
+  end tell
+  return ""
+end run`,
+};
+
+// Type argv[2] into the tab, then Enter. iTerm writes the text as typed and presses Enter a beat later, so a slash
+// command's menu can catch up first; Terminal.app's `do script` can only send the text and Enter together.
+const TYPE_INTO_TAB: Record<MacTab["app"], string> = {
+  iTerm: `on run argv
+  tell application "iTerm"
+    repeat with w in windows
+      repeat with t in tabs of w
+        repeat with s in sessions of t
+          if tty of s is item 1 of argv then
+            tell s to write text (item 2 of argv) newline no
+            delay 0.3
+            tell s to write text "" newline yes
+            return "ok"
+          end if
+        end repeat
+      end repeat
+    end repeat
+  end tell
+  error "no iTerm tab on " & item 1 of argv
+end run`,
+  Terminal: `on run argv
+  tell application "Terminal"
+    repeat with w in windows
+      repeat with t in tabs of w
+        if tty of t is item 1 of argv then
+          do script (item 2 of argv) in t
+          return "ok"
+        end if
+      end repeat
+    end repeat
+  end tell
+  error "no Terminal tab on " & item 1 of argv
+end run`,
+};
+
+/**
+ * macOS: the iTerm or Terminal.app tab that `pid` runs in, if it is the program in front there (not a background
+ * job, where typing would go to the shell instead). null on other platforms, or when it isn't in either app.
+ */
+export async function macTabOf(pid: number): Promise<MacTab | null> {
+  if (process.platform !== "darwin") return null;
+  const ps = await run(["ps", "-o", "tty=,stat=", "-p", String(pid)], 5000);
+  const [dev, stat] = ps.out.split(/\s+/);
+  if (ps.code !== 0 || !dev || dev === "??" || !stat?.includes("+")) return null;
+  const tty = `/dev/${dev}`;
+  for (const app of ["iTerm", "Terminal"] as const) {
+    const r = await run(["osascript", "-e", FIND_TAB[app], tty], 10_000);
+    if (r.out === "found") return { app, tty };
+  }
+  return null;
+}
+
+/** Type `text` into a tab found by macTabOf, then press Enter. Throws when the app refuses (no automation permission). */
+export async function typeIntoMacTab(tab: MacTab, text: string): Promise<void> {
+  const r = await run(["osascript", "-e", TYPE_INTO_TAB[tab.app], tab.tty, text], 10_000);
+  if (r.code !== 0) throw new Error(`${tab.app}: ${r.err || "osascript failed"}`);
 }
 
 /**
