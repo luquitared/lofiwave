@@ -30,7 +30,12 @@ export async function runWorkflow(wf: WorkflowRow, trigger: string, target: stri
   }
   // Agents run interactively, so a run can be watched and steered from the browser while it works; it closes itself
   // once the agent is done. Without tmux (or for an app type, or on a target) it runs headless as before.
-  const interactive = !target && getType(wf.type_name).kind === "agent" && Boolean(tmuxPath());
+  // On an e2b target the agent can have a live terminal in its sandbox too, when the target ends idle runs by itself
+  // (idle_sec with idle_action "stop"); otherwise a finished agent would sit there until the run times out.
+  const t = target ? db.query<{ kind: string; config: string }, [string]>("SELECT kind, config FROM targets WHERE name = ?").get(target) : null;
+  const tc = t?.kind === "e2b" ? JSON.parse(t.config || "{}") : null;
+  const isAgent = getType(wf.type_name).kind === "agent";
+  const interactive = isAgent && (target ? Boolean(tc && tc.idle_sec > 0 && tc.idle_action === "stop") : Boolean(tmuxPath()));
   return startRun({
     typeName: wf.type_name,
     cwd: wf.cwd,
@@ -41,7 +46,7 @@ export async function runWorkflow(wf: WorkflowRow, trigger: string, target: stri
     workflow: wf,
     timeoutSec: wf.timeout_sec,
     interactive,
-    stopWhenIdle: interactive,
+    stopWhenIdle: interactive && !target,
     // No window popping up on the machine for a cron run; it is in the browser's session list.
     terminal: "none",
     target: target || undefined,

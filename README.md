@@ -7,7 +7,7 @@ A small web console for the coding agents running on your machine: Claude Code, 
 - **See** every agent process on the machine, including ones you started in a terminal: its session name, status (working / idle), model, and its claude.ai link.
 - **Start, stop and restart** agents in a chosen folder. Every agent session is **interactive**: the real TUI in a tmux session you can watch and type into from the browser, and with Claude Code's Remote Control on, in the Claude app too. (Headless `claude -p` stays available through the API.)
 - **Turn on Remote Control** for a Claude Code session that is already running.
-- **Run targets**: run a workflow on Google Cloud Run instead of this machine.
+- **Run targets**: run a workflow on Google Cloud Run instead of this machine, or give each run its own [E2B](https://e2b.dev) sandbox VM whose live terminal you still open and type into from the browser.
 - **Workflows**: a saved agent launch you run by hand or on a cron schedule. Each run is a live session you can watch and step into; it closes itself when the agent is done. Every run is kept: status, duration, full logs.
 - A REST API for all of it, documented at `/api/docs`, so other agents can drive it too. The *Connect* page gives you the URL to hand an agent and makes API keys for it.
 
@@ -107,7 +107,7 @@ Environment variables, or `KEY=VALUE` lines in `.env`:
 
 ```
 lofiwave/
-├── src/       server.ts (HTTP + API), db.ts, runner.ts, targets.ts, scheduler.ts, cron.ts, procs.ts, agents.ts, terminal.ts
+├── src/       server.ts (HTTP + API), db.ts, runner.ts, targets.ts, e2b.ts, connect.ts, vtscreen.ts, scheduler.ts, cron.ts, procs.ts, agents.ts, terminal.ts
 ├── public/    the single-page UI
 ├── scripts/   start.sh, service installers, Claude Code session hook, Tailscale helpers
 └── data/      database, logs, token (created on first start, git-ignored)
@@ -155,6 +155,17 @@ A workflow with an agent type runs **interactive** (when tmux is installed), so 
 **The conversation comes back.** A claude run on a target starts with a session id the console picks (`--session-id`). When claude exits (including on a cancel or timeout: the container passes the SIGTERM on and waits for it), a small wrapper prints the transcript to stdout, gzipped and base64'd in numbered chunks with a checksum (lines starting `@@lofiwave-transcript`, kept out of the run log). The console puts it back together and files it where claude looks on this machine: `~/.claude/projects/<folder>/<session>.jsonl`, where the folder is the workflow's `cwd` (here, not in the container; the home folder if it has none). The run then has the session like a local run does: **Transcript**, and **Resume here**, which continues the conversation in that folder. The files the agent changed stay in the container, though: have it commit and push to a branch, and check that branch out here before resuming. The image needs `sh`, `find`, `base64`, `fold` and `awk` (any Debian/Alpine base has them; `gzip` and `sha256sum` are used when present).
 
 The image needs the agent on `PATH`; `docker/claude/Dockerfile` builds one for Claude Code (`gcloud builds submit docker/claude --tag <region>-docker.pkg.dev/<project>/<repo>/claude:latest`, no local Docker needed). With a `repo` on the target it also needs `git`: the repo is cloned into the working dir, `/workspace` by default, before the agent starts. The agent gets no credentials from this machine: pass them as secrets, e.g. `ANTHROPIC_API_KEY=anthropic-api-key`, and give the job's service account `roles/secretmanager.secretAccessor` on them. Runs on a target are headless, so nobody answers permission prompts: give claude `--permission-mode acceptEdits` (or `--dangerously-skip-permissions`) as extra args. A workflow keeps its own target; *Run now* takes a different one for a single run (`POST /api/workflows/:id/run {"target": "..."}`).
+
+**E2B target** – an `e2b` target runs each run in its own [E2B](https://e2b.dev) sandbox (a Firecracker microVM), and, unlike Cloud Run, keeps the live terminal: an interactive run's agent runs in a PTY in the sandbox, and *Sessions* shows it as a real terminal just like a tmux one (several viewers, colours, resize, Ctrl-keys), plus the simple view (`/screen` and `/keys` work too). Create one with the API (there is no form for it yet), with `E2B_API_KEY` in lofiwave's environment:
+
+```bash
+curl -X POST localhost:7770/api/targets -H 'content-type: application/json' -d '{"name": "sandbox", "kind": "e2b",
+  "config": {"permission_mode": "bypassPermissions", "idle_sec": 600, "idle_action": "pause"}}'
+curl -X POST localhost:7770/api/processes -H 'content-type: application/json' -d '{"type": "claude", "target": "sandbox",
+  "prompt": "summarize in/brief.md into out/summary.md", "input_dir": "/path/to/inputs"}'
+```
+
+Each run: creates a sandbox from the target's `template` (E2B's stock `claude` by default) → clones `repo` into `workdir` (`/home/user/work`) if set → uploads `input_dir` (a folder here) to `<workdir>/in/` → pre-accepts claude's onboarding, folder-trust, API-key and bypass-permissions prompts → starts the agent (a PTY for interactive runs, plain stdout for headless) with `--permission-mode` from the target (else `CLAUDE_PERMISSION_MODE`) → when it exits, copies its transcript back (Transcript and **Resume here** work as for a local run) and `<workdir>/out/` to `DATA_DIR/runs/<id>/out/` (`meta.e2b.out_dir`) → kills the sandbox (`on_exit: "pause"` keeps it paused instead). Stopping the run sends the agent SIGTERM first, so the transcript still comes back. The sandbox id is in `meta.e2b.sandbox_id`; if the console restarts, it reconnects to the sandbox and the agent's PTY (by its tag, `lofiwave-<run>`). The agent gets `ANTHROPIC_API_KEY` and `CLAUDE_CODE_OAUTH_TOKEN` from this machine's environment when set (`env_from` changes which), plus the target's `env` and the run's env; never lofiwave's own token. Remote Control (`--remote-control`) is dropped unless an OAuth token goes in. The sandbox lives `timeout_sec` (default 3600; E2B allows 1h on Hobby, 24h on Pro), renewed every minute while the run is going. With `idle_sec`, a run with no output or input for that long (and no terminal open) is paused (`idle_action: "pause"`: memory and disk kept; opening its terminal or sending keys resumes it where it was) or ended (`"stop"`). A workflow on an e2b target runs interactive only when the target has `idle_sec` with `idle_action: "stop"`, so a finished agent doesn't sit open; otherwise headless. CPU and memory come from the template. See [docs/sandboxes.md](docs/sandboxes.md) for Cloud Run vs E2B.
 
 Cron: 5 fields `min hour day-of-month month day-of-week`, with `*`, lists, ranges, steps and month/day names, plus `@hourly @daily @weekly @monthly @yearly`.
 
@@ -230,14 +241,15 @@ Restarting is done through the run: `POST /api/runs/:id/restart`.
 
 | | |
 |---|---|
-| `GET /api/targets` | `{kinds, gcloud, targets: [{id, name, kind, config, workflows}]}` (`gcloud` = its path, or null if not installed) |
+| `GET /api/targets` | `{kinds, gcloud, e2b_key, targets: [{id, name, kind, config, workflows}]}` (`gcloud` = its path, or null if not installed; `e2b_key` = whether `E2B_API_KEY` is set) |
 | `GET /api/targets/:name` | one |
 | `POST /api/targets` | create: `{name, kind: "cloud-run", config: {region, image, project?, service_account?, repo?, workdir?, cpu?: "2", memory?: "4Gi", env?, secrets?: {ENV: "secret-name[:version]"}}}` → 201 |
+| `POST /api/targets` (e2b) | `{name, kind: "e2b", config: {template?: "claude", api_key_env?: "E2B_API_KEY", workdir?: "/home/user/work", repo?, env?, env_from?: {SANDBOX_VAR: "LOCAL_VAR"}, permission_mode?, timeout_sec?: 3600, idle_sec?: 0, idle_action?: "pause"\|"stop", on_exit?: "kill"\|"pause"}}` → 201 |
 | `PUT /api/targets/:name` | `{config}`: any subset of the fields above |
 | `DELETE /api/targets/:name` | delete (refused while a workflow uses it) |
-| `POST /api/targets/:name/check` | is it usable from here: `{ok, account, project, error?}` (gcloud installed and logged in, Cloud Run reachable in the region) |
+| `POST /api/targets/:name/check` | is it usable from here: `{ok, account, project, error?}` (gcloud installed and logged in, Cloud Run reachable in the region); for e2b `{ok, running, error?}` (the key works; how many sandboxes it has running) |
 
-`POST /api/processes` takes `target` too. A run on a target has `meta.target` and, once started, `meta.cloud_run: {job, execution, region, project, console_url}`.
+`POST /api/processes` takes `target` too (and, for an e2b target, `input_dir`; agents start interactive there). A run on a target has `meta.target` and, once started, `meta.cloud_run: {job, execution, region, project, console_url}` or `meta.e2b: {tag, sandbox_id, pid, paused?, out_dir?, out_files?}`.
 
 ### Runs
 

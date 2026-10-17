@@ -389,11 +389,13 @@ route("POST", "/api/processes", async (req) => {
     env: strMap(b.env, "env"),
     timeoutSec: int(b.timeout_sec, "timeout_sec", 0),
     // Agents start interactive unless the caller asks for headless; apps stay headless unless asked.
-    interactive: bool(b.interactive, !b.target && getType(typeName).kind === "agent" && Boolean(tmuxPath())),
+    // On an e2b target an agent gets a live terminal in its sandbox, so it starts interactive there too.
+    interactive: bool(b.interactive, getType(typeName).kind === "agent" && (b.target ? targetOf(str(b.target, "target").trim()).kind === "e2b" : Boolean(tmuxPath()))),
     stopWhenIdle: bool(b.stop_when_idle, false),
     terminal: str(b.terminal, "terminal"),
     trigger: "manual",
     target: str(b.target, "target").trim() || undefined,
+    inputDir: str(b.input_dir, "input_dir").trim() || undefined,
   });
   return json(runOut(run), 201);
 });
@@ -532,7 +534,7 @@ function targetOut(t: TargetRow) {
   return { ...hydrate(t), workflows: used };
 }
 route("GET", "/api/targets", () => json({
-  kinds: TARGET_KINDS, gcloud: gcloudPath(),
+  kinds: TARGET_KINDS, gcloud: gcloudPath(), e2b_key: Boolean(process.env.E2B_API_KEY?.trim()),
   targets: db.query<TargetRow, []>("SELECT * FROM targets ORDER BY name").all().map(targetOut),
 }));
 route("GET", "/api/targets/:name", (_r, p) => json(targetOut(targetOf(p.name))));

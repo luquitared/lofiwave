@@ -110,7 +110,7 @@
   <section id="tab-settings" class="tab">
     <div class="card">
       <div class="card-head"><h2>Run targets</h2><button class="primary small" id="target-new-btn">+ New target</button></div>
-      <p class="muted">Where a workflow can run besides this machine. A Cloud Run target runs the agent headless as a Cloud Run Job, using this machine's <code>gcloud</code> login; its output lands in the run's log.</p>
+      <p class="muted">Where a workflow can run besides this machine. A Cloud Run target runs the agent headless as a Cloud Run Job, using this machine's <code>gcloud</code> login; its output lands in the run's log. An E2B target gives each run its own sandbox VM, with a live terminal you can open from Sessions (create one with <code>POST /api/targets</code>, kind <code>e2b</code>; see the API docs).</p>
       <table id="target-table">
         <thead><tr><th>Name</th><th>Where</th><th>Image</th><th>Used by</th><th></th></tr></thead>
         <tbody></tbody>
