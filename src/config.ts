@@ -55,6 +55,12 @@ export const config = {
    * watching its terminal in the browser. Anything typed into it makes it busy again and restarts the wait.
    */
   idleStopSec: Number(process.env.IDLE_STOP_SEC ?? 120),
+  /**
+   * Every other interactive claude run (started from the UI or the API, resumed, or picked up again after a restart)
+   * ends once it has been idle this long with nobody watching it, so finished agents don't sit holding memory for
+   * days. 0 turns it off; a run can opt out with `stop_when_idle: false` or set its own `idle_stop_sec`.
+   */
+  agentIdleStopSec: Number(process.env.AGENT_IDLE_STOP_SEC ?? 1800),
   /** How much of the end of a run's log is copied into runs.output when it finishes. */
   outputTailBytes: Number(process.env.OUTPUT_TAIL_BYTES ?? 64 * 1024),
 };

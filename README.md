@@ -58,6 +58,7 @@ The console starts agents and kills processes, so treat its token like a passwor
 - **Local only by default.** It listens on `127.0.0.1`. Set `HOST` to make it reachable from other machines (see *Remote access*).
 - **Always a token.** Every API call needs it, on localhost too: any web page open in a browser on this machine can send requests to `127.0.0.1`. It comes from `AUTH_TOKEN`, or is generated into `data/auth-token` (mode 600).
 - **Agents ask before acting.** The built-in `claude` type keeps Claude Code's permission prompts. In an interactive run you answer them in the browser or the Claude app; a headless `claude -p` run can't, so tools that need permission are refused. To let runs go unattended, add `--permission-mode acceptEdits` (or `--dangerously-skip-permissions`, if you understand what that allows) to the type's args under *Advanced → Types*, or per run as extra args.
+- **Folders you start claude in are trusted.** Claude Code asks "Is this a project you created or one you trust?" the first time it runs in a folder, even with `--dangerously-skip-permissions`. The console answers yes for you: it marks the run's folder trusted in `~/.claude.json` (`projects[<folder>].hasTrustDialogAccepted`, as the dialog itself does; never for `/` or your home folder) and accepts the dialog on screen if it shows anyway. Pass `trust: false` to `POST /api/processes` to leave the dialog to a person.
 - `data/` (database, run logs, which include agent output) is created owner-only.
 - Agents started by the console get `AGENT_CONSOLE_URL` and `AGENT_CONSOLE_TOKEN` in their environment (that's how the session hook reports back), so an agent the console started can use the console's API.
 
@@ -100,7 +101,8 @@ Environment variables, or `KEY=VALUE` lines in `.env`:
 | `DATA_DIR` | `./data` | SQLite database, run logs, generated token |
 | `CLAUDE_PERMISSION_MODE` | *(unset)* | Permission mode every `claude` run starts in — new, restarted and resumed, headless or interactive: adds `--permission-mode <mode>` (`acceptEdits`, `bypassPermissions`, …) unless the run's args already choose one. Unset: Claude Code's own default (prompts on). |
 | `SCHEDULER_INTERVAL_MS` | `15000` | How often scheduled workflows are checked |
-| `IDLE_STOP_SEC` | `120` | How long a workflow's claude session stays open once the agent is done and idle (and nobody has its terminal open) |
+| `IDLE_STOP_SEC` | `120` | How long a workflow's claude session (or one started with `stop_when_idle: true`) stays open once the agent is done and idle, with nobody watching it |
+| `AGENT_IDLE_STOP_SEC` | `1800` | The same for every other interactive claude run (started from the UI or the API, resumed, or picked up again after a restart), so finished agents don't hold memory for days. `0` turns it off; a run opts out with `stop_when_idle: false` or sets its own `idle_stop_sec`. |
 | `OUTPUT_TAIL_BYTES` | `65536` | How much of the end of each log is copied into the run record (`output`) |
 | `OPEN_TERMINAL` | `auto` | Desktop terminal window opened on an interactive run. `auto` = iTerm then Terminal.app on macOS, the first of wezterm/kitty/alacritty/ghostty/foot/gnome-terminal/konsole/tilix/xfce4-terminal/mate-terminal/terminator/urxvt/xterm found on Linux; `none` to keep runs headless; or name one (`iterm`, `terminal`, `kitty`, …). Ignored on a headless machine (no `DISPLAY`/`WAYLAND_DISPLAY`). |
 
@@ -143,7 +145,7 @@ curl -H "authorization: Bearer $TOKEN" -X POST localhost:7770/api/process-types 
 
 **Workflow** – a saved launch: type + folder + prompt + extra args + env, optionally with a cron `schedule`, a `timeout_sec`, and `allow_overlap` (default off: a scheduled tick is skipped and recorded as an `error` run if the previous one is still running). Times use the server's local timezone.
 
-A workflow with an agent type runs **interactive** (when tmux is installed), so you can watch it in *Sessions*, interrupt it or send it a message while it works. It doesn't open a desktop terminal window. A claude run **closes itself** once the agent has finished and stayed idle for `IDLE_STOP_SEC` (default 120s) with nobody viewing its terminal in the browser; it is recorded as `success`, with its last screen saved in the log. It is never closed while it waits on a permission prompt. Codex reports no idle state, so a Codex workflow run stays open until you stop it or its `timeout_sec` fires.
+A workflow with an agent type runs **interactive** (when tmux is installed), so you can watch it in *Sessions*, interrupt it or send it a message while it works. It doesn't open a desktop terminal window. A claude run **closes itself** once the agent has finished and stayed idle for `IDLE_STOP_SEC` (default 120s) with nobody watching it (a browser terminal, the simple view, a desktop window or `tmux attach`; the wait starts over while someone is); it is recorded as `success`, with its last screen saved in the log. Other interactive claude runs do the same after `AGENT_IDLE_STOP_SEC` (default 30 minutes) unless started with `stop_when_idle: false`. It is never closed while it waits on a permission prompt. Codex reports no idle state, so a Codex workflow run stays open until you stop it or its `timeout_sec` fires.
 
 Cron: 5 fields `min hour day-of-month month day-of-week`, with `*`, lists, ranges, steps and month/day names, plus `@hourly @daily @weekly @monthly @yearly`.
 
@@ -197,7 +199,7 @@ API keys are named and revocable; make them on the *Connect* page. Runs started 
 | | |
 |---|---|
 | `GET /api/processes?type=&kind=` | running processes matching any type (filter by type name or kind): `{pid, ppid, user, cmd, cwd, elapsedSec, rssKb, cpu, type, managed, child, run_id, workflow_name, session}` – `session` is `{session_id, agent, title, name, status, model, web_url, resume_cmd, ...}` or null |
-| `POST /api/processes` | start one: `{type, cwd?, prompt?, extra_args?, env?, timeout_sec?, interactive?, stop_when_idle?, terminal?}` → 201 with the run record. `cwd` falls back to the type's `default_cwd`. `interactive` (default: true for agent types when tmux is installed) starts it in a tmux session that stays open (see Concepts); `stop_when_idle` closes a claude session once it is done, like a workflow run. |
+| `POST /api/processes` | start one: `{type, cwd?, prompt?, extra_args?, env?, timeout_sec?, interactive?, stop_when_idle?, idle_stop_sec?, trust?, terminal?}` → 201 with the run record. `cwd` falls back to the type's `default_cwd`. `interactive` (default: true for agent types when tmux is installed) starts it in a tmux session that stays open (see Concepts). An interactive claude run ends once it has been idle, with nobody watching, for `AGENT_IDLE_STOP_SEC` (default 1800); `stop_when_idle: true` makes that `IDLE_STOP_SEC` (120, like a workflow run), `false` keeps it open, and `idle_stop_sec` sets the seconds (0 = never). `trust` (default true) marks the folder trusted for claude and answers its trust dialog (see *Security*). A switch in `extra_args` that the type's template already passes (`--remote-control`) is not passed twice. |
 | `POST /api/processes/preview` | same body; returns the `{command, args}` that would be executed, without running |
 | `DELETE /api/processes/:pid?force=1` | SIGTERM (or SIGKILL with `force`) the process **tree**. Works on unmanaged processes too. If the pid belongs to a run, the run is marked `killed`. |
 | `POST /api/processes/:pid/remote-control` | Turn on Remote Control for a claude session that is already running, so it shows up in the Claude app. If it is in a tmux pane (an interactive run, or any claude started inside tmux) the console clears its input box (Ctrl+Y brings a draft back) and types `/remote-control`; it refuses while the session is working. → `{status: "enabled"\|"pending"\|"already", web_url}`. Anywhere else there is nothing to type into: `{replace: true, terminal?}` stops the process and reopens the same conversation here in tmux with the type's `resume_args` → 201 `{status: "replaced", run}`; without `replace` it answers 409. |
@@ -225,11 +227,17 @@ Restarting is done through the run: `POST /api/runs/:id/restart`.
 | `GET /api/runs/:id/log?raw=1` | the whole log as `text/plain` |
 | `POST /api/runs/:id/kill?force=1` | stop (tree) → updated run |
 | `POST /api/runs/:id/restart` | start a new run with the same parameters (kills the old one first if it is running) → 201 |
-| `GET /api/runs/:id/screen?lines=200&cols=` | interactive runs: `{text, alive, cols}` – the terminal's last `lines` lines (scrollback + screen). `cols` (40–220) resizes the tmux window to the viewer's width first, so the TUI reflows for a phone. |
-| `POST /api/runs/:id/keys` | interactive runs: type into the terminal: `{text?, keys?: ["Down", "Escape", "C-c", ...], enter?: true}` (`keys` are tmux key names, sent after `text`) |
+| `GET /api/runs/:id/wait?until=idle&timeout=60&after=` | long-poll: answers once the run is `idle` (its turn is over, it waits on a prompt, or it ended) or `done` (ended), or after `timeout` seconds (max 600). `after` (Unix ms, e.g. a message's `sent_at`): only an idle that began then or later counts. → the run (without `output`) plus `{reached, timed_out, waited_ms}` |
+| `GET /api/runs/:id/screen?lines=200&cols=` | interactive runs: `{text, alive, cols, error?}` – the terminal's last `lines` lines (scrollback + screen). `cols` (40–220) resizes the tmux window to the viewer's width first, so the TUI reflows for a phone. `error` is set when tmux couldn't read the screen this time (an empty `text` then means nothing). Reading the screen counts as watching the run (it won't be closed for idling). |
+| `POST /api/runs/:id/message` | interactive runs: send the agent a message and check it arrived: `{text}` → `{delivered, queued, attempts, sent_at, run}`. Long or multi-line text goes in as one bracketed paste; Enter is pressed once the text has landed, and again (up to 3 times) while claude's input box still holds it. `delivered` is true once claude's input box has emptied, false if it never did, null for a TUI whose input box can't be read (codex). `queued`: the agent was mid-turn and reads it when the turn ends. 409 while it waits on a prompt (permission, trust): answer that with `keys`. |
+| `POST /api/runs/:id/keys` | interactive runs: type into the terminal: `{text?, keys?: ["Down", "Escape", "C-c", ...], enter?: true}` (`keys` are tmux key names, sent after `text`). `text` with `enter` and no `keys` is delivered like `message` (unless the agent waits on a prompt) and the answer includes `delivered` and `attempts`. |
 | `DELETE /api/runs/:id` | delete record + log (must not be running) |
 
-Run record fields: `id, workflow_id, workflow_name, type_name, cwd, command, args, prompt, env, trigger (manual|schedule|restart), status, pid, started_at, ended_at, exit_code, log_path, output, error, meta {timeout_sec, orphan, interactive, tmux}`. `GET /api/runs/:id` also includes `sessions` (below).
+Run record fields: `id, workflow_id, workflow_name, type_name, type (the same as type_name), cwd, command, args, prompt, env, trigger (manual|schedule|restart), status, pid, started_at, ended_at, exit_code, log_path, output, error, live, duration_ms, activity, activity_since, waiting_for?, meta {timeout_sec, orphan, interactive, tmux, stop_when_idle, idle_stop_sec, trust, ...}`. `GET /api/runs/:id` also includes `sessions` (below).
+
+`activity` is what the agent is doing now: `working` (on a turn), `idle` (its turn is over), `waiting_input` (a permission prompt or question, or the folder trust dialog; `waiting_for` says which when known) or `done` (the run ended); `activity_since` is when that began. For claude it comes from Claude Code's own session registry; for other TUIs from the screen (`esc to interrupt` means working); a headless run is `working` until it ends.
+
+List shapes: `GET /api/runs` is paginated, so its list is under `runs`; the other list endpoints (`/processes`, `/workflows`, `/process-types`, `/runs/:id/sessions`) return a bare array.
 
 ### Sessions (linking a run to its Claude Code transcript)
 
@@ -282,7 +290,7 @@ curl -H "authorization: Bearer $TOKEN" -X DELETE localhost:7770/api/processes/41
 
 ## Notes
 
-- Processes launched by the console keep running if the console itself restarts; on startup it re-attaches to those that are still alive (marked *orphan*; log capture is not possible for them) and marks vanished ones `lost`.
+- Processes launched by the console keep running if the console itself restarts. On startup it follows interactive runs (tmux) again: their activity, idle stop and final status (from the pane's exit code) work as before, and their log gets the final screen. Headless runs still alive are marked *orphan* (log capture is not possible for them) and are marked `lost` once they're gone, like any run whose process vanished.
 - Agents are launched with the console's environment plus the type's and workflow's `env`, and `AGENT_CONSOLE_RUN_ID` set to the run id.
 - Process discovery uses `ps` on Linux/macOS and `Get-CimInstance Win32_Process` on Windows; working directories come from `/proc` (Linux) or `lsof` (macOS).
 

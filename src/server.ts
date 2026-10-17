@@ -4,7 +4,7 @@ import { hostname, homedir } from "node:os";
 import { config } from "./config";
 import { db, now, hydrate, type ProcessTypeRow, type WorkflowRow, type RunRow, type SessionRow, type ApiKeyRow } from "./db";
 import { listOsProcesses, cwdOf, killTree, type OsProcess } from "./procs";
-import { ApiError, startRun, killRun, restartRun, getRun, getType, readLogFrom, isLive, buildCommand, screenOf, historyOf, sendKeys, tmuxPath, recordSession, resumeSession, resumeAgentSession, enableRemoteControl } from "./runner";
+import { ApiError, startRun, killRun, restartRun, getRun, getType, readLogFrom, isLive, buildCommand, screenOf, historyOf, sendKeys, sendMessage, activityOf, waitForRun, tmuxPath, recordSession, resumeSession, resumeAgentSession, enableRemoteControl } from "./runner";
 import { describeSession, sessionForPid, locateSession, transcriptMessages, type SessionInfo } from "./agents";
 import { startScheduler, refreshNextRun, runWorkflow, computeNext } from "./scheduler";
 import { validateCron } from "./cron";
@@ -97,7 +97,8 @@ function workflowOut(w: WorkflowRow) {
 
 function runOut(r: RunRow, { withOutput = true } = {}) {
   const h = hydrate(r);
-  const out: any = { ...h, duration_ms: (r.ended_at ?? now()) - r.started_at, live: isLive(r.id) };
+  // `type`: the same as type_name, under the name the process list uses.
+  const out: any = { ...h, type: r.type_name, duration_ms: (r.ended_at ?? now()) - r.started_at, live: isLive(r.id), ...activityOf(r) };
   if (!withOutput) delete out.output;
   else out.sessions = sessionsOf(r.id);
   return out;
@@ -389,7 +390,10 @@ route("POST", "/api/processes", async (req) => {
     timeoutSec: int(b.timeout_sec, "timeout_sec", 0),
     // Agents start interactive unless the caller asks for headless; apps stay headless unless asked.
     interactive: bool(b.interactive, getType(typeName).kind === "agent" && Boolean(tmuxPath())),
-    stopWhenIdle: bool(b.stop_when_idle, false),
+    // Unset: the default for interactive claude runs (AGENT_IDLE_STOP_SEC); false: never; true: as soon as a workflow run would.
+    stopWhenIdle: b.stop_when_idle === undefined || b.stop_when_idle === null ? undefined : bool(b.stop_when_idle, false),
+    idleStopSec: b.idle_stop_sec === undefined || b.idle_stop_sec === null ? undefined : int(b.idle_stop_sec, "idle_stop_sec", 0),
+    trust: bool(b.trust, true),
     terminal: str(b.terminal, "terminal"),
     trigger: "manual",
   });
@@ -556,8 +560,25 @@ route("GET", "/api/runs/:id/screen", async (_r, p, url) => json(await screenOf(g
 route("GET", "/api/runs/:id/history", async (_r, p, url) => json(await historyOf(getRun(Number(p.id)), int(url.searchParams.get("lines"), "lines", 5000) || 5000)));
 route("POST", "/api/runs/:id/keys", async (req, p) => {
   const b = await body(req);
-  await sendKeys(getRun(Number(p.id)), str(b.text, "text"), strArray(b.keys, "keys"), bool(b.enter, true));
-  return json({ ok: true });
+  const r = await sendKeys(getRun(Number(p.id)), str(b.text, "text"), strArray(b.keys, "keys"), bool(b.enter, true));
+  return json({ ok: true, ...r });
+});
+// A message to the agent, checked: {delivered: true|false|null (can't tell for this TUI), queued (it was mid-turn), attempts, sent_at}.
+route("POST", "/api/runs/:id/message", async (req, p) => {
+  const b = await body(req);
+  const run = getRun(Number(p.id));
+  const r = await sendMessage(run, str(b.text, "text", { required: true }));
+  return json({ ...r, run: runOut(getRun(run.id), { withOutput: false }) });
+});
+// Long-poll until the run is idle (turn over, waiting on a prompt, or ended) or done (ended), or `timeout` seconds pass (max 600).
+route("GET", "/api/runs/:id/wait", async (req, p, url) => {
+  const until = url.searchParams.get("until") || "idle";
+  if (until !== "idle" && until !== "done") throw new ApiError(400, `until must be "idle" or "done"`);
+  const timeout = Math.min(int(url.searchParams.get("timeout"), "timeout", 60), 600);
+  const after = int(url.searchParams.get("after"), "after", 0);
+  const started = now();
+  const { run, reached } = await waitForRun(getRun(Number(p.id)).id, until, timeout * 1000, after, req.signal);
+  return json({ ...runOut(run, { withOutput: false }), reached, timed_out: !reached, waited_ms: now() - started });
 });
 
 // ---- sessions (reported by the agent's own hook; see scripts/claude-session-hook.sh)
@@ -671,7 +692,10 @@ const server = Bun.serve<TtyData>({
   port: config.port,
   async fetch(req, srv) {
     peers.set(req, srv.requestIP(req)?.address ?? "");
-    const tty = new URL(req.url).pathname.match(/^\/api\/runs\/(\d+)\/tty$/);
+    const path = new URL(req.url).pathname;
+    // A long-poll sends nothing until it answers: don't let the idle timeout (10s by default) cut it off.
+    if (/^\/api\/runs\/\d+\/wait\/?$/.test(path)) srv.timeout(req, 0);
+    const tty = path.match(/^\/api\/runs\/(\d+)\/tty$/);
     if (tty && req.headers.get("upgrade")?.toLowerCase() === "websocket") {
       const r = upgradeTty(req, srv, Number(tty[1]));
       return r ? harden(r) : undefined;

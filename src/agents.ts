@@ -8,9 +8,9 @@
  *
  * Everything here is best-effort and cached; a missing file just means "unknown".
  */
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync, writeFileSync, renameSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 
 const HOME = homedir();
 const CLAUDE_SESSIONS = join(HOME, ".claude", "sessions");
@@ -19,7 +19,8 @@ const CODEX_SESSIONS = join(HOME, ".codex", "sessions");
 
 export type ClaudeRegistryEntry = {
   pid: number; sessionId: string; cwd: string; name: string; nameSource?: string; kind?: string;
-  status?: string; bridgeSessionId?: string; tmux?: string; startedAt?: number;
+  /** idle | busy | waiting (on a permission prompt or a question; `waitingFor` says which), since `statusUpdatedAt`. */
+  status?: string; statusUpdatedAt?: number; waitingFor?: string; bridgeSessionId?: string; tmux?: string; startedAt?: number;
 };
 
 /** Enriched view of a session, whatever the agent. */
@@ -73,6 +74,42 @@ function pidAlive(pid: number): boolean {
 
 export const claudeWebUrl = (bridgeSessionId: string | undefined | null) =>
   bridgeSessionId ? `https://claude.ai/code/${bridgeSessionId.replace(/^cse_/, "session_")}` : "";
+
+// ---------------------------------------------------------------- claude: folder trust
+
+/** Claude Code's global config, where it remembers trusted folders (`projects[<path>].hasTrustDialogAccepted`). */
+const claudeConfigPath = () => join(process.env.CLAUDE_CONFIG_DIR || HOME, ".claude.json");
+
+/**
+ * Mark a folder trusted the way Claude Code's own trust dialog does, so a run started there doesn't stop at "Is this a
+ * project you created or one you trust?" (it asks even with --dangerously-skip-permissions). Claude takes trust from
+ * the folder or any parent, so / and the home directory are never trusted this way. "failed" (no config yet,
+ * unreadable) is not fatal: the runner also answers the dialog on screen.
+ */
+export function trustClaudeFolder(cwd: string): "already" | "trusted" | "skipped" | "failed" {
+  const dirs = [cwd];
+  try { const real = realpathSync(cwd); if (real !== cwd) dirs.push(real); } catch { /* the caller checked it exists */ }
+  if (dirs.some((d) => d === "/" || d === HOME)) return "skipped";
+  const file = claudeConfigPath();
+  try {
+    const cfg = JSON.parse(readFileSync(file, "utf8"));
+    const projects = (cfg.projects ??= {});
+    const trusted = (d: string): boolean => {
+      for (let p = d; ; p = dirname(p)) {
+        if (projects[p]?.hasTrustDialogAccepted) return true;
+        if (p === dirname(p)) return false;
+      }
+    };
+    if (dirs.every(trusted)) return "already";
+    // The same defaults claude gives a new project entry.
+    for (const d of dirs) projects[d] = { allowedTools: [], mcpContextUris: [], mcpServers: {}, enabledMcpjsonServers: [], disabledMcpjsonServers: [], ...projects[d], hasTrustDialogAccepted: true };
+    // Claude rewrites this file all the time: swap it in one step so it never reads half of ours.
+    const tmp = `${file}.lofiwave-${process.pid}`;
+    writeFileSync(tmp, JSON.stringify(cfg, null, 2), { mode: statSync(file).mode & 0o777 });
+    renameSync(tmp, file);
+    return "trusted";
+  } catch { return "failed"; }
+}
 
 // ---------------------------------------------------------------- claude: transcripts
 

@@ -5,6 +5,20 @@ Open work, newest first within each status. One heading per issue; close it by m
 
 ## Open
 
+### #4 Driving agents: what's left after message / wait / activity
+*Opened 2026-10-17 · follow-ups to `swarm-1-reliable-control`*
+
+- [ ] Codex: `delivered` is always null (its input box isn't parsed), its `activity` comes from the screen only
+      (`esc to interrupt`), and it never stops for idling. Its trust prompt is answered on screen but not
+      pre-set (`~/.codex/config.toml`, `[projects."<path>"] trust_level = "trusted"`). Untested with a real
+      Codex run.
+- [ ] Pre-trusting rewrites `~/.claude.json` (read, change, rename). A claude process writing it in the same
+      few milliseconds would lose its own change. Claude's own writes have the same race; no lock is shared.
+- [ ] Claude's "How is Claude doing?" survey (it answers to digit keys) showed up mid-test. The message went
+      through that time, but a message starting with a digit could answer the survey instead.
+- [ ] Headless orphans (still alive after a restart) are only polled for their end, so they finish as
+      `lost` with no exit code.
+
 ### #3 Chat view, toggleable with the terminal
 *Opened 2026-10-09 · designed in [`docs/rendered-view.md`](docs/rendered-view.md), nothing built*
 
