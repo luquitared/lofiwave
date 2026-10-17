@@ -11,12 +11,18 @@
  *   {t:"items", upsert: Item[], remove: string[]}
  *   {t:"status", status, waiting_for, read_only}
  *   {t:"requests", requests}   (runs only: the approvals waiting on the browser, see ./approvals.ts; also in hello)
+ *   {t:"todos", todos}         (the session's task list, from ~/.claude/tasks or the last TodoWrite; also in hello)
+ *   {t:"usage", usage}         (runs only: model, context, cost and rate limits from the statusline; also in hello)
+ *   {t:"changes", changes}     (runs only: what each finished turn changed in git, by prompt id; also in hello)
+ * While a run's Claude is writing, its text arrives as an assistant item with `streaming: true` (from the
+ * MessageDisplay hook, see ./live.ts), replaced by the real one once the transcript has it.
  * The client sends nothing on the socket. Older turns come from GET …/chat?before=<ordinal>, big payloads from
  * GET …/chat/blob?ref=, files on disk from GET …/chat/file?path= (see ./files.ts), typing goes through POST /api/runs/:id/chat/send (see ./input.ts), and answers through
  * POST /api/runs/:id/chat/requests/:rid.
  */
 import type { ServerWebSocket } from "bun";
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { db, type RunRow, type SessionRow } from "../db";
 import { ApiError } from "../runner";
@@ -24,6 +30,8 @@ import { claudeRegistry, claudeTranscriptPath } from "../agents";
 import { JsonlTail, readLineAt, type LineLoc } from "./tail";
 import { activeChain, capabilities, extractBlob, ingest, project, type Item, type Rec } from "./claude";
 import { onRequests, requestsFor, settleAnswered } from "./approvals";
+import { dropStream, onLive, streamsFor, usageFor } from "./live";
+import { checkpointedPrompts, turnChanges, type TurnChanges } from "./checkpoints";
 
 /** How much of the conversation a viewer gets on connect; "Load earlier" fetches the rest. */
 const WINDOW_TURNS = 30;
@@ -36,8 +44,8 @@ export type ChatData = { kind: "chat"; key: string; user: string };
 // ---------------------------------------------------------------- sources
 
 type Located = { path: string; sessionId: string; pid: number | null };
-/** readOnly(): nothing can be typed into it (not our run, or its pane is gone). approvals: started with our hook. */
-type Source = { key: string; runId?: number; approvals?: boolean; readOnly(): boolean; locate(): Located };
+/** readOnly(): nothing can be typed into it (not our run, or its pane is gone). approvals, live: started with our hooks. */
+type Source = { key: string; runId?: number; approvals?: boolean; live?: boolean; readOnly(): boolean; locate(): Located };
 
 /** The run's current Claude session: the newest of what the session hook recorded and what the pid file says. */
 function runSource(runId: number): Source {
@@ -51,6 +59,7 @@ function runSource(runId: number): Source {
     key: `run:${runId}`,
     runId,
     approvals: Boolean(meta.approvals),
+    live: Boolean(meta.live),
     readOnly() {
       const cur = db.query<RunRow, [number]>("SELECT * FROM runs WHERE id = ?").get(runId);
       return !(cur?.status === "running" && JSON.parse(cur.meta || "{}").tmux);
@@ -137,6 +146,13 @@ class Transcript {
 // ---------------------------------------------------------------- feeds
 
 type Status = { status: string; waiting_for: string; read_only: boolean };
+export type Todo = { text: string; active: string; status: string };
+
+/** How many of a run's latest turns get their changes sent. */
+const CHANGES_TURNS = 100;
+/** A stream counts as the transcript's message when that message was written no earlier than this before it began. */
+const STREAM_MATCH_SLACK_MS = 3000;
+const norm = (s: string) => s.replace(/\s+/g, " ").trim();
 
 class Feed {
   subs = new Set<ServerWebSocket<ChatData>>();
@@ -148,15 +164,29 @@ class Feed {
   private timer: ReturnType<typeof setInterval>;
   private ticks = 0;
   private unlisten = () => {};
+  private unlistenLive = () => {};
+  todos: Todo[] = [];
+  private todosSig = "[]";
+  changes: Record<string, TurnChanges> = {};
+  private changesBusy = false;
+  private changesAgain = false;
   lastUsed = Date.now();
 
   constructor(readonly source: Source) {
     if (source.runId) this.unlisten = onRequests((runId) => { if (runId === source.runId) { this.linkRequests(); this.sendRequests(); } });
+    if (source.runId && source.live) this.unlistenLive = onLive((runId, what) => {
+      if (runId !== source.runId) return;
+      if (what === "streams") this.broadcastItems();
+      else if (what === "usage") this.send({ t: "usage", usage: usageFor(runId) });
+      else this.refreshChanges();
+    });
     this.relocate();
     this.pollStatus();
+    this.pollTodos();
+    this.refreshChanges();
     this.timer = setInterval(() => {
       this.ticks++;
-      if (this.ticks % 2 === 0) this.relocate();
+      if (this.ticks % 2 === 0) { this.relocate(); this.pollTodos(); }
       this.pollStatus();
       if (!this.subs.size && Date.now() - this.lastUsed > LINGER_MS) this.close();
     }, 1000);
@@ -165,6 +195,7 @@ class Feed {
   close() {
     clearInterval(this.timer);
     this.unlisten();
+    this.unlistenLive();
     this.transcript?.close();
     feeds.delete(this.source.key);
   }
@@ -178,7 +209,7 @@ class Feed {
     if (!changed && this.transcript) return;
     this.transcript?.close();
     this.transcript = next.path ? new Transcript(next.path, () => this.broadcastItems()) : null;
-    this.sent = new Map((this.transcript?.items ?? []).map((i) => [i.id, JSON.stringify(i)]));
+    this.sent = new Map(this.items().map((i) => [i.id, JSON.stringify(i)]));
     for (const ws of this.subs) this.hello(ws);
   }
 
@@ -186,8 +217,81 @@ class Feed {
     const reg = this.located.pid ? claudeRegistry().byPid.get(this.located.pid) : this.located.sessionId ? claudeRegistry().bySession.get(this.located.sessionId) : undefined;
     const next: Status = { status: reg?.status ?? "", waiting_for: (reg as any)?.waitingFor ?? "", read_only: this.source.readOnly() };
     if (next.status === this.status.status && next.waiting_for === this.status.waiting_for && next.read_only === this.status.read_only) return;
+    const settled = this.status.status === "busy" && next.status !== "busy";
     this.status = next;
     this.send({ t: "status", ...next });
+    if (settled && streamsFor(this.source.runId ?? 0).length) setTimeout(() => this.broadcastItems(), 5000);
+  }
+
+  /**
+   * The transcript's items, then what's still streaming. A stream is dropped once the transcript has the message
+   * (its text starts with what streamed), or a while after the turn ended without it showing up.
+   */
+  items(): Item[] {
+    const base = this.transcript?.items ?? [];
+    const runId = this.source.runId;
+    if (!runId || !this.source.live) return base;
+    const list = streamsFor(runId);
+    if (!list.length) return base;
+    const said = base.filter((i) => i.kind === "assistant").slice(-40).map((i) => ({ text: norm((i as any).text), at: i.startedAt ?? 0 }));
+    const last = base.at(-1);
+    const out: Item[] = [];
+    for (const s of list) {
+      const text = s.parts.join("");
+      const n = norm(text);
+      if (!n) continue;
+      const landed = said.some((a) => a.at >= s.at - STREAM_MATCH_SLACK_MS && a.text.startsWith(n));
+      const stale = this.status.status !== "busy" && Date.now() - s.at > 30_000;
+      if (landed || stale) { dropStream(runId, s.messageId); continue; }
+      out.push({ id: `stream:${s.messageId}`, kind: "assistant", text, streaming: true, status: "running", turnId: last?.turnId ?? "start",
+        ordinal: (last?.ordinal ?? -1) + 1 + out.length, native: { agent: "claude", ref: s.messageId }, startedAt: s.at });
+    }
+    return out.length ? [...base, ...out] : base;
+  }
+
+  /** The session's task list: Claude's task files (TaskCreate/TaskUpdate), else the last TodoWrite in the transcript. */
+  private pollTodos() {
+    let list: Todo[] = [];
+    const sid = this.located.sessionId;
+    const dir = sid && /^[A-Za-z0-9_.-]+$/.test(sid) ? join(process.env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude"), "tasks", sid) : "";
+    try {
+      const files = dir ? readdirSync(dir).filter((f) => f.endsWith(".json")) : [];
+      const tasks = files.flatMap((f) => { try { return [JSON.parse(readFileSync(join(dir, f), "utf8"))]; } catch { return []; } })
+        .filter((t) => t && typeof t === "object" && t.status !== "deleted")
+        .sort((a, b) => (Number(a.id) || 0) - (Number(b.id) || 0));
+      list = tasks.map((t) => ({ text: String(t.subject ?? t.description ?? ""), active: String(t.activeForm ?? ""), status: String(t.status ?? "pending") }));
+    } catch { /* no task files for this session */ }
+    if (!list.length && this.transcript) {
+      for (let i = this.transcript.chain.length - 1; i >= 0 && !list.length; i--) {
+        const call = this.transcript.chain[i].blocks?.findLast((b) => b.type === "tool_use" && b.name === "TodoWrite") as any;
+        if (call) list = (call.input?.todos ?? []).map((t: any) => ({ text: String(t.content ?? ""), active: String(t.activeForm ?? ""), status: String(t.status ?? "pending") }));
+      }
+    }
+    const sig = JSON.stringify(list);
+    if (sig === this.todosSig) return;
+    this.todosSig = sig; this.todos = list;
+    this.send({ t: "todos", todos: list });
+  }
+
+  /** What each finished turn changed, from its git checkpoints. Runs one refresh at a time. */
+  private async refreshChanges() {
+    const runId = this.source.runId;
+    if (!runId || !this.source.live) return;
+    if (this.changesBusy) { this.changesAgain = true; return; }
+    this.changesBusy = true;
+    try {
+      let any = false;
+      for (const pid of checkpointedPrompts(runId).slice(-CHANGES_TURNS)) {
+        if (this.changes[pid]) continue;
+        const c = await turnChanges(runId, pid, { finishedOnly: true });
+        if (c) { this.changes[pid] = c; any = true; }
+      }
+      if (any) this.send({ t: "changes", changes: this.changes });
+    } catch (e) { console.error("[changes]", e); }
+    finally {
+      this.changesBusy = false;
+      if (this.changesAgain) { this.changesAgain = false; this.refreshChanges(); }
+    }
   }
 
   private send(msg: unknown) {
@@ -204,7 +308,7 @@ class Feed {
 
   private broadcastItems() {
     if (this.linkRequests()) this.sendRequests();
-    const items = this.transcript?.items ?? [];
+    const items = this.items();
     const upsert: Item[] = [];
     const seen = new Set<string>();
     for (const it of items) {
@@ -218,19 +322,20 @@ class Feed {
   }
 
   hello(ws: ServerWebSocket<ChatData>) {
-    const items = this.transcript?.items ?? [];
+    const items = this.items();
     const { slice, floor, hasEarlier } = windowBefore(items, Infinity);
     this.linkRequests();
     ws.send(JSON.stringify({
       t: "hello", session_id: this.located.sessionId, cwd: this.transcript?.cwd ?? "",
-      capabilities: { ...capabilities, approvals: Boolean(this.source.approvals) }, ...this.status,
-      requests: this.source.runId ? requestsFor(this.source.runId) : [], items: slice, floor, has_earlier: hasEarlier, waiting_for_file: !this.transcript || !existsSync(this.located.path),
+      capabilities: { ...capabilities, approvals: Boolean(this.source.approvals), streaming: Boolean(this.source.live), usage: Boolean(this.source.live), checkpoints: Boolean(this.source.live) }, ...this.status,
+      requests: this.source.runId ? requestsFor(this.source.runId) : [], todos: this.todos,
+      usage: this.source.runId ? usageFor(this.source.runId) : null, changes: this.changes, items: slice, floor, has_earlier: hasEarlier, waiting_for_file: !this.transcript || !existsSync(this.located.path),
     }));
   }
 
   earlier(before: number) {
     this.lastUsed = Date.now();
-    const { slice, floor, hasEarlier } = windowBefore(this.transcript?.items ?? [], before);
+    const { slice, floor, hasEarlier } = windowBefore(this.items(), before);
     return { items: slice, floor, has_earlier: hasEarlier };
   }
 }

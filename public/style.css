@@ -577,6 +577,18 @@ a.chat-path:hover { border-bottom-style:solid; }
 .chat-foot { display:flex; align-items:center; gap:12px; padding:8px 12px; border-top:1px solid var(--line); font-size:11.5px; }
 .chat-pill { display:inline-flex; align-items:center; gap:7px; color:var(--text); white-space:nowrap; }
 .chat-foot-note { flex:1; min-width:0; }
+.chat-usage { font-family:var(--mono); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; min-width:0; }
+.chat-usage[hidden] { display:none; }
+.chat-usage.hot { color:var(--warn); }
+/* the live task list above the composer */
+.chat-todos { max-width:900px; width:calc(100% - 20px); margin:0 auto 8px; border:1px solid var(--line); border-radius:8px; background:var(--panel); max-height:40%; overflow-y:auto; }
+.chat-todos[hidden] { display:none; }
+.chat-todos-head { display:flex; align-items:center; gap:8px; width:100%; padding:6px 10px; font:inherit; font-size:13px; text-align:left; color:var(--text); background:transparent; border:0; }
+.chat-todos-head .muted { flex:none; font-size:12px; }
+.chat-todos .chat-todo { margin:0 0 8px 34px; }
+/* text Claude is still writing (MessageDisplay), until the transcript has the message */
+.chat-assistant.streaming > .md > :last-child::after { content:"▍"; margin-left:2px; color:var(--accent); animation:chat-caret 1s steps(1) infinite; }
+@keyframes chat-caret { 50% { opacity:0; } }
 .chat-dialog { width:min(1040px, 96vw); height:min(88dvh, 1000px); padding:14px 16px 16px; }
 .chat-dialog[open] { display:flex; flex-direction:column; gap:12px; }
 .chat-dialog-head { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; }
@@ -592,6 +604,7 @@ a.chat-path:hover { border-bottom-style:solid; }
   .chat-user { max-width:92%; }
   .chat-details, .chat-todo { margin-left:8px; }
   .chat-foot-note { display:none; }
+  .chat-usage { flex:1; }
   .chat-compose { padding:8px 8px 6px; }
   .chat-input, .chat-note { font-size:16px; } /* under 16px, iOS zooms the page on focus */
   .chat-cards { padding:0 6px 6px; }

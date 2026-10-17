@@ -6,7 +6,7 @@ Open work, newest first within each status. One heading per issue; close it by m
 ## Open
 
 ### #3 Chat view, toggleable with the terminal
-*Opened 2026-10-09 · designed in [`docs/rendered-view.md`](docs/rendered-view.md) · phases 1 (read-only chat view), 2 (composer), 3 (approvals) and 4 (files panel) built*
+*Opened 2026-10-09 · designed in [`docs/rendered-view.md`](docs/rendered-view.md) · phases 1 (read-only chat view), 2 (composer), 3 (approvals), 4 (files panel) and 5 (live polish) built*
 
 An interactive run gets a second view: the same live session as messages, tool cards, diffs and images,
 with a composer that takes uploads and answers approvals. You can switch between it and the xterm view at
@@ -20,7 +20,11 @@ unsent-draft check, image and file uploads, the `/` list, and a "terminal needs 
 Phase 3 answers permission prompts, questions and plans from cards in the chat view, through a `PermissionRequest`
 hook injected with `--settings`. Phase 4 adds the files panel: an edit row, a turn's "Edited N files" card or a
 path in Claude's text opens the file beside the conversation, with the edit's diff, the file as it is now (at the
-line), and a preview for markdown and images. Still untested from phase 4: the panel as an overlay on a real phone,
+line), and a preview for markdown and images. Phase 5 streams Claude's text as it's written (`MessageDisplay`), shows
+the model, context, cost and rate limits from the statusline, keeps a live task-list strip above the composer, and
+lists what each turn changed from git checkpoints (hidden refs), commands' changes included. Still untested from
+phase 5: a message queued mid-turn (if it fires its own prompt hook, it splits the turn for git), checkpoints in a very large repo, and the strip
+with real TaskCreate calls (the test session didn't offer the tools). Still untested from phase 4: the panel as an overlay on a real phone,
 files near the 1 MB cap, and edits made inside a subagent. Still untested from phase 3: the hook timing out, a server restart while a request
 is held, bypass and `acceptEdits` modes, requests from inside a subagent, and the cards on a real phone.
 Still untested from phase 2: very long pastes and non-ASCII text, several images in one message, HEIC, Stop

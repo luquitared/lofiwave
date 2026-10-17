@@ -2,7 +2,7 @@
  * Approvals from the chat view: permission prompts, AskUserQuestion and plan approval, answered in the browser.
  * See docs/rendered-view.md, "Approvals, questions and plan approval".
  *
- * Interactive claude runs start with `--settings data/claude-approvals.json`, which adds an HTTP
+ * Interactive claude runs start with `--settings data/claude-chat.json` (./settings.ts), which adds an HTTP
  * `PermissionRequest` hook pointing here (it merges with the user's and the project's hooks). When Claude needs a
  * decision it shows its own dialog in the TUI and calls the hook at the same time. We hold the hook's request open,
  * show a card in the chat view, and reply with the decision when someone answers there. Whichever answer comes
@@ -17,9 +17,6 @@
  *  - the run stops, or HOLD_MS passes.
  * A restart of lofiwave drops held requests; Claude takes that as a failed hook and its dialog keeps working.
  */
-import { writeFileSync } from "node:fs";
-import { join } from "node:path";
-import { config } from "../config";
 import { db, type RunRow } from "../db";
 import { ApiError } from "../runner";
 import { claudeRegistry } from "../agents";
@@ -29,30 +26,12 @@ import { shrinkInput } from "./claude";
 const HOOK_TIMEOUT_SEC = 1800;
 const HOLD_MS = (HOOK_TIMEOUT_SEC - 20) * 1000;
 
-// ---------------------------------------------------------------- the injected settings
-
-let settingsFile = "";
-/** The `--settings` file interactive claude runs get. Written once per server start (the port may have changed). */
-export function approvalSettingsPath(): string {
-  if (settingsFile) return settingsFile;
-  const path = join(config.dataDir, "claude-approvals.json");
-  const settings = {
-    hooks: {
-      PermissionRequest: [{
-        hooks: [{
-          type: "http",
-          url: `http://127.0.0.1:${config.port}/api/hooks/permission`,
-          // Only variables listed in allowedEnvVars are interpolated; the run's env has both (see startRun).
-          headers: { Authorization: "Bearer $AGENT_CONSOLE_TOKEN", "X-Lofiwave-Run": "$AGENT_CONSOLE_RUN_ID" },
-          allowedEnvVars: ["AGENT_CONSOLE_TOKEN", "AGENT_CONSOLE_RUN_ID"],
-          timeout: HOOK_TIMEOUT_SEC,
-        }],
-      }],
-    },
-  };
-  writeFileSync(path, JSON.stringify(settings, null, 2) + "\n", { mode: 0o600 });
-  return (settingsFile = path);
-}
+/** The hook entry for the `--settings` file (see ./settings.ts). Only variables listed in allowedEnvVars are interpolated. */
+export const permissionHookEntry = (base: string) => ({
+  type: "http", url: `${base}/api/hooks/permission`, timeout: HOOK_TIMEOUT_SEC,
+  headers: { Authorization: "Bearer $AGENT_CONSOLE_TOKEN", "X-Lofiwave-Run": "$AGENT_CONSOLE_RUN_ID" },
+  allowedEnvVars: ["AGENT_CONSOLE_TOKEN", "AGENT_CONSOLE_RUN_ID"],
+});
 
 // ---------------------------------------------------------------- held requests
 

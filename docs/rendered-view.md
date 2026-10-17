@@ -1,8 +1,8 @@
 # Rendered view: a chat UI you can toggle with the terminal
 
-Status: **phases 1–4 built** (2026-10-09: read-only chat view, `src/chat/`, `public/chat.js`; 2026-10-11: the
+Status: **phases 1–5 built** (2026-10-09: read-only chat view, `src/chat/`, `public/chat.js`; 2026-10-11: the
 composer, `src/chat/input.ts`; 2026-10-11: approvals, `src/chat/approvals.ts`; 2026-10-11: the files panel,
-`src/chat/files.ts`); phases 5–6 open.
+`src/chat/files.ts`; 2026-10-17: live polish, `src/chat/live.ts`, `src/chat/checkpoints.ts`); phase 6 open.
 Tracked as issues.md #3. Research behind it: claude-code-viewer (upstream v0.8.2),
 T3 Code (pingdotgg/t3code), claude.ai/code, the Claude Code source (2026-03 snapshot) checked against the
 installed 2.1.296, and Codex CLI 0.153.4.
@@ -350,6 +350,40 @@ Checked against a live TUI in tmux while building the composer:
 - **Status `shell`:** the pid file says `shell` when the turn is over but a background command it started is
   still running. It accepts messages like `idle`.
 
+## Phase 5 findings (2026-10-17, Claude Code 2.1.302)
+
+Checked against a live TUI in tmux, through a lofiwave started on its own port:
+
+- **One settings file for everything:** `data/claude-chat.json` (`src/chat/settings.ts`, was `claude-approvals.json`)
+  now carries the PermissionRequest hook, `MessageDisplay` (timeout 2s), `UserPromptSubmit` and `Stop` (10s), and a
+  `statusLine`. Runs started with it get `meta.live` next to `meta.approvals`; the capabilities `streaming`, `usage`
+  and `checkpoints` follow it.
+- **`MessageDisplay`'s `message_id` is not in the transcript.** It's a UUID of its own, not the API's `msg_…` id
+  nor an entry's `uuid`. `prompt_id` is, as `promptId` on the prompt's user entries. One "message" is one text
+  block. So a stream is matched to the transcript by text: it's done once an assistant item written after the
+  stream began starts with what streamed. A 600-word answer arrived as 8 updates over 11s, and the transcript's
+  copy replaced it 0.3s after the last one.
+- **Deltas aren't always one paragraph:** a delta can carry a paragraph plus the start of the next. They're joined by
+  `index`, never split.
+- **The statusline JSON has what the footer needs:** `model.display_name`, `context_window.used_percentage` and
+  `current_usage`, `cost.total_cost_usd`, and `rate_limits.five_hour` / `seven_day` (`used_percentage`,
+  `resets_at` in seconds). A `statusLine` in `--settings` replaces the user's own, so
+  `scripts/claude-statusline.ts` posts a copy to lofiwave and then runs the one it replaced (project local,
+  project, then user settings) and prints that.
+- **Task lists:** 2.1.302 has no TodoWrite. TaskCreate/TaskUpdate keep `~/.claude/tasks/<session>/<id>.json`
+  (`subject`, `activeForm`, `status`). The feed reads that folder every 2s, for any session; TodoWrite inputs
+  in the transcript are the fallback for older versions. The tools weren't offered to the model in the test
+  session, so the strip was checked with task files written by hand.
+- **Checkpoints:** `UserPromptSubmit` waits up to 3s for the start snapshot, so it's taken before Claude can change
+  anything. A Stop snapshot ends the turn. With no Stop (Esc), the next prompt's start does, and a turn with
+  neither has no card yet. Built in a copy of the index (`GIT_INDEX_FILE`): the user's index, branch and stash
+  are untouched, and an untracked 6 MB file was left out as designed. The card lists files changed through Bash too
+  ("via a command"), and the panel's *Turn diff* is the git diff for that file.
+- **Not covered:** a message queued mid-turn. If it fires its own UserPromptSubmit (unchecked), the turn it lands
+  in is split in two for git. Checkpoints in a repo the size of a monorepo (the snapshot is serialized per repo and
+  capped at 30s per git command, but untested at that size). Usage for sessions lofiwave didn't start (no statusline
+  of ours there).
+
 ## Phase 4 findings (2026-10-11, Claude Code 2.1.296)
 
 Checked against a live TUI in tmux while building the files panel:
@@ -446,6 +480,8 @@ Each spike was run against a real TUI in tmux, with a local listener standing in
      - there are new top-level `world_state`, `turn_context` and `token_usage_record` lines
    - The Codex adapter should key off `item_completed` and treat unknown types as raw rows, as the Claude one
      does.
+
+(Phase 5 correction: `message_id` doesn't match anything in the transcript; see "Phase 5 findings".)
 
 **What this changes for phase 2:** nothing in the composer design. Images go in as a bracketed paste of the
 path on its own, then the text. **For phase 3:** use an HTTP `PermissionRequest` hook with the token header, and

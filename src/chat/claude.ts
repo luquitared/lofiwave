@@ -21,7 +21,7 @@ export type Item = {
   startedAt?: number; completedAt?: number;
   denied?: boolean; // a tool call refused at its permission prompt (status "interrupted")
 } & (
-  | { kind: "user"; text: string; images: ImageRef[]; command?: string; output?: Omitted<string>; notification?: boolean; queued?: boolean; turnDurationMs?: number }
+  | { kind: "user"; text: string; images: ImageRef[]; command?: string; output?: Omitted<string>; notification?: boolean; queued?: boolean; turnDurationMs?: number; promptId?: string }
   | { kind: "assistant"; text: string; streaming?: boolean }
   | { kind: "thinking"; text: string; durationMs?: number }
   | { kind: "command"; label: string; command: string; output?: Omitted<string>; exitCode?: number; background?: boolean }
@@ -34,8 +34,11 @@ export type Item = {
   | { kind: "event"; event: "compact" | "clear" | "interrupt" | "error" | "info" | "raw"; text: string; detail?: Omitted<string> }
 );
 
-/** `approvals` is per run: true when the run was started with lofiwave's PermissionRequest hook (see ./approvals.ts). */
-export const capabilities = { streaming: false, approvals: false, images: true, interrupt: true, composer: true };
+/**
+ * `approvals`, `streaming`, `usage` and `checkpoints` are per run: true when the run was started with lofiwave's hooks
+ * and statusline (see ./settings.ts).
+ */
+export const capabilities = { streaming: false, approvals: false, usage: false, checkpoints: false, images: true, interrupt: true, composer: true };
 
 /** Outputs longer than this arrive as `omitted` with a preview, and are fetched when a row is expanded. */
 const INLINE = 8 * 1024;
@@ -64,6 +67,7 @@ export type Rec = {
   hidden?: boolean;
   // user
   text?: string; images?: ImageRef[]; results?: ToolResult[]; compactSummary?: boolean; notification?: boolean; queued?: boolean;
+  promptId?: string; // the prompt a user entry belongs to (what hooks call prompt_id)
   // assistant
   blocks?: ({ type: "text"; text: string } | { type: "thinking"; text: string } | { type: "tool_use"; id: string; name: string; input: any })[];
   thinkingMs?: number; apiError?: boolean;
@@ -127,6 +131,7 @@ export function ingest(e: any, loc: LineLoc): Rec | null {
   if (e.logicalParentUuid) rec.logicalParent = e.logicalParentUuid;
   if (typeof e.cwd === "string") rec.cwd = e.cwd;
   if (e.type === "user") {
+    if (typeof e.promptId === "string") rec.promptId = e.promptId;
     const c = e.message?.content;
     if (e.isMeta) { rec.hidden = true; return rec; }
     if (e.isCompactSummary) { rec.compactSummary = true; rec.text = textOf(c); return rec; }
@@ -395,7 +400,7 @@ export function project(chain: Rec[]): Item[] {
         const summary = tag(raw, "summary") ?? tag(raw, "status");
         text = summary ? stripReminders(summary) : "Background task update";
       }
-      head = push({ id: r.uuid, kind: "user", text, images: r.images ?? [], command, notification, status: "completed", native: native(r), startedAt: r.ts });
+      head = push({ id: r.uuid, kind: "user", text, images: r.images ?? [], command, notification, status: "completed", native: native(r), startedAt: r.ts, ...(r.promptId ? { promptId: r.promptId } : {}) });
       lastBash = bash !== null ? head : null;
       if (lastBash) lastBash.status = "running";
       continue;
