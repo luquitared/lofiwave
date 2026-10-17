@@ -287,8 +287,9 @@ status list. The plan for the view:
   `capabilities.approvals = false`, and approvals go through the "terminal needs you" banner, detected from
   `capture-pane`, with key buttons.
 - **Input:** tmux paste, the same as for Claude. Image paste into the Codex TUI is untested.
-- **Finding the rollout:** `~/.codex/state_5.sqlite` (the `threads` table, opened `immutable=1`) or `lsof` on
-  the pane's process tree, instead of today's "newest rollout in the same cwd" guess.
+- **Finding the rollout:** `~/.codex/state_<n>.sqlite`, the `threads` table, opened read-only (built for issues.md
+  #1, see `findCodexThread` in `src/agents.ts`). Not `immutable=1`, which skips the WAL and misses the newest
+  threads, and not `lsof`: since 0.16x a shared `codex app-server` daemon holds the rollouts, not the TUI.
 - **Later, the proper route:** `codex app-server` as a daemon, with the TUI attached through `--remote` and
   lofiwave as a second JSON-RPC client. That gives streaming deltas and structured approval requests from
   the same live thread. Unverified, so it needs a spike. T3's experience: Codex protocol churn breaks clients,

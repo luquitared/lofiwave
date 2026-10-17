@@ -5,7 +5,7 @@ import { config } from "./config";
 import { db, now, hydrate, type ProcessTypeRow, type WorkflowRow, type RunRow, type SessionRow, type ApiKeyRow } from "./db";
 import { listOsProcesses, cwdOf, killTree, type OsProcess } from "./procs";
 import { ApiError, startRun, killRun, restartRun, getRun, getType, readLogFrom, isLive, buildCommand, screenOf, historyOf, sendKeys, tmuxPath, recordSession, resumeSession, resumeAgentSession, enableRemoteControl } from "./runner";
-import { describeSession, sessionForPid, locateSession, transcriptMessages, type SessionInfo } from "./agents";
+import { describeSession, sessionForPid, locateSession, transcriptMessages, codexThreadNear, type SessionInfo } from "./agents";
 import { startScheduler, refreshNextRun, runWorkflow, computeNext } from "./scheduler";
 import { validateCron } from "./cron";
 import { renderDocs, apiIndex } from "./docs";
@@ -180,6 +180,11 @@ async function listConsoleProcesses(filterType?: string, filterKind?: string): P
   }
   await Promise.all(out.map(async (p) => {
     p.cwd = byPid.get(p.pid)?.cwd ?? (await cwdOf(p.pid));
+    // A codex we didn't start: its threads live in Codex's app-server daemon, so go by folder and start time instead.
+    if (p.type === "codex" && !p.session && !p.managed && p.cwd && p.elapsedSec !== null) {
+      const t = codexThreadNear(p.cwd, Date.now() - p.elapsedSec * 1000, /\sexec(\s|$)/.test(p.cmd) ? "exec" : "tui");
+      if (t) p.session = describeSession("codex", t.id, { cwd: t.cwd, transcript_path: t.rollout_path });
+    }
   }));
   out.sort((a, b) => (b.elapsedSec ?? 0) - (a.elapsedSec ?? 0));
   return out;

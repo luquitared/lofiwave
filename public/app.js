@@ -387,7 +387,7 @@ function applyStartType() {
   sf.prompt.placeholder = interactive ? "Optional first message" : "What should it do?";
   sf.cwd.value = t?.default_cwd || sf.cwd.value;
   sf.cwd.placeholder = t?.default_cwd ? t.default_cwd : "start typing to search";
-  sf.extra_args.placeholder = t?.name === "claude" ? "--permission-mode acceptEdits" : t?.name === "codex" ? "--full-auto" : "";
+  sf.extra_args.placeholder = t?.name === "claude" ? "--permission-mode acceptEdits" : t?.name === "codex" ? "--sandbox workspace-write" : "";
 }
 sf.type.onchange = applyStartType;
 $("#start-cancel").onclick = () => dlg.close();

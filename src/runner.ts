@@ -7,7 +7,7 @@ import { existsSync, statSync, openSync, readSync, closeSync, appendFileSync } f
 import { db, now, hydrate, type ProcessTypeRow, type RunRow, type WorkflowRow } from "./db";
 import { config, logDir } from "./config";
 import { killTree, pidAlive } from "./procs";
-import { discoverCodexSession, codexRolloutPath, claudeRegistry, claudeWebUrl, claudeTranscriptPath } from "./agents";
+import { discoverCodexSession, codexRolloutPath, codexIndexReadable, findCodexThread, codexThreadTouched, claudeRegistry, claudeWebUrl, claudeTranscriptPath } from "./agents";
 import { openTerminalForTmux } from "./terminal";
 import { actor } from "./auth";
 import { ttyViewers } from "./tty";
@@ -111,6 +111,9 @@ export function buildCommand(type: ProcessTypeRow, opts: { cwd: string; prompt?:
   // The configured default mode goes in with the template (so restarts don't count it as an extra arg); args that pick a mode win.
   const picksMode = [...templ, ...extra].some((a) => a === "--dangerously-skip-permissions" || a === "--permission-mode" || a.startsWith("--permission-mode="));
   if (config.claudePermissionMode && basename(command) === "claude" && !picksMode) templ.push("--permission-mode", config.claudePermissionMode);
+  // The same for codex's sandbox (CODEX_SANDBOX_MODE). --full-auto is gone from Codex but still counts as a choice.
+  const picksSandbox = [...templ, ...extra].some((a) => /^(-s|--sandbox(=.*)?|--dangerously-bypass-approvals-and-sandbox|--full-auto|--approve-for-me)$/.test(a) || /^sandbox_mode\s*=/.test(a));
+  if (config.codexSandboxMode && basename(command) === "codex" && !picksSandbox) templ.push("--sandbox", config.codexSandboxMode);
   return { command, args: [...templ, ...extra], template_len: templ.length };
 }
 
@@ -214,10 +217,19 @@ export async function startRun(opts: StartOptions): Promise<RunRow> {
         if (q.code !== 0) return null;                    // session vanished (killed from outside)
         const [dead, status] = q.out.split(" ");
         if (dead === "1") return status === "" ? null : Number(status);
-        // Codex has no hook: find the rollout file it just created and record the session.
-        if (isCodex && !meta.codex_session && ticks % 5 === 0) {
-          const found = opts.resumeSession ? { session_id: opts.resumeSession, path: codexRolloutPath(opts.resumeSession) } : discoverCodexSession(t, cwd);
-          if (found) { meta.codex_session = found.session_id; db.prepare("UPDATE runs SET meta = ? WHERE id = ?").run(JSON.stringify(meta), id); recordSession(id, { session_id: found.session_id, agent: "codex", cwd, transcript_path: found.path, source: opts.resumeSession ? "resume" : "startup" }); }
+        // Codex has no hook: find its thread in Codex's index and record the session.
+        if (isCodex && !meta.codex_session && ticks % 3 === 0) {
+          const found = findCodexRunSession(id, t, cwd, "tui", opts);
+          if (found) {
+            meta.codex_session = found.session_id;
+            if (found.mismatch) {
+              meta.resume_mismatch = { asked: opts.resumeSession, got: found.session_id };
+              sink.write(`\n# lofiwave: asked codex to resume ${opts.resumeSession}, but it started a new session ${found.session_id}\n`); sink.flush();
+              db.prepare("UPDATE sessions SET source = 'resume failed' WHERE run_id = ? AND session_id = ?").run(id, opts.resumeSession!);
+            }
+            db.prepare("UPDATE runs SET meta = ? WHERE id = ?").run(JSON.stringify(meta), id);
+            recordSession(id, { session_id: found.session_id, agent: "codex", cwd, transcript_path: found.path, source: found.source });
+          }
         }
         if (meta.stop_when_idle && !entry.killedBy && ticks % 3 === 0) {
           const st = claudeRegistry().byPid.get(pid)?.status;
@@ -291,9 +303,14 @@ export async function startRun(opts: StartOptions): Promise<RunRow> {
     sink.write(`\n# lofiwave: exited with code ${code ?? "unknown"} (${status})\n`);
     await sink.end();
     if (isCodex && !meta.codex_session) {
-      // `codex exec` prints "session id: <uuid>" in its header.
-      const m = /session id:\s*([0-9a-f-]{36})/.exec(readTail(logPath, 64 * 1024));
-      if (m) recordSession(id, { session_id: m[1], agent: "codex", cwd, transcript_path: codexRolloutPath(m[1]), source: "startup" });
+      // `codex exec` prints "session id: <uuid>" in its header (with --json: a thread.started event first), so look at
+      // the start of the log, not only the end. Colours are stripped first. Failing that, Codex's index.
+      const text = stripAnsi(readHead(logPath, 64 * 1024) + "\n" + readTail(logPath, 64 * 1024));
+      const m = /session id:\s*([0-9a-f-]{36})/.exec(text) ?? /"thread\.started","thread_id":"([0-9a-f-]{36})"/.exec(text);
+      const found = m ? { session_id: m[1], path: codexRolloutPath(m[1]), source: "startup" } : findCodexRunSession(id, t, cwd, interactive ? "tui" : "exec", opts);
+      if (found) recordSession(id, { session_id: found.session_id, agent: "codex", cwd, transcript_path: found.path, source: found.source });
+      // Asked to resume and never seen using that thread (a wrong id: codex exits with "No saved session found").
+      if (opts.resumeSession && found?.source !== "resume") db.prepare("UPDATE sessions SET source = 'resume failed' WHERE run_id = ? AND session_id = ? AND source = 'resume requested'").run(id, opts.resumeSession);
     }
     live.delete(id);
     db.prepare("UPDATE runs SET status = ?, ended_at = ?, exit_code = ?, output = ?, error = ? WHERE id = ?")
@@ -420,8 +437,9 @@ export async function resumeAgentSession(o: { agent: string; sessionId: string; 
   if (!JSON.parse(type.resume_args || "[]").length) throw new ApiError(400, `process type "${typeName}" has no resume_args template`);
   const cwd = o.cwd && existsSync(o.cwd) ? o.cwd : (type.default_cwd || process.env.HOME || "/");
   const run = await startRun({ typeName, cwd, trigger: "resume", resumeSession: o.sessionId, env: o.env ?? {}, terminal: o.terminal });
-  // Until the agent reports back (claude's hook, codex's rollout), remember what we asked it to reopen.
-  recordSession(run.id, { session_id: o.sessionId, agent: o.agent, cwd, source: "resume" });
+  // Until the agent reports back (claude's hook, codex's index), remember what we asked it to reopen. Codex's is
+  // confirmed (or marked failed) once its index shows the thread in use: see findCodexRunSession.
+  recordSession(run.id, { session_id: o.sessionId, agent: o.agent, cwd, source: o.agent === "codex" ? "resume requested" : "resume" });
   return getRun(run.id);
 }
 type RawRun = RunRow;
@@ -483,6 +501,41 @@ export async function enableRemoteControl(pid: number, o: { replace?: boolean; t
     ? await resumeAgentSession({ agent: "claude", sessionId: entry.sessionId, cwd, terminal: o.terminal, typeName, env })
     : await startRun({ typeName, cwd: existsSync(cwd) ? cwd : getType(typeName).default_cwd || process.env.HOME || "/", env, interactive: true, terminal: o.terminal, trigger: "manual" });
   return { status: "replaced", web_url: "", run: resumed };
+}
+
+/**
+ * The codex session a run of ours is on, from Codex's thread index (0.16x runs threads in a shared app-server daemon,
+ * so the run's own processes don't hold the rollout). A resume counts once the asked-for thread is used after the
+ * run started; if instead a new thread shows up, the resume failed (`mismatch`). Threads other runs recorded are
+ * never taken. Without a readable index, the old guess: the newest rollout in the folder.
+ */
+function findCodexRunSession(runId: number, startedAt: number, cwd: string, kind: "tui" | "exec", opts: StartOptions): { session_id: string; path: string; source: string; mismatch?: boolean } | null {
+  if (!codexIndexReadable()) {
+    if (opts.resumeSession) return { session_id: opts.resumeSession, path: codexRolloutPath(opts.resumeSession), source: "resume" };
+    const f = discoverCodexSession(startedAt, cwd);
+    return f && { ...f, source: "startup" };
+  }
+  if (opts.resumeSession) {
+    const t = codexThreadTouched(opts.resumeSession, startedAt);
+    if (t) return { session_id: t.id, path: t.rollout_path, source: "resume" };
+  }
+  const claimed = new Set(db.query<{ session_id: string }, [number]>("SELECT session_id FROM sessions WHERE agent = 'codex' AND run_id != ?").all(runId).map((r) => r.session_id));
+  if (opts.resumeSession) claimed.add(opts.resumeSession);
+  const t = findCodexThread({ startedAt, cwd, kind, exclude: claimed, prompt: opts.resumeSession ? "" : opts.prompt });
+  if (!t) return null;
+  return { session_id: t.id, path: t.rollout_path, source: "startup", mismatch: Boolean(opts.resumeSession) };
+}
+
+const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;?]*[ -\/]*[@-~]/g, "");
+
+export function readHead(path: string | null, bytes: number): string {
+  if (!path || !existsSync(path)) return "";
+  const fd = openSync(path, "r");
+  try {
+    const buf = Buffer.alloc(Math.min(bytes, statSync(path).size));
+    readSync(fd, buf, 0, buf.length, 0);
+    return buf.toString("utf8");
+  } finally { closeSync(fd); }
 }
 
 export function readTail(path: string | null, bytes: number): string {
