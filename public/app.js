@@ -212,7 +212,14 @@ const loadMe = guard(async () => {
   el.hidden = false;
 });
 /** " · by lucas" for a run someone started (blank for scheduled runs and older ones). */
-const byWho = (r) => (r.meta?.started_by ? ` · by ${r.meta.started_by.replace(/^key:/, "")}` : "");
+/** The swarm a run belongs to (runs started for one job share a `group`); clicking it lists the group's runs. */
+const groupTag = (r) => (r.group ? h("span", { class: "wf-tag group-tag", title: `group ${r.group}: show its runs`, onclick: (e) => { e.stopPropagation(); e.preventDefault(); showGroup(r.group); } }, `◇ ${r.group}`) : "");
+function showGroup(g) {
+  const rg = $("#runs-group");
+  if (![...rg.options].some((o) => o.value === g)) rg.append(h("option", { value: g }, g));
+  rg.value = g; switchTab("runs");
+}
+const byWho = (r) =>(r.meta?.started_by ? ` · by ${r.meta.started_by.replace(/^key:/, "")}` : "");
 
 // ---------------------------------------------------------------- system info
 let systemInfo = null;
@@ -626,12 +633,16 @@ function renderSettings() {
 // ---------------------------------------------------------------- runs
 const loadRuns = guard(async () => {
   const q = new URLSearchParams({ limit: 100 });
-  for (const [k, id] of [["status", "#runs-status"], ["type", "#runs-type"], ["workflow_id", "#runs-workflow"]]) if ($(id).value) q.set(k, $(id).value);
-  const { runs, total } = await get(`/runs?${q}`);
+  for (const [k, id] of [["status", "#runs-status"], ["type", "#runs-type"], ["workflow_id", "#runs-workflow"], ["group", "#runs-group"]]) if ($(id).value) q.set(k, $(id).value);
+  const [{ runs, total }, groups] = await Promise.all([get(`/runs?${q}`), get("/groups")]);
+  const rg = $("#runs-group"); const cur = rg.value;
+  rg.replaceChildren(h("option", { value: "" }, "All groups"), ...groups.map((g) => h("option", { value: g.group }, `${g.group} (${g.total})`)));
+  if (cur && !groups.some((g) => g.group === cur)) rg.append(h("option", { value: cur }, cur));
+  rg.value = cur; rg.hidden = !groups.length && !cur;
   $("#runs-count").textContent = `${total} run${total === 1 ? "" : "s"}`;
   $("#runs-table tbody").replaceChildren(...runs.map((r) => h("tr", { class: `clickable ${selectedRun?.id === r.id ? "selected" : ""}`, tabindex: "0", "aria-label": `Open run ${r.id}, ${r.workflow_name || r.type_name}, ${r.status}`, onkeydown: (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openRun(r.id); } }, onclick: () => openRun(r.id) },
     h("td", { class: "mono" }, "#", r.id),
-    h("td", { class: "full" }, r.workflow_name ? h("b", {}, r.workflow_name) : h("span", { class: "muted" }, "ad-hoc"), h("div", { class: "muted", style: "font-size:12px" }, `${r.type_name} · ${shortCwd(r.cwd)}`)),
+    h("td", { class: "full" }, r.workflow_name ? h("b", {}, r.workflow_name) : h("span", { class: "muted" }, "ad-hoc"), h("div", { class: "muted", style: "font-size:12px" }, groupTag(r), `${r.type_name} · ${shortCwd(r.cwd)}`)),
     h("td", { "data-l": "trigger" }, r.trigger, r.meta?.started_by ? h("div", { class: "by", style: "font-size:12px" }, r.meta.started_by) : ""),
     h("td", { class: "status" }, badge(r.status)),
     h("td", { "data-l": "started", title: new Date(r.started_at).toLocaleString() }, fmtRel(r.started_at)),
@@ -640,7 +651,7 @@ const loadRuns = guard(async () => {
   )));
   if (!runs.length) $("#runs-table tbody").replaceChildren(h("tr", {}, h("td", { colspan: 7, class: "muted" }, "No runs match.")));
 });
-["#runs-status", "#runs-type", "#runs-workflow"].forEach((id) => ($(id).onchange = loadRuns));
+["#runs-status", "#runs-type", "#runs-workflow", "#runs-group"].forEach((id) => ($(id).onchange = loadRuns));
 
 async function openRun(id) {
   switchTab("runs", false);
@@ -673,6 +684,9 @@ const refreshRunDetail = guard(async (full = false) => {
         h("dt", {}, "command"), h("dd", {}, quoteArgs([r.command, ...r.args])),
         r.prompt ? h("dt", {}, "prompt") : "", r.prompt ? h("dd", { style: "white-space:pre-wrap" }, r.prompt) : "",
         h("dt", {}, "trigger"), h("dd", {}, r.trigger, r.meta?.started_by ? ` by ${r.meta.started_by}` : ""),
+        r.group || r.parent_run ? h("dt", {}, "group") : "",
+        r.group || r.parent_run ? h("dd", {}, groupTag(r), r.parent_run ? h("a", { class: "link", href: `#runs/${r.parent_run}`, onclick: (e) => { e.preventDefault(); openRun(r.parent_run); } }, `started by run #${r.parent_run}`) : "") : "",
+        r.out_dir ? h("dt", {}, "results") : "", r.out_dir ? h("dd", { class: "mono" }, r.out_dir, h("span", { class: "muted" }, "  (GET /api/runs/", String(r.id), "/results)")) : "",
         h("dt", {}, "pid"), h("dd", {}, r.pid ?? "–", r.meta?.orphan ? " (started by a previous console instance)" : ""),
         r.meta?.remote_url ? h("dt", {}, "remote") : "", r.meta?.remote_url ? h("dd", {}, h("a", { href: r.meta.remote_url, target: "_blank" }, r.meta.remote_url), h("span", { class: "muted" }, "  (same session in the Claude app)")) : "",
         r.meta?.tmux ? h("dt", {}, "terminal") : "", r.meta?.tmux ? h("dd", {}, `tmux attach -t ${r.meta.tmux}`, r.status === "running" ? h("span", { class: "muted" }, "  (live screen below)") : h("span", { class: "muted" }, "  (ended; screen saved in the log)")) : "",
@@ -862,7 +876,7 @@ function renderRail() {
       const s = sessOf(r);
       return h("button", { class: `rail-item ${consoleRun?.id === r.id ? "active" : ""}`, "data-run": r.id, "aria-current": consoleRun?.id === r.id ? "true" : "false", onclick: () => selectConsoleRun(r) },
         h("div", { class: "rail-title" }, h("span", { class: `dot ${s?.status || ""}`, title: s?.status || "" }), runLabel(r)),
-        h("div", { class: "rail-sub" }, r.workflow_name ? h("span", { class: "wf-tag" }, `⌁ ${r.workflow_name}`) : "", `${r.type_name} · ${shortCwd(r.cwd)}${byWho(r)}`),
+        h("div", { class: "rail-sub" }, r.workflow_name ? h("span", { class: "wf-tag" }, `⌁ ${r.workflow_name}`) : "", groupTag(r), `${r.type_name} · ${shortCwd(r.cwd)}${byWho(r)}`),
         h("div", { class: "rail-sub dim rail-up" }, railUp(r)),
       );
     }),
@@ -891,7 +905,7 @@ function endedRail() {
     h("div", { class: "rail-head" }, h("span", {}, ended.length ? `${ended.length} recently ended` : "Nothing ended yet")),
     ...ended.map((r) => h("button", { class: `rail-item ${endedRun?.id === r.id ? "active" : ""}`, "aria-current": endedRun?.id === r.id ? "true" : "false", onclick: () => selectEndedRun(r) },
       h("div", { class: "rail-title" }, runLabel(r)),
-      h("div", { class: "rail-sub" }, r.workflow_name ? h("span", { class: "wf-tag" }, `⌁ ${r.workflow_name}`) : "", `${r.type_name} · ${shortCwd(r.cwd)}${byWho(r)}`),
+      h("div", { class: "rail-sub" }, r.workflow_name ? h("span", { class: "wf-tag" }, `⌁ ${r.workflow_name}`) : "", groupTag(r), `${r.type_name} · ${shortCwd(r.cwd)}${byWho(r)}`),
       h("div", { class: "rail-sub dim" }, endedWhen(r)),
     )),
   ];
