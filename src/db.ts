@@ -89,6 +89,20 @@ CREATE TABLE IF NOT EXISTS api_keys (
   created_at   INTEGER NOT NULL,
   last_used_at INTEGER
 );
+
+-- Snapshots of a run's git work tree when a prompt is submitted (start) and when Claude stops (end), kept under
+-- refs/lofiwave/run-<run>/<id>: the chat view diffs them to show what each turn changed (src/chat/checkpoints.ts).
+CREATE TABLE IF NOT EXISTS checkpoints (
+  id          INTEGER PRIMARY KEY,
+  run_id      INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+  session_id  TEXT NOT NULL DEFAULT '',
+  prompt_id   TEXT NOT NULL,
+  kind        TEXT NOT NULL,              -- start | end
+  root        TEXT NOT NULL,              -- the repo's top folder
+  commit_sha  TEXT NOT NULL,
+  at          INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS checkpoints_run_idx ON checkpoints(run_id, prompt_id);
 `);
 
 // ---- migrations for columns added after the first release

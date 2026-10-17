@@ -3,7 +3,9 @@
  * (server: src/chat, design: docs/rendered-view.md). On a live run of ours it has a composer, which types into the
  * TUI through the server (src/chat/input.ts), and cards that answer Claude's permission prompts, questions and plans
  * (src/chat/approvals.ts); sessions lofiwave didn't start are read-only. Edited files and paths in Claude's text open in a
- * files panel beside the conversation (src/chat/files.ts).
+ * files panel beside the conversation (src/chat/files.ts). Runs of ours also stream Claude's text as it's written, show
+ * the model, context and rate limits, and list what each turn changed in git (src/chat/live.ts, checkpoints.ts); any
+ * session shows its live task list.
  * Uses app.js's helpers (h, token, toast, fmtDur, shortCwd), which are loaded by the time a view opens.
  */
 
@@ -124,11 +126,18 @@ class ChatView {
     this.requests = [];
     this.cardEls = new Map();
     this.cardsEl = h("div", { class: "chat-cards", hidden: true });
+    /** The session's task list, as a strip above the composer while anything on it is open. */
+    this.todos = []; this.todoOpen = false;
+    this.todoEl = h("div", { class: "chat-todos", hidden: true });
+    /** Model, context, cost and rate limits (runs of ours, from Claude's statusline). */
+    this.usage = null;
+    /** What each finished turn changed in git, by prompt id: {root, files, added, removed, truncated}. */
+    this.changes = new Map();
     this.scroller.append(this.top, this.list, this.pendingEl, this.state);
     this.composer = base.startsWith("/runs/") ? new Composer(this) : null;
     this.files = new FilesPanel(this);
     this.root.append(h("div", { class: "chat-body" },
-      h("div", { class: "chat-col" }, h("div", { class: "chat-main" }, this.scroller, this.jump), this.cardsEl, this.banner, this.composer?.el ?? ""),
+      h("div", { class: "chat-col" }, h("div", { class: "chat-main" }, this.scroller, this.jump), this.todoEl, this.cardsEl, this.banner, this.composer?.el ?? ""),
       this.files.el), this.footer());
     /** Which paths in Claude's text are files (from the server): path as written → absolute path, or false. */
     this.paths = new Map();
@@ -156,6 +165,7 @@ class ChatView {
   footer() {
     return h("div", { class: "chat-foot muted" },
       h("span", { class: "chat-pill" }, h("span", { class: "dot" }), h("span", { class: "chat-pill-text" }, "")),
+      h("span", { class: "chat-usage", hidden: true }),
       h("span", { class: "chat-foot-note" }, this.composer ? "" : "Read-only: this session runs outside lofiwave."),
       this.onTerminal ? h("button", { class: "small", onclick: () => this.onTerminal() }, "Open terminal") : "",
     );
@@ -197,6 +207,9 @@ class ChatView {
       this.readOnly = m.read_only;
       this.requests = m.requests || [];
       this.renderCards();
+      this.todos = m.todos || []; this.renderTodos();
+      this.usage = m.usage || null; this.renderUsage();
+      this.changes = new Map(Object.entries(m.changes || {}));
       this.setStatus(m.status, m.waiting_for);
       this.loaded = true;
       this.composer?.update(); this.footNote();
@@ -220,6 +233,16 @@ class ChatView {
       this.setStatus(m.status, m.waiting_for);
     } else if (m.t === "requests") {
       this.setRequests(m.requests);
+    } else if (m.t === "todos") {
+      this.todos = m.todos || []; this.renderTodos();
+    } else if (m.t === "usage") {
+      this.usage = m.usage; this.renderUsage();
+    } else if (m.t === "changes") {
+      const before = this.changes;
+      this.changes = new Map(Object.entries(m.changes || {}));
+      // Turns whose changes just arrived get their card.
+      for (const it of this.items.values()) if (it.kind === "user" && it.promptId && this.changes.has(it.promptId) && !before.has(it.promptId)) this.dirty.add(it.turnId);
+      if (this.dirty.size) this.render();
     }
   }
 
@@ -247,8 +270,51 @@ class ChatView {
     } else if (waiting) $(".chat-banner-head b", this.banner).nextSibling.textContent = `: Claude is waiting (${this.waitingFor || "it needs an answer"}). `;
     if (was !== this.status) { const last = this.turnOrder().at(-1); if (last) { this.dirty.add(last); this.render(); } }
     if (was === "busy" && this.status !== "busy") this.expirePending();
+    if (was !== this.status) this.renderTodos();
     this.composer?.update();
     this.footNote();
+  }
+
+  /** The task list while anything on it is open: what Claude is on now and how far along it is; a click shows it all. */
+  renderTodos() {
+    const all = this.todos || [];
+    const open = all.filter((t) => t.status !== "completed");
+    this.todoEl.hidden = !open.length;
+    if (!open.length) { this.todoEl.replaceChildren(); return; }
+    const cur = all.find((t) => t.status === "in_progress");
+    const working = cur && (this.status === "busy" || this.status === "waiting");
+    this.todoEl.replaceChildren(
+      h("button", { class: `chat-todos-head${this.todoOpen ? " open" : ""}`, "aria-expanded": String(this.todoOpen), onclick: () => { this.todoOpen = !this.todoOpen; this.renderTodos(); } },
+        h("span", { class: "chev" }), working ? h("span", { class: "chat-spin" }) : h("span", { class: "chat-icon" }, cur ? "◐" : "☐"),
+        h("span", { class: "chat-label" }, cur ? cur.active || cur.text : `Next: ${open[0].text}`),
+        h("span", { class: "muted" }, `${all.length - open.length} of ${all.length} done`)),
+      this.todoOpen ? this.todoList(all) : "");
+  }
+
+  /** "Opus 5.5 · 12% context · $0.42 · 5h 3% · week 41%", from the run's statusline; the title has the details. */
+  renderUsage() {
+    const el = $(".chat-usage", this.root), u = this.usage;
+    el.hidden = !u;
+    if (!u) return;
+    const pct = (n) => `${Math.round(n)}%`;
+    const when = (sec) => (sec ? new Date(sec * 1000).toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" }) : "");
+    const LIMITS = { five_hour: "5h", seven_day: "week" };
+    const parts = [], tips = [];
+    let hot = false;
+    if (u.model) parts.push(u.model);
+    if (u.context_pct != null) {
+      parts.push(`${pct(u.context_pct)} context`); hot ||= u.context_pct >= 80;
+      tips.push(`Context: ${pct(u.context_pct)} used${u.context_tokens != null && u.context_size ? ` (${Math.round(u.context_tokens / 1000)}k of ${Math.round(u.context_size / 1000)}k tokens)` : ""}`);
+    }
+    if (u.cost_usd != null) { parts.push(`$${u.cost_usd.toFixed(2)}`); tips.push(`Session cost: $${u.cost_usd.toFixed(2)}${u.lines_added != null ? `, +${u.lines_added} −${u.lines_removed ?? 0} lines` : ""}`); }
+    for (const [k, v] of Object.entries(u.rate_limits || {})) {
+      const name = LIMITS[k] || k.replace(/_/g, " ");
+      parts.push(`${name} ${pct(v.used_percentage)}`); hot ||= v.used_percentage >= 80;
+      tips.push(`${name} limit: ${pct(v.used_percentage)} used${v.resets_at ? `, resets ${when(v.resets_at)}` : ""}`);
+    }
+    el.textContent = parts.join(" · ");
+    el.title = tips.join("\n");
+    el.classList.toggle("hot", hot);
   }
 
   /** While Claude waits, a live snapshot of the bottom of the terminal, so a phone can see what it's asking. */
@@ -527,12 +593,16 @@ class ChatView {
       el.append(...this.renderBody(work, turnId, live));
     }
     el.append(...this.renderBody(tail, turnId, live));
-    if (!live) { const card = this.editedCard(body); if (card) el.append(card); }
+    if (!live) { const card = this.editedCard(body, head); if (card) el.append(card); }
     return el;
   }
 
-  /** "Edited 3 files": what a finished turn changed, each file with its +/− counts; a click opens the turn's diff. */
-  editedCard(items) {
+  /**
+   * "Edited 3 files": what a finished turn changed, each file with its +/− counts; a click opens the turn's diff.
+   * With git checkpoints (runs of ours, in a repo) the list comes from git, so files changed through commands show
+   * too; edits git doesn't see (outside the repo, ignored) are added from the transcript.
+   */
+  editedCard(items, head) {
     const by = new Map();
     for (const it of items) {
       if (it.kind !== "file_change" || !it.path || it.status !== "completed") continue;
@@ -540,13 +610,23 @@ class ChatView {
       f.added += it.added || 0; f.removed += it.removed || 0; f.edits.push(it);
       by.set(it.path, f);
     }
-    if (!by.size) return null;
+    const git = head?.promptId ? this.changes.get(head.promptId) : null;
+    const prompt = git?.files.length ? head.promptId : "";
+    const rows = prompt
+      ? [...git.files.map((f) => ({ ...f, created: f.status === "A", deleted: f.status === "D", edits: by.get(f.path)?.edits || [], viaCommand: !by.has(f.path), git: true })),
+         ...[...by.values()].filter((f) => !git.files.some((g) => g.path === f.path))]
+      : [...by.values()];
+    if (!rows.length) return null;
     const agent = this.agent;
+    const verb = prompt ? "Changed" : "Edited";
     return h("div", { class: "chat-edited" },
-      h("div", { class: "chat-edited-head muted" }, `${by.size === 1 ? "Edited 1 file" : `Edited ${by.size} files`}`),
-      ...[...by.values()].map((f) => h("button", { class: "chat-row", title: f.path, onclick: () => this.files.open({ path: f.path, edits: f.edits, agent, tab: "diff" }) },
-        h("span", { class: "chat-icon" }, f.created ? "+" : "✎"), h("span", { class: "chat-label" }, this.rel(f.path)),
-        h("span", { class: "chat-diffstat" }, h("span", { class: "add" }, `+${f.added}`), " ", h("span", { class: "del" }, `−${f.removed}`)))));
+      h("div", { class: "chat-edited-head muted" }, rows.length === 1 ? `${verb} 1 file` : `${verb} ${rows.length}${git?.truncated ? "+" : ""} files`,
+        prompt ? h("span", { title: "from git snapshots taken when the prompt was sent and when Claude stopped" }, ` · +${git.added} −${git.removed} in git`) : ""),
+      ...rows.map((f) => h("button", { class: "chat-row", title: f.path, onclick: () => this.files.open({ path: f.path, edits: f.edits, agent, tab: "diff", git: f.git ? { prompt } : null }) },
+        h("span", { class: "chat-icon" }, f.created ? "+" : f.deleted ? "−" : "✎"), h("span", { class: "chat-label" }, this.rel(f.path)),
+        f.viaCommand ? h("span", { class: "chat-badge", title: "changed by a command, not an edit" }, "via a command") : "",
+        f.binary ? h("span", { class: "chat-badge" }, "binary")
+          : h("span", { class: "chat-diffstat" }, h("span", { class: "add" }, `+${f.added}`), " ", h("span", { class: "del" }, `−${f.removed}`)))));
   }
 
   /**
@@ -619,7 +699,7 @@ class ChatView {
     const out = [];
     for (let i = 0; i < items.length;) {
       const it = items[i];
-      if (it.kind === "assistant") { out.push(h("div", { class: "chat-assistant" }, this.linkify(markdown(it.text)))); i++; continue; }
+      if (it.kind === "assistant") { out.push(h("div", { class: `chat-assistant${it.streaming ? " streaming" : ""}` }, it.streaming ? markdown(it.text) : this.linkify(markdown(it.text)))); i++; continue; }
       if (it.kind === "plan") { out.push(this.renderPlan(it)); i++; continue; }
       if (it.kind === "event") { out.push(this.renderEvent(it)); i++; continue; }
       if (it.kind === "user") { out.push(this.renderUser(it)); i++; continue; }
@@ -886,12 +966,15 @@ class FilesPanel {
     this.el = h("aside", { class: "chat-files", hidden: true, "aria-label": "file" });
   }
 
-  /** edits: the file_change items whose diff to show (from a link: every edit of the file in what's loaded). */
-  open({ path, line = 0, edits = null, agent = "", tab = "" }) {
-    this.path = path; this.line = line; this.agent = agent;
+  /**
+   * edits: the file_change items whose diff to show (from a link: every edit of the file in what's loaded).
+   * git: {prompt}: show what that turn changed in the file according to git instead (it has the commands' changes too).
+   */
+  open({ path, line = 0, edits = null, agent = "", tab = "", git = null }) {
+    this.path = path; this.line = line; this.agent = agent; this.git = git; this.gitDiff = null;
     this.edits = edits || this.view.sorted().filter((i) => i.kind === "file_change" && i.path === path && i.status === "completed");
     this.file = null;
-    this.tab = tab === "diff" && this.edits.length ? "diff" : !line && (isMarkdownPath(path) || isImagePath(path)) ? "preview" : "current";
+    this.tab = tab === "diff" && (this.edits.length || git) ? "diff" : !line && (isMarkdownPath(path) || isImagePath(path)) ? "preview" : "current";
     this.isOpen = true; this.el.hidden = false;
     this.view.root.classList.add("files-open");
     this.render();
@@ -909,7 +992,7 @@ class FilesPanel {
 
   render() {
     const p = this.path, rel = this.view.rel(p);
-    const tabs = [this.edits.length ? ["diff", this.edits.length > 1 ? `Diff (${this.edits.length} edits)` : "Diff"] : null, ["current", "Current"], isMarkdownPath(p) || isImagePath(p) ? ["preview", "Preview"] : null].filter(Boolean);
+    const tabs = [this.git ? ["diff", "Turn diff"] : this.edits.length ? ["diff", this.edits.length > 1 ? `Diff (${this.edits.length} edits)` : "Diff"] : null, ["current", "Current"], isMarkdownPath(p) || isImagePath(p) ? ["preview", "Preview"] : null].filter(Boolean);
     this.body = h("div", { class: "chat-files-body" });
     this.el.replaceChildren(
       h("div", { class: "chat-files-head" },
@@ -920,7 +1003,27 @@ class FilesPanel {
         h("div", { class: "seg", role: "tablist" }, ...tabs.map(([k, label]) => h("button", { class: k === this.tab ? "on" : "", role: "tab", "aria-selected": String(k === this.tab), onclick: () => this.show(k) }, label))),
         this.tab !== "diff" ? h("button", { class: "small", title: "read the file from disk again", onclick: () => { this.file = null; this.render(); } }, "Reload") : ""),
       this.body);
-    if (this.tab === "diff") this.renderDiff(); else this.renderFile();
+    if (this.tab === "diff") { if (this.git) this.renderGitDiff(); else this.renderDiff(); } else this.renderFile();
+  }
+
+  /** The turn's change to this file, from its git checkpoints (fetched once per open). */
+  async renderGitDiff() {
+    const body = this.body, p = this.path, jump = (n) => this.show("current", n);
+    if (!this.gitDiff) {
+      body.append(h("div", { class: "chat-files-note muted" }, "loading…"));
+      let d;
+      try { d = await call("GET", `${this.view.base}/chat/changes/file?${new URLSearchParams({ prompt: this.git.prompt, path: p })}`); }
+      catch (e) { d = { error: e.message }; }
+      if (this.path === p) this.gitDiff = d;
+      if (this.body !== body) return;
+      body.replaceChildren();
+    }
+    const d = this.gitDiff;
+    body.append(h("div", { class: "chat-files-note muted" }, "Everything this turn changed in the file, from git (commands' changes included)."));
+    if (d.error) body.append(h("div", { class: "chat-files-note bad" }, d.error));
+    else if (d.binary) body.append(h("div", { class: "chat-files-note muted" }, "A binary file: nothing to show."));
+    else if (!d.hunks.length) body.append(h("div", { class: "chat-files-note muted" }, "No changes in this file (only its mode, or it was changed and changed back)."));
+    else body.append(diffView(d.hunks, false, jump));
   }
 
   /** Each edit's hunks, in order. A new line number jumps to that line of the file as it is now. */

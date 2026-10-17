@@ -15,6 +15,8 @@ import { chatFor, chatSocket, chatEarlier, chatBlob, chatSubagent, chatCwd, type
 import { chatFile, chatPaths } from "./chat/files";
 import { chatSend, chatInterrupt, chatScreen, chatCommands, chatUpload, deleteUploads, opensMenu } from "./chat/input";
 import { permissionHook, answerRequest, requestsFor } from "./chat/approvals";
+import { messageHook, statuslineHook, turnHook } from "./chat/live";
+import { turnChanges, turnFileDiff, dropCheckpoints } from "./chat/checkpoints";
 import { actor, identify, touch, online, passwordMatches, cleanName, makeSession, sessionCookie, loginBlocked, loginFailed, TOKEN_ACTOR, KEY_ACTOR_PREFIX, createApiKey } from "./auth";
 
 const PUBLIC_DIR = join(config.root, "public");
@@ -654,9 +656,28 @@ route("POST", "/api/runs/:id/chat/requests/:rid", async (req, p) => {
 // Claude calls this (the run's env has the token and run id). It answers when someone decides, or with {} to leave it to the TUI.
 route("POST", "/api/hooks/permission", async (req) => json(await permissionHook(req, await body(req))));
 
+// ---- live polish (see src/chat/live.ts): streaming text, usage, and per-turn git checkpoints
+// Hooks: MessageDisplay → /api/hooks/message (answered at once), UserPromptSubmit and Stop → /api/hooks/turn, and the
+// statusline script → /api/hooks/statusline. All reply {}.
+route("POST", "/api/hooks/message", async (req) => { messageHook(req, await body(req)); return json({}); });
+route("POST", "/api/hooks/turn", async (req) => { await turnHook(req, await body(req)); return json({}); });
+route("POST", "/api/hooks/statusline", async (req) => { statuslineHook(req, await body(req)); return json({}); });
+// GET …/chat/changes?prompt=: what a turn changed in git, per file. GET …/chat/changes/file?prompt=&path=: one file's diff.
+route("GET", "/api/runs/:id/chat/changes", async (_r, p, url) => {
+  const c = await turnChanges(getRun(Number(p.id)).id, str(url.searchParams.get("prompt") ?? undefined, "prompt", { required: true }));
+  if (!c) throw new ApiError(404, "no checkpoints for that turn (the run isn't in a git repo, or it started before checkpoints)");
+  return json(c);
+});
+route("GET", "/api/runs/:id/chat/changes/file", async (_r, p, url) => {
+  const d = await turnFileDiff(getRun(Number(p.id)).id, str(url.searchParams.get("prompt") ?? undefined, "prompt", { required: true }), str(url.searchParams.get("path") ?? undefined, "path", { required: true }));
+  if (!d) throw new ApiError(404, "no diff for that file in that turn");
+  return json(d);
+});
+
 route("DELETE", "/api/runs/:id", async (_r, p) => {
   const run = getRun(Number(p.id));
   if (run.status === "running") throw new ApiError(409, "kill the run before deleting it");
+  await dropCheckpoints(run.id); // before the rows cascade away: it reads them to delete the refs
   db.prepare("DELETE FROM runs WHERE id = ?").run(run.id);
   deleteUploads(run.id);
   if (run.log_path) { try { await Bun.file(run.log_path).delete(); } catch { /* already gone */ } }

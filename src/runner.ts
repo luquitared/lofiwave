@@ -11,7 +11,7 @@ import { discoverCodexSession, codexRolloutPath, claudeRegistry, claudeWebUrl, c
 import { openTerminalForTmux } from "./terminal";
 import { actor } from "./auth";
 import { ttyViewers } from "./tty";
-import { approvalSettingsPath } from "./chat/approvals";
+import { chatSettingsPath } from "./chat/settings";
 
 export class ApiError extends Error {
   /** `extra`: more fields for the JSON error body, next to `error`. */
@@ -113,10 +113,11 @@ export function buildCommand(type: ProcessTypeRow, opts: { cwd: string; prompt?:
   // The configured default mode goes in with the template (so restarts don't count it as an extra arg); args that pick a mode win.
   const picksMode = [...templ, ...extra].some((a) => a === "--dangerously-skip-permissions" || a === "--permission-mode" || a.startsWith("--permission-mode="));
   if (config.claudePermissionMode && basename(command) === "claude" && !picksMode) templ.push("--permission-mode", config.claudePermissionMode);
-  // Interactive claude runs get lofiwave's PermissionRequest hook, so the chat view can answer approvals (src/chat/approvals.ts).
-  // It merges with the user's and the project's hooks. A run that brings its own --settings is left alone.
+  // Interactive claude runs get lofiwave's hooks and statusline (src/chat/settings.ts): approvals, streaming text, usage
+  // and per-turn checkpoints in the chat view. They merge with the user's and the project's hooks. A run that brings
+  // its own --settings is left alone.
   const picksSettings = [...templ, ...extra].some((a) => a === "--settings" || a.startsWith("--settings="));
-  if ((opts.interactive || opts.resumeSession) && basename(command) === "claude" && !picksSettings) templ.push("--settings", approvalSettingsPath());
+  if ((opts.interactive || opts.resumeSession) && basename(command) === "claude" && !picksSettings) templ.push("--settings", chatSettingsPath());
   return { command, args: [...templ, ...extra], template_len: templ.length };
 }
 
@@ -135,7 +136,7 @@ export async function startRun(opts: StartOptions): Promise<RunRow> {
   const meta: Record<string, any> = { timeout_sec: timeoutSec, template_len };
   if (opts.resumeSession) meta.resume_session = opts.resumeSession;
   if (opts.stopWhenIdle && interactive) meta.stop_when_idle = true;
-  if (args.includes(approvalSettingsPath())) meta.approvals = true;
+  if (args.includes(chatSettingsPath())) { meta.approvals = true; meta.live = true; }
   // Who started it: the logged-in person (or "api" for the token), when it comes from a request; scheduled runs have none.
   const by = actor.getStore();
   if (by) meta.started_by = by;
