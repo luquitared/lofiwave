@@ -10,7 +10,7 @@
  */
 import type { ServerWebSocket, Subprocess } from "bun";
 import { db, type RunRow } from "./db";
-import { ApiError } from "./runner";
+import { ApiError, tmuxTarget } from "./runner";
 
 export type TtyData = { runId: number; session: string; cols: number; rows: number; user: string; proc?: Subprocess };
 
@@ -39,16 +39,16 @@ export const ttySocket = {
   async open(ws: ServerWebSocket<TtyData>) {
     const d = ws.data;
     // The simple (polling) view resizes the window by hand, which pins it to "manual"; give sizing back to tmux.
-    await Bun.spawn(["tmux", "set-option", "-t", d.session, "window-size", "latest"], { stdout: "ignore", stderr: "ignore" }).exited;
-    await Bun.spawn(["tmux", "set-option", "-t", d.session, "mouse", "on"], { stdout: "ignore", stderr: "ignore" }).exited;
+    await Bun.spawn(["tmux", "set-option", "-t", tmuxTarget(d.session), "window-size", "latest"], { stdout: "ignore", stderr: "ignore" }).exited;
+    await Bun.spawn(["tmux", "set-option", "-t", tmuxTarget(d.session), "mouse", "on"], { stdout: "ignore", stderr: "ignore" }).exited;
     // Ask clients for focus in/out reports: focusing a viewer then counts as its activity.
     await Bun.spawn(["tmux", "set-option", "-s", "focus-events", "on"], { stdout: "ignore", stderr: "ignore" }).exited;
     // Viewers bigger than the window (someone else typed last, so the window is their size) see tmux's filler there:
     // blank, rather than the default dot pattern.
-    await Bun.spawn(["tmux", "set-option", "-w", "-t", d.session, "fill-character", " "], { stdout: "ignore", stderr: "ignore" }).exited;
+    await Bun.spawn(["tmux", "set-option", "-w", "-t", tmuxTarget(d.session), "fill-character", " "], { stdout: "ignore", stderr: "ignore" }).exited;
     if (ws.readyState !== 1) return;
     addViewer(d.session, 1);
-    d.proc = Bun.spawn(["tmux", "attach-session", "-t", d.session], {
+    d.proc = Bun.spawn(["tmux", "attach-session", "-t", tmuxTarget(d.session)], {
       env: { ...process.env, TERM: "xterm-256color", COLORTERM: "truecolor" },
       terminal: {
         cols: d.cols, rows: d.rows,

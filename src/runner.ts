@@ -79,6 +79,13 @@ export function recordSession(runId: number, s: { session_id: string; agent?: st
 
 export function tmuxPath(): string | null { return Bun.which("tmux"); }
 export const tmuxSessionName = (runId: number) => `ac-${runId}`;
+/**
+ * The -t target for one of our sessions, by its plain name (ac-4 -> "=ac-4:"). Without the "=", tmux falls back to a
+ * prefix (then fnmatch) match when there is no exact one, so once ac-4 is gone `-t ac-4` reads, types into or kills
+ * ac-42. The trailing ":" (that session's current window and pane) makes it valid for pane and window commands too;
+ * a bare "=ac-4" is not. meta.tmux keeps the plain name, which is what people type into `tmux attach -t`.
+ */
+export const tmuxTarget = (session: string) => `=${session}:`;
 
 async function tmux(...args: string[]): Promise<{ code: number; out: string; err: string }> {
   const p = Bun.spawn(["tmux", ...args], { stdout: "pipe", stderr: "pipe" });
@@ -188,14 +195,14 @@ export async function startRun(opts: StartOptions): Promise<RunRow> {
       .flatMap(([k, v]) => ["-e", `${k}=${v}`]);
     const created = await tmux("new-session", "-d", "-s", sess, "-c", cwd, "-x", "180", "-y", "48", ...envFlags, "--", command, ...args);
     if (created.code !== 0) await fail(`failed to start tmux session: ${created.err || created.out}`);
-    await tmux("set-option", "-t", sess, "remain-on-exit", "on");
-    const pane = await tmux("display-message", "-p", "-t", sess, "#{pane_pid}");
+    await tmux("set-option", "-t", tmuxTarget(sess), "remain-on-exit", "on");
+    const pane = await tmux("display-message", "-p", "-t", tmuxTarget(sess), "#{pane_pid}");
     const pid = Number(pane.out);
     if (!pid) await fail(`could not read the tmux pane pid: ${pane.err || pane.out}`);
     entry = { pid, tmux: sess, done };
     // Show the session on this machine's desktop too. Failing to find a terminal is not fatal:
     // the run keeps going in tmux, and the console's own screen view still works.
-    const term = await openTerminalForTmux(sess, { terminal: opts.terminal });
+    const term = await openTerminalForTmux(tmuxTarget(sess), { terminal: opts.terminal });
     if (term.opened) {
       meta.terminal = term.app;
       sink.write(`# window: attached in ${term.app}\n`);
@@ -210,8 +217,10 @@ export async function startRun(opts: StartOptions): Promise<RunRow> {
       let sawBusy = false, idleSince = 0;
       for (;;) {
         await Bun.sleep(1000);
-        const q = await tmux("display-message", "-p", "-t", sess, "#{pane_dead} #{pane_dead_status}");
-        if (q.code !== 0) return null;                    // session vanished (killed from outside)
+        const q = await tmux("display-message", "-p", "-t", tmuxTarget(sess), "#{pane_dead} #{pane_dead_status}");
+        // Session vanished (killed from outside). With other sessions still on the server, display-message -p exits 0
+        // and prints the format with every field empty (here " ") instead of failing.
+        if (q.code !== 0 || !q.out.trim()) return null;
         const [dead, status] = q.out.split(" ");
         if (dead === "1") return status === "" ? null : Number(status);
         // Codex has no hook: find the rollout file it just created and record the session.
@@ -227,7 +236,7 @@ export async function startRun(opts: StartOptions): Promise<RunRow> {
             if (Date.now() - idleSince >= config.idleStopSec * 1000 && !ttyViewers.has(sess)) {
               entry.killedBy = "idle";
               // claude clears its screen on the way out: keep what it showed last (its answer) before closing it.
-              const last = await tmux("capture-pane", "-p", "-J", "-t", sess);
+              const last = await tmux("capture-pane", "-p", "-J", "-t", tmuxTarget(sess));
               if (last.code === 0) sink.write(last.out.replace(/\n{3,}/g, "\n\n").replace(/\s+$/, "") + "\n");
               sink.write(`\n# lofiwave: finished, idle for ${config.idleStopSec}s; closing the session\n`);
               killTree(pid, false).catch(() => {});
@@ -240,7 +249,7 @@ export async function startRun(opts: StartOptions): Promise<RunRow> {
         // Claude Code prints its Remote Control link once it is up; keep it on the run so the UI can open the session in the Claude app.
         ticks++;
         if (!meta.remote_url && ticks < 120 && ticks % 2 === 0) {
-          const cap = await tmux("capture-pane", "-p", "-J", "-t", sess);
+          const cap = await tmux("capture-pane", "-p", "-J", "-t", tmuxTarget(sess));
           const m = cap.code === 0 ? /https:\/\/claude\.ai\/code\/session_[A-Za-z0-9]+/.exec(cap.out) : null;
           if (m) { meta.remote_url = m[0]; db.prepare("UPDATE runs SET meta = ? WHERE id = ?").run(JSON.stringify(meta), id); }
         }
@@ -283,9 +292,9 @@ export async function startRun(opts: StartOptions): Promise<RunRow> {
     if (entry.timer) clearTimeout(entry.timer);
     if (entry.tmux) {
       // Keep what was on screen (scrollback included) as the run's record, then drop the dead session.
-      const cap = await tmux("capture-pane", "-p", "-J", "-t", entry.tmux, "-S", "-2000");
+      const cap = await tmux("capture-pane", "-p", "-J", "-t", tmuxTarget(entry.tmux), "-S", "-2000");
       if (cap.code === 0) sink.write(cap.out.replace(/^Pane is dead.*$/m, "").replace(/\n{3,}/g, "\n\n").replace(/\s+$/, "") + "\n");
-      await tmux("kill-session", "-t", entry.tmux);
+      await tmux("kill-session", "-t", tmuxTarget(entry.tmux));
     }
     const status = entry.killedBy === "timeout" ? "timeout" : entry.killedBy === "idle" ? "success" : entry.killedBy ? "killed" : code === 0 ? "success" : code === null ? "lost" : "failed";
     sink.write(`\n# lofiwave: exited with code ${code ?? "unknown"} (${status})\n`);
@@ -309,14 +318,14 @@ export async function screenOf(run: RunRow, lines = 200, cols = 0): Promise<{ te
   const meta = JSON.parse(run.meta || "{}");
   if (!meta.tmux) throw new ApiError(400, `run ${run.id} is not interactive`);
   let width = 0;
-  const size = await tmux("display-message", "-p", "-t", meta.tmux, "#{window_width}");
+  const size = await tmux("display-message", "-p", "-t", tmuxTarget(meta.tmux), "#{window_width}");
   if (size.code === 0) width = Number(size.out) || 0;
   // A phone can't show 180 columns: resize the window to the viewer's width and the TUI reflows (SIGWINCH), like a real terminal would.
   if (cols >= 40 && cols <= 220 && width && cols !== width && run.status === "running" && !ttyViewers.has(meta.tmux)) {
-    const r = await tmux("resize-window", "-t", meta.tmux, "-x", String(cols), "-y", String(cols < 100 ? 40 : 48));
+    const r = await tmux("resize-window", "-t", tmuxTarget(meta.tmux), "-x", String(cols), "-y", String(cols < 100 ? 40 : 48));
     if (r.code === 0) width = cols;
   }
-  const cap = await tmux("capture-pane", "-p", "-J", "-t", meta.tmux, "-S", String(-lines));
+  const cap = await tmux("capture-pane", "-p", "-J", "-t", tmuxTarget(meta.tmux), "-S", String(-lines));
   if (cap.code !== 0) return { text: "", alive: false, cols: width };
   // TUIs pin their input box to the bottom of the pane; collapse the padding so the useful part fits on a phone.
   return { text: cap.out.replace(/\n{3,}/g, "\n\n").replace(/\s+$/, ""), alive: run.status === "running", cols: width };
@@ -330,10 +339,10 @@ export async function screenOf(run: RunRow, lines = 200, cols = 0): Promise<{ te
 export async function historyOf(run: RunRow, lines = 5000): Promise<{ text: string; own_scroll: boolean }> {
   const meta = JSON.parse(run.meta || "{}");
   if (!meta.tmux) throw new ApiError(400, `run ${run.id} is not interactive`);
-  const cap = await tmux("capture-pane", "-p", "-e", "-J", "-t", meta.tmux, "-S", String(-lines));
+  const cap = await tmux("capture-pane", "-p", "-e", "-J", "-t", tmuxTarget(meta.tmux), "-S", String(-lines));
   if (cap.code !== 0) throw new ApiError(409, `run ${run.id} has no terminal`);
   // A full-screen app (claude's TUI) draws on the alternate screen, so tmux keeps no history: the app owns its scrolling.
-  const st = await tmux("display-message", "-p", "-t", meta.tmux, "#{alternate_on} #{history_size}");
+  const st = await tmux("display-message", "-p", "-t", tmuxTarget(meta.tmux), "#{alternate_on} #{history_size}");
   const [alt, size] = st.out.trim().split(" ");
   return { text: cap.out.replace(/(\n(\x1b\[[0-9;]*m|\s)*)+$/, ""), own_scroll: alt === "1" && size === "0" };
 }
@@ -344,15 +353,15 @@ export async function sendKeys(run: RunRow, text: string, keys: string[], enter:
   if (!meta.tmux) throw new ApiError(400, `run ${run.id} is not interactive`);
   if (run.status !== "running") throw new ApiError(409, `run ${run.id} is not running`);
   if (text) {
-    const r = await tmux("send-keys", "-t", meta.tmux, "-l", "--", text);
+    const r = await tmux("send-keys", "-t", tmuxTarget(meta.tmux), "-l", "--", text);
     if (r.code !== 0) throw new ApiError(500, `tmux send-keys failed: ${r.err}`);
   }
   for (const k of keys) {
     if (!/^[A-Za-z0-9-]+$/.test(k)) throw new ApiError(400, `bad key name: ${k}`);
-    const r = await tmux("send-keys", "-t", meta.tmux, k);
+    const r = await tmux("send-keys", "-t", tmuxTarget(meta.tmux), k);
     if (r.code !== 0) throw new ApiError(400, `tmux did not accept key "${k}": ${r.err}`);
   }
-  if (enter) await tmux("send-keys", "-t", meta.tmux, "Enter");
+  if (enter) await tmux("send-keys", "-t", tmuxTarget(meta.tmux), "Enter");
 }
 
 export async function killRun(id: number, force = false): Promise<RunRow> {
@@ -371,9 +380,9 @@ export async function killRun(id: number, force = false): Promise<RunRow> {
       const meta = JSON.parse(run.meta || "{}");
       if (meta.tmux) {
         // Nobody is polling this session any more: save its screen and drop it, like the live path does.
-        const cap = await tmux("capture-pane", "-p", "-J", "-t", meta.tmux, "-S", "-2000");
+        const cap = await tmux("capture-pane", "-p", "-J", "-t", tmuxTarget(meta.tmux), "-S", "-2000");
         if (cap.code === 0 && run.log_path) appendFileSync(run.log_path, cap.out.replace(/^Pane is dead.*$/m, "").replace(/\n{3,}/g, "\n\n").replace(/\s+$/, "") + "\n\n# lofiwave: killed (orphan)\n");
-        await tmux("kill-session", "-t", meta.tmux);
+        await tmux("kill-session", "-t", tmuxTarget(meta.tmux));
       }
       db.prepare("UPDATE runs SET status = 'killed', ended_at = ? WHERE id = ?").run(now(), id);
     }
@@ -442,7 +451,7 @@ export async function enableRemoteControl(pid: number, o: { replace?: boolean; t
   const meta = run ? JSON.parse(run.meta || "{}") : {};
 
   // The pane to type into: our own run's tmux session, else the pane claude says it is in — if that pane really is this pid.
-  let target: string = meta.tmux ?? "";
+  let target: string = meta.tmux ? tmuxTarget(meta.tmux) : "";
   if (!target && entry.tmux) {
     const pane = entry.tmux.split(".").pop() ?? "";
     const q = pane.startsWith("%") ? await tmux("display-message", "-p", "-t", pane, "#{pane_pid}") : null;
@@ -527,7 +536,7 @@ export function reconcileRuns() {
       continue;
     }
     const meta = JSON.parse(r.meta || "{}");
-    if (meta.tmux) tmux("kill-session", "-t", meta.tmux).catch(() => {});
+    if (meta.tmux) tmux("kill-session", "-t", tmuxTarget(meta.tmux)).catch(() => {});
     db.prepare("UPDATE runs SET status = 'lost', ended_at = ?, error = ?, output = ? WHERE id = ?")
       .run(now(), "process disappeared while the console was not running", readTail(r.log_path, config.outputTailBytes), r.id);
   }
