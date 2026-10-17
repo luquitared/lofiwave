@@ -68,3 +68,14 @@ Headless one-off runs work. These don't:
       and `queue`, and we use none of them.
 
 ## Closed
+
+### #4 tmux targets match by prefix: a dead run's commands can reach another session
+*Opened 2026-10-17 · seen while testing #1 · closed by the `tmux-exact-targets` branch*
+
+`tmux … -t ac-4` picks any session whose name *starts with* `ac-4` when there's no `ac-4`, so once run 4's
+session is gone, commands meant for it go to `ac-42` (here, `capture-pane` read run 42's screen). The runner, the
+screen and keys endpoints, the xterm view and the terminal window all targeted `ac-<id>` this way, so a stale
+browser could type into the wrong run, and a cleanup could kill it. Fix: every command builds its target with
+`tmuxTarget()` (`=ac-4:`, the exact session's current pane; a bare `=ac-4` is rejected by pane commands).
+Also: on tmux 3.6, `display-message -p` on a missing target prints empty fields and exits 0, so the runner's
+"session vanished" check never fired while other sessions existed; it now treats empty output as vanished.

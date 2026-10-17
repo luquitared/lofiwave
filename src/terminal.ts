@@ -101,13 +101,13 @@ function openLinux(argvCmd: string[], shellCmd: string, want: string): TerminalR
   };
 }
 
-/** Attach a desktop terminal window to `session`. Never throws: a missing terminal is reported, not fatal. */
-export async function openTerminalForTmux(session: string, opts: { terminal?: string } = {}): Promise<TerminalResult> {
+/** Attach a desktop terminal window to tmux `target` (an exact one: see tmuxTarget). Never throws: a missing terminal is reported, not fatal. */
+export async function openTerminalForTmux(target: string, opts: { terminal?: string } = {}): Promise<TerminalResult> {
   const want = (opts.terminal || preference).trim().toLowerCase() || "auto";
   if (want === "none" || want === "off" || want === "false" || want === "0") return { opened: false, app: "", error: "" };
   const tmuxBin = Bun.which("tmux") ?? "tmux";
-  const argvCmd = [tmuxBin, "attach-session", "-t", session];
-  const shellCmd = `${shellQuote(tmuxBin)} attach-session -t ${shellQuote(session)}`;
+  const argvCmd = [tmuxBin, "attach-session", "-t", target];
+  const shellCmd = `${shellQuote(tmuxBin)} attach-session -t ${shellQuote(target)}`;
   try {
     if (process.platform === "darwin") return await openMac(shellCmd, want);
     if (process.platform === "linux") return openLinux(argvCmd, shellCmd, want);
@@ -117,6 +117,7 @@ export async function openTerminalForTmux(session: string, opts: { terminal?: st
   }
 }
 
+// A leading "=" gets quoted: zsh (Terminal.app's default shell) expands =word to a command's path, so =ac-4: would break.
 function shellQuote(s: string): string {
-  return /^[\w@%+=:,./-]+$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`;
+  return /^[\w@%+:,./-][\w@%+=:,./-]*$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`;
 }
