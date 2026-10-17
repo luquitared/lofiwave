@@ -8,6 +8,7 @@ A small web console for the coding agents running on your machine: Claude Code, 
 - **Start, stop and restart** agents in a chosen folder. Every agent session is **interactive**: the real TUI in a tmux session you can watch and type into from the browser, and with Claude Code's Remote Control on, in the Claude app too. (Headless `claude -p` stays available through the API.)
 - **Turn on Remote Control** for a Claude Code session that is already running.
 - **Workflows**: a saved agent launch you run by hand or on a cron schedule. Each run is a live session you can watch and step into; it closes itself when the agent is done. Every run is kept: status, duration, full logs.
+- **Swarms**: start several agents on one job in one call, each in its own folder with a shared brief, and follow them on one page: what each is doing, its own one-line status, whether its report is in. Broadcast a message to all of them, or stop them all.
 - A REST API for all of it, documented at `/api/docs`, so other agents can drive it too. The *Connect* page gives you the URL to hand an agent and makes API keys for it.
 
 The UI has four pages: **Sessions** (live sessions and their terminals), **Workflows**, **Connect** (API docs URL and API keys), and **Advanced** (every process on the machine, apps, run history, process types).
@@ -197,7 +198,7 @@ API keys are named and revocable; make them on the *Connect* page. Runs started 
 | | |
 |---|---|
 | `GET /api/processes?type=&kind=` | running processes matching any type (filter by type name or kind): `{pid, ppid, user, cmd, cwd, elapsedSec, rssKb, cpu, type, managed, child, run_id, workflow_name, session}` – `session` is `{session_id, agent, title, name, status, model, web_url, resume_cmd, ...}` or null |
-| `POST /api/processes` | start one: `{type, cwd?, prompt?, extra_args?, env?, timeout_sec?, interactive?, stop_when_idle?, terminal?}` → 201 with the run record. `cwd` falls back to the type's `default_cwd`. `interactive` (default: true for agent types when tmux is installed) starts it in a tmux session that stays open (see Concepts); `stop_when_idle` closes a claude session once it is done, like a workflow run. |
+| `POST /api/processes` | start one: `{type, cwd?, prompt?, extra_args?, env?, timeout_sec?, interactive?, stop_when_idle?, terminal?, group?, parent_run?, target?}` → 201 with the run record. `cwd` falls back to the type's `default_cwd`. `interactive` (default: true for agent types when tmux is installed) starts it in a tmux session that stays open (see Concepts); `stop_when_idle` closes a claude session once it is done, like a workflow run. `group` (letters, digits, `_ . -`) labels related runs so `GET /api/runs?group=` finds them; `parent_run` is the id of the run that started this one (e.g. a controller agent: its own `AGENT_CONSOLE_RUN_ID`). `target` is where it runs: `"local"` (the default) is the only one this server knows. |
 | `POST /api/processes/preview` | same body; returns the `{command, args}` that would be executed, without running |
 | `DELETE /api/processes/:pid?force=1` | SIGTERM (or SIGKILL with `force`) the process **tree**. Works on unmanaged processes too. If the pid belongs to a run, the run is marked `killed`. |
 | `POST /api/processes/:pid/remote-control` | Turn on Remote Control for a claude session that is already running, so it shows up in the Claude app. If it is in a tmux pane (an interactive run, or any claude started inside tmux) the console clears its input box (Ctrl+Y brings a draft back) and types `/remote-control`; it refuses while the session is working. → `{status: "enabled"\|"pending"\|"already", web_url}`. Anywhere else there is nothing to type into: `{replace: true, terminal?}` stops the process and reopens the same conversation here in tmux with the type's `resume_args` → 201 `{status: "replaced", run}`; without `replace` it answers 409. |
@@ -219,7 +220,8 @@ Restarting is done through the run: `POST /api/runs/:id/restart`.
 
 | | |
 |---|---|
-| `GET /api/runs?workflow_id=&status=&type=&trigger=&limit=50&offset=0` | newest first: `{total, limit, offset, runs: [...]}` (without `output`) |
+| `GET /api/runs?workflow_id=&status=&type=&trigger=&group=&parent_run=&limit=50&offset=0` | newest first: `{total, limit, offset, runs: [...]}` (without `output`) |
+| `GET /api/groups` | every `group` any run has: `[{group, runs, running, first_started_at, last_started_at}]`, newest first |
 | `GET /api/runs/:id` | full record incl. `output` (log tail), `duration_ms`, `live` |
 | `GET /api/runs/:id/log?offset=0` | `{data, offset, size, status}` – poll with the returned `offset` to tail a running log |
 | `GET /api/runs/:id/log?raw=1` | the whole log as `text/plain` |
@@ -229,7 +231,9 @@ Restarting is done through the run: `POST /api/runs/:id/restart`.
 | `POST /api/runs/:id/keys` | interactive runs: type into the terminal: `{text?, keys?: ["Down", "Escape", "C-c", ...], enter?: true}` (`keys` are tmux key names, sent after `text`) |
 | `DELETE /api/runs/:id` | delete record + log (must not be running) |
 
-Run record fields: `id, workflow_id, workflow_name, type_name, cwd, command, args, prompt, env, trigger (manual|schedule|restart), status, pid, started_at, ended_at, exit_code, log_path, output, error, meta {timeout_sec, orphan, interactive, tmux}`. `GET /api/runs/:id` also includes `sessions` (below).
+Run record fields: `id, workflow_id, workflow_name, type_name, cwd, command, args, prompt, env, trigger (manual|schedule|restart), status, pid, started_at, ended_at, exit_code, log_path, output, error, group, parent_run, activity, activity_since, meta {timeout_sec, orphan, interactive, tmux}`. `GET /api/runs/:id` also includes `sessions` (below).
+
+`activity` is what the agent is doing now: `working`, `idle` (finished its turn, waiting for a message), `waiting_input` (stuck on a question or permission prompt) or `done` (the run has ended); `activity_since` is when that started. For claude it comes from Claude Code's own session state; agents that report nothing count as `working` while they run.
 
 ### Sessions (linking a run to its Claude Code transcript)
 
@@ -255,6 +259,70 @@ On top of the recorded id, the console reads what the agents themselves know: Cl
 | `PUT /api/runs/:id/sessions/:session_id` | `{ended: true, reason?, model?}` marks it ended |
 | `GET /api/runs/:id/sessions/:session_id/transcript` | the raw JSONL transcript (`text/plain`; only files under the home directory are served) |
 | `GET /api/runs/:id/sessions/:session_id/messages?limit=500` | the same conversation, readable: `[{role: user\|assistant\|tool, text, at}]`, newest `limit` (thinking and tool output left out); *Sessions → Ended* shows it |
+
+### Swarms (several workers on one job)
+
+A **swarm** is a group of agent runs started together, each in its own folder, each reporting through files the console reads. One call starts them all, one call answers "how is it going?", and the UI has a page per swarm (`#swarms/<group>`, linked from *Sessions*). The workers are ordinary runs with `group` set, so every run endpoint works on them too.
+
+| | |
+|---|---|
+| `POST /api/swarms` | start one (or add workers to an existing one): body below → 201 `{group, dir, runs: [{name, ...run}], errors: [{name, error}], links: {ui, status}}`. A worker that fails to start is in `errors`; the others still start. 409 if a worker of that name is still running. |
+| `GET /api/swarms` | every swarm, newest first: `[{group, dir, type, created_at, parent_run, summary, counts, links}]` |
+| `GET /api/swarms/:group` | the whole picture, one call: `{group, dir, brief, type, created_at, elapsed_ms, summary, counts, workers: [...], links}` (below). Also works for any `group` set on runs by hand. |
+| `GET /api/swarms/:group/workers/:name/report` | that worker's `out/REPORT.md` (`text/markdown`; 404 until it exists) |
+| `POST /api/swarms/:group/message` | type a message into every live worker's terminal and send it: `{text, workers?: [names], enter?: true, include_waiting?: false}` → `{sent: [names], skipped: [{name, reason}]}`. Workers whose `activity` is `waiting_input` are skipped (the Enter would pick an option on their prompt) unless `include_waiting` is true; answer those in their terminal or with `POST /api/runs/:id/keys`. |
+| `POST /api/swarms/:group/stop` | stop every running worker: `{workers?: [names], force?}` → `{stopped: [names], errors}`. Folders and reports stay. |
+
+`POST /api/swarms` body (comments are explanation, not JSON):
+
+```jsonc
+{
+  "group": "tune-lr",                     // letters, digits, _ . -  (also the folder name)
+  "cwd_root": "/abs/path/experiments",    // the swarm lives in <cwd_root>/<group>/
+  "brief": "Shared context every worker reads (goal, data, budget, how results are scored)…",
+  "workers": [
+    { "name": "lr-1e3", "prompt": "Train with lr=1e-3 …",          // the task: written to TASK.md
+      "files": {"config.json": "{…}"},                               // optional: extra files for its folder
+      "extra_args": "--model sonnet", "env": {"SEED": "1"} },        // optional, per worker
+    { "name": "lr-3e4", "prompt": "Train with lr=3e-4 …" }
+  ],
+  "type": "claude",          // optional: any agent type (default claude)
+  "extra_args": "…",         // optional: for every worker, before each worker's own
+  "env": {"K": "V"},         // optional: for every worker
+  "timeout_sec": 3600,       // optional: each worker is stopped after this long (a hard cap)
+  "stop_when_idle": false,   // optional: close each claude worker once it is done and idle
+  "parent_run": 42,          // optional: the controller's run id (its AGENT_CONSOLE_RUN_ID)
+  "target": "local"          // optional: where workers run (passed to each start)
+}
+```
+
+What it does, per worker: makes `<cwd_root>/<group>/<name>/` with `BRIEF.md` (the shared brief, also in `<cwd_root>/<group>/BRIEF.md`), `TASK.md` (its prompt plus the contract below), `STATUS.md`, `out/` and any `files`; then starts the agent there, interactive (a tmux terminal you can open and type into), with `group`, `parent_run`, and the env vars `LOFIWAVE_SWARM`, `LOFIWAVE_WORKER`, `LOFIWAVE_OUT_DIR` (= its `out/`). Its first message tells it to read BRIEF.md and TASK.md and follow the contract. A claude worker gets `--permission-mode acceptEdits` unless `extra_args` (or `CLAUDE_PERMISSION_MODE`) picks a mode, and the console answers claude's "trust this folder?" question for the folder it just made. No desktop terminal window is opened unless you pass `terminal`.
+
+**The worker contract** (appended to every TASK.md):
+
+- `STATUS.md`: first line = one line of current state, starting with `working:`, `blocked: <why>` or `done: <summary>`. Rewritten whenever the state changes.
+- `out/`: every deliverable.
+- `out/REPORT.md`: written when finished: what was done, results with numbers, recommendation, anything to check. Writing it means the worker is done.
+- `COST.md` (optional): running total of money spent at the top, one line per thing started; stop with `blocked:` before going over a budget in the brief.
+- Write those files with the agent's file-editing tools rather than shell commands (edits in its folder need no approval under `acceptEdits`; a shell command can stop it on a permission prompt).
+- Stay in its own folder.
+
+Put scoring rules in the brief ("report accuracy on the held-out set as `score: 0.xx` on REPORT.md's first line") so every worker reports the same way.
+
+Each entry of `workers` in `GET /api/swarms/:group`:
+
+| field | |
+|---|---|
+| `name`, `run_id`, `status`, `runs` | the worker, its newest run (a restart or resume makes a new one; `runs` counts them) and that run's status |
+| `activity`, `activity_since` | `working` / `idle` / `waiting_input` / `done`, and since when (see Runs) |
+| `status_line`, `status_text`, `status_updated_at` | STATUS.md's first line, its top 20 lines, its mtime |
+| `report`, `report_updated_at`, `report_excerpt` | whether `out/REPORT.md` exists, when it was written, its first lines |
+| `cost_line` | COST.md's first line (`""` if none) |
+| `out_files` | names in `out/` |
+| `dir`, `started_at`, `ended_at`, `elapsed_ms`, `session` | folder, times, and the agent session `{session_id, title, model, web_url}` |
+| `links` | `terminal` (the UI, on its live terminal), `run`, `screen` (API), `report`, `transcript` (null when absent) |
+
+`counts` is `{workers, running, working, idle, waiting_input, done, reported, blocked}` and `summary` says the same in one line (`"5 workers: 2 working, 1 idle, 2 done · 2/5 reports"`). A worker is finished when `report` is true; `idle` without a report usually means it is waiting for you (check `status_line`).
 
 ### Examples
 

@@ -12,6 +12,9 @@ import { openTerminalForTmux } from "./terminal";
 import { actor } from "./auth";
 import { ttyViewers } from "./tty";
 
+/** Claude Code's first-run question for an unknown folder (worded differently across versions). */
+const TRUST_PROMPT = /trust (the files in )?this folder|Yes, I trust|a project you created or one you trust/i;
+
 export class ApiError extends Error {
   constructor(public status: number, message: string) { super(message); }
 }
@@ -62,7 +65,23 @@ export type StartOptions = {
   terminal?: string;
   /** Interactive claude runs: end the run once the agent has finished its work and sat idle (config.idleStopSec). */
   stopWhenIdle?: boolean;
+  /** A label shared by related runs (a swarm's workers): run JSON `group`, `GET /api/runs?group=`. */
+  group?: string;
+  /** The run that started this one (a swarm's controller): run JSON `parent_run`. */
+  parentRun?: number;
+  /** Extra fields kept in the run's meta (e.g. `swarm_worker`); carried over by restart and resume. */
+  extraMeta?: Record<string, any>;
+  /** Claude in a folder the console made itself: answer its "do you trust this folder?" prompt with yes. */
+  acceptTrust?: boolean;
 };
+
+/** The meta fields that say where a run belongs (group, parent, swarm worker): a restart or resume keeps them. */
+export function lineageOf(meta: Record<string, any>): Pick<StartOptions, "group" | "parentRun" | "extraMeta" | "acceptTrust"> {
+  return {
+    group: meta.group || undefined, parentRun: meta.parent_run ?? undefined,
+    extraMeta: meta.swarm_worker ? { swarm_worker: meta.swarm_worker } : undefined, acceptTrust: Boolean(meta.accept_trust),
+  };
+}
 
 /** Record (or refresh) an agent session on a run. Keyed by (run, session id) so a resumed session can belong to several runs. */
 export function recordSession(runId: number, s: { session_id: string; agent?: string; cwd?: string; transcript_path?: string; model?: string; source?: string }) {
@@ -129,6 +148,10 @@ export async function startRun(opts: StartOptions): Promise<RunRow> {
   const meta: Record<string, any> = { timeout_sec: timeoutSec, template_len };
   if (opts.resumeSession) meta.resume_session = opts.resumeSession;
   if (opts.stopWhenIdle && interactive) meta.stop_when_idle = true;
+  if (opts.group) meta.group = opts.group;
+  if (opts.parentRun) meta.parent_run = opts.parentRun;
+  if (opts.acceptTrust) meta.accept_trust = true;
+  Object.assign(meta, opts.extraMeta ?? {});
   // Who started it: the logged-in person (or "api" for the token), when it comes from a request; scheduled runs have none.
   const by = actor.getStore();
   if (by) meta.started_by = by;
@@ -243,6 +266,22 @@ export async function startRun(opts: StartOptions): Promise<RunRow> {
           const cap = await tmux("capture-pane", "-p", "-J", "-t", sess);
           const m = cap.code === 0 ? /https:\/\/claude\.ai\/code\/session_[A-Za-z0-9]+/.exec(cap.out) : null;
           if (m) { meta.remote_url = m[0]; db.prepare("UPDATE runs SET meta = ? WHERE id = ?").run(JSON.stringify(meta), id); }
+        }
+        // A folder the console just made is new to claude, which asks whether to trust it before doing anything. The menu's
+        // selected option ("❯") is "No, exit" in some versions: move down to the "Yes" option first, then Enter. The prompt
+        // given on the command line goes through once it is answered.
+        if (meta.accept_trust && !meta.trust_accepted && ticks < 60) {
+          const cap = await tmux("capture-pane", "-p", "-J", "-t", sess);
+          if (cap.code === 0 && TRUST_PROMPT.test(cap.out)) {
+            const selected = cap.out.split("\n").find((l) => /^\s*❯\s*\S/.test(l)) ?? "";
+            if (/\bYes\b/i.test(selected)) {
+              await tmux("send-keys", "-t", sess, "Enter");
+              meta.trust_accepted = true;
+              db.prepare("UPDATE runs SET meta = ? WHERE id = ?").run(JSON.stringify(meta), id);
+            } else {
+              await tmux("send-keys", "-t", sess, "Down");   // checked again next second
+            }
+          }
         }
       }
     })();
@@ -396,6 +435,7 @@ export async function restartRun(id: number): Promise<RunRow> {
     typeName: run.type_name, cwd: run.cwd, prompt: run.prompt, extraArgs,
     env: JSON.parse(run.env || "{}"), trigger: "restart", workflow: wf, timeoutSec: meta.timeout_sec ?? 0,
     interactive: Boolean(meta.interactive), resumeSession: meta.resume_session, stopWhenIdle: Boolean(meta.stop_when_idle),
+    ...lineageOf(meta),
   });
 }
 
@@ -407,19 +447,19 @@ export async function resumeSession(runId: number, sessionId: string): Promise<R
   // The run's own type if it is that agent (keeps its env/extra config), else the built-in type for the agent.
   const own = getType(run.type_name);
   const typeName = basename(own.command) === s.agent ? own.name : s.agent;
-  return resumeAgentSession({ agent: s.agent, sessionId, cwd: s.cwd || run.cwd, typeName, env: JSON.parse(run.env || "{}") });
+  return resumeAgentSession({ agent: s.agent, sessionId, cwd: s.cwd || run.cwd, typeName, env: JSON.parse(run.env || "{}"), lineage: lineageOf(JSON.parse(run.meta || "{}")) });
 }
 
 /**
  * Reopen any agent session by id, whether or not the console started it (e.g. a claude session from a terminal, seen on the
  * Agents tab). If that session is still open elsewhere, claude forks a copy that continues the conversation under a new id.
  */
-export async function resumeAgentSession(o: { agent: string; sessionId: string; cwd?: string; typeName?: string; env?: Record<string, string>; terminal?: string }): Promise<RawRun> {
+export async function resumeAgentSession(o: { agent: string; sessionId: string; cwd?: string; typeName?: string; env?: Record<string, string>; terminal?: string; lineage?: ReturnType<typeof lineageOf> }): Promise<RawRun> {
   const typeName = o.typeName ?? o.agent;
   const type = getType(typeName);
   if (!JSON.parse(type.resume_args || "[]").length) throw new ApiError(400, `process type "${typeName}" has no resume_args template`);
   const cwd = o.cwd && existsSync(o.cwd) ? o.cwd : (type.default_cwd || process.env.HOME || "/");
-  const run = await startRun({ typeName, cwd, trigger: "resume", resumeSession: o.sessionId, env: o.env ?? {}, terminal: o.terminal });
+  const run = await startRun({ typeName, cwd, trigger: "resume", resumeSession: o.sessionId, env: o.env ?? {}, terminal: o.terminal, ...o.lineage });
   // Until the agent reports back (claude's hook, codex's rollout), remember what we asked it to reopen.
   recordSession(run.id, { session_id: o.sessionId, agent: o.agent, cwd, source: "resume" });
   return getRun(run.id);
