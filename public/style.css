@@ -400,3 +400,29 @@ dialog .hint { margin:0; font-size:12px; }
 .chat .msg.tool { color:var(--dim); font-family:var(--mono); font-size:11px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:100%; }
 .chat pre.screen { margin:0; border:0; padding:0; }
 @media (max-width:900px) { .chat { max-height:none; min-height:44dvh; } }
+
+/* swarms: one page per group of workers (#swarms/<group>) */
+.dot.waiting_input, .dot.waiting { background:var(--warn); }
+.swarm-head { max-width:none; }
+.swarm-head .card-head { align-items:flex-start; margin-bottom:12px; }
+.swarm-head h2 { display:flex; align-items:center; gap:6px; font-size:18px; overflow-wrap:anywhere; }
+.swarm-head h2 button { min-height:0; padding:2px 8px; }
+.swarm-counts { display:flex; align-items:center; flex-wrap:wrap; gap:8px; margin-bottom:12px; }
+.swarm-counts .pill { display:inline-flex; align-items:center; }
+.swarm-counts .pill:not(.working):not(.idle):not(.waiting_input):not(.on):not(.blocked) .dot { opacity:.5; }
+.swarm-counts .pill.working { color:var(--accent); } .swarm-counts .pill.idle { color:var(--ok); }
+.swarm-counts .pill.waiting_input, .swarm-counts .pill.blocked { background:var(--warn-bg); color:var(--warn); border-color:transparent; }
+.swarm-elapsed { font-size:12px; margin-left:auto; }
+.swarm-bcast input { flex:1; min-width:0; }
+.swarm-brief { margin-top:12px; }
+.swarm-brief summary { cursor:pointer; font-size:12px; }
+.swarm-brief pre { margin:8px 0 0; padding:12px; max-height:240px; overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere; background:var(--sunken); border:1px solid var(--line); border-radius:8px; font-family:var(--mono); font-size:12px; }
+.swarm-name { display:flex; align-items:center; font-size:14px; }
+.swarm-status { max-width:460px; overflow-wrap:anywhere; }
+.swarm-status .bad { color:var(--warn); }
+#swarm-table th:nth-child(1) { width:18%; } #swarm-table th:nth-child(2) { width:40%; }
+@media (max-width:900px) {
+  .swarm-elapsed { flex-basis:100%; margin:0; }
+  .swarm-bcast input { flex:1 1 100%; }
+  .swarm-status { max-width:none; }
+}

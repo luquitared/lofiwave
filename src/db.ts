@@ -89,6 +89,21 @@ CREATE TABLE IF NOT EXISTS api_keys (
   created_at   INTEGER NOT NULL,
   last_used_at INTEGER
 );
+
+-- Swarms: a group of worker runs started together (POST /api/swarms), each in <dir>/<worker>/.
+-- The workers themselves are ordinary runs with meta.group = name and meta.swarm_worker = their name.
+CREATE TABLE IF NOT EXISTS swarms (
+  id         INTEGER PRIMARY KEY,
+  name       TEXT NOT NULL UNIQUE,          -- the group
+  dir        TEXT NOT NULL,                 -- <cwd_root>/<group>
+  brief      TEXT NOT NULL DEFAULT '',
+  type_name  TEXT NOT NULL,
+  target     TEXT NOT NULL DEFAULT '',
+  parent_run INTEGER,
+  created_by TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
 `);
 
 // ---- migrations for columns added after the first release
@@ -150,7 +165,12 @@ export type RunRow = {
   output: string; error: string; meta: string;
 };
 
-export type ApiKeyRow = { id: number; name: string; prefix: string; hash: string; created_by: string; created_at: number; last_used_at: number | null };
+export type SwarmRow = {
+  id: number; name: string; dir: string; brief: string; type_name: string; target: string;
+  parent_run: number | null; created_by: string; created_at: number; updated_at: number;
+};
+
+export type ApiKeyRow ={ id: number; name: string; prefix: string; hash: string; created_by: string; created_at: number; last_used_at: number | null };
 
 export const ACTIVE_STATUSES = ["running"];
 
