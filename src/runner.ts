@@ -1138,7 +1138,7 @@ function reattachE2B(r: RunRow) {
     h = runE2B({
       runId: r.id, c, command: r.command, args: JSON.parse(r.args || "[]"), env: {}, interactive: Boolean(meta.interactive),
       sessionId: meta.claude_session || undefined, outDir: join(config.dataDir, "runs", String(r.id), "out"),
-      forbiddenValues: [config.authToken], write, attach: { sandboxId: meta.e2b.sandbox_id },
+      forbiddenValues: [config.authToken], write, attach: { sandboxId: meta.e2b.sandbox_id, tmux: Boolean(meta.e2b.tmux) },
       onMeta: (patch) => { meta.e2b = { ...meta.e2b, ...patch }; db.prepare("UPDATE runs SET meta = ? WHERE id = ?").run(JSON.stringify(meta), r.id); },
       saveTranscript: (sid, data) => saveTranscript(r.id, meta, sid, data, "e2b", write),
     });

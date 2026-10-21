@@ -22,6 +22,10 @@ let ptyCtl: ReadableStreamDefaultController<Uint8Array> | null = null;
 let killed = false;
 const inputs: string[] = [];
 const resizes: any[] = [];
+// tmux in the fake sandbox: whether it's there, and its one session ("agent") while the agent runs.
+let haveTmux = false;
+let tmuxLive = false;
+let tmuxExit = "";
 
 function stream(frames: (ctl: ReadableStreamDefaultController<Uint8Array>) => void | Promise<void>) {
   return new Response(new ReadableStream({ start: frames }), { headers: { "content-type": "application/connect+json" } });
@@ -69,24 +73,31 @@ beforeAll(() => {
           const s = Buffer.from(body.input.pty, "base64").toString();
           inputs.push(s);
           ptyCtl?.enqueue(ev({ data: { pty: b64(`echo:${s}`) } }));
+          if (s.includes("/exit")) tmuxLive = false, tmuxExit = "0";
+          // A tmux client that goes away on its own (the agent still runs).
+          if (s.includes("drop")) { ptyCtl?.enqueue(ev({ end: { exited: true, status: "exit status 0" } })); ptyCtl?.enqueue(envelope({}, 2)); ptyCtl?.close(); ptyCtl = null; }
           if (s.includes("/exit")) { ptyCtl?.enqueue(ev({ end: { exited: true, status: "exit status 0" } })); ptyCtl?.enqueue(envelope({}, 2)); ptyCtl?.close(); ptyCtl = null; }
           return Response.json({});
         }
         if (method === "Update") { resizes.push(body.pty.size); return Response.json({}); }
         if (method === "SendSignal") return Response.json({});
         if (method === "Start" && body.pty) {
-          return stream((c) => { ptyCtl = c; c.enqueue(ev({ start: { pid: 42 } })); c.enqueue(ev({ data: { pty: b64("\x1b[2J\x1b[H\x1b[1mWelcome\x1b[0m\r\n> ") } })); });
+          const pid = String(body.process.args[2]).includes("tmux attach") ? 50 + calls.length : 42;
+          return stream((c) => { ptyCtl = c; c.enqueue(ev({ start: { pid } })); c.enqueue(ev({ data: { pty: b64("\x1b[2J\x1b[H\x1b[1mWelcome\x1b[0m\r\n> ") } })); });
         }
         // A plain command: answer by what the script does.
         const script: string = body.process.args[2];
         const args: string[] = body.process.args.slice(4);
-        let out = "";
-        if (script.includes("find out")) out = [...files.keys()].filter((k) => k.startsWith(`${args[0]}/out/`)).map((k) => k.slice(args[0].length + 1)).join("\n") + "\n";
+        let out = "", code = 0;
+        if (script.includes("command -v tmux")) code = haveTmux ? 0 : 1;
+        else if (script.includes("new-session")) tmuxLive = true, tmuxExit = "";
+        else if (script.includes("has-session")) out = tmuxLive ? "live\n" : tmuxExit;
+        else if (script.includes("find out")) out = [...files.keys()].filter((k) => k.startsWith(`${args[0]}/out/`)).map((k) => k.slice(args[0].length + 1)).join("\n") + "\n";
         else if (script.includes(".jsonl")) out = `/home/user/.claude/projects/-home-user-work/${args[0]}.jsonl\n`;
         return stream((c) => {
           c.enqueue(ev({ start: { pid: 100 + calls.length } }));
           if (out) c.enqueue(ev({ data: { stdout: b64(out) } }));
-          c.enqueue(ev({ end: { exited: true, status: "exit status 0" } }));
+          c.enqueue(ev({ end: code ? { exitCode: code, exited: true, status: `exit status ${code}` } : { exited: true, status: "exit status 0" } }));
           c.enqueue(envelope({}, 2));
           c.close();
         });
@@ -163,6 +174,40 @@ test("an interactive claude run on e2b, end to end against a fake E2B", async ()
   expect(killed).toBe(true);
   expect(e2bTerms.has(9)).toBe(false);
   expect(log.join("\n")).toContain("Welcome");   // the last screen goes into the log
+});
+
+test("an interactive run in the sandbox's tmux: a dropped client is replaced, the agent's exit code comes back", async () => {
+  const { runE2B, e2bTerms } = await import("../src/e2b");
+  const { parseE2BConfig } = await import("../src/targets");
+  const c = parseE2BConfig({ api_key_env: "LW_TEST_E2B_KEY" });
+  haveTmux = true; killed = false; calls.length = 0; inputs.length = 0;
+  const meta: Record<string, unknown> = {};
+  const log: string[] = [];
+  const h = runE2B({
+    runId: 10, c, command: "claude", args: ["--session-id", "sess-2"], env: {}, interactive: true, outDir: join(tmp, "out2"),
+    forbiddenValues: [], write: (s) => log.push(s), onMeta: (p) => Object.assign(meta, p), saveTranscript: () => {},
+  });
+  const term = e2bTerms.get(10)!;
+  for (let i = 0; i < 100 && !term.screen.screenText().includes("Welcome"); i++) await Bun.sleep(20);
+  expect(meta.tmux).toBe(true);
+  const startTmux = calls.find((x) => String(x.body?.process?.args?.[2]).includes("new-session"))!;
+  expect(startTmux.body.process.args.slice(4)).toEqual(["agent", "120", "40", "claude", "--session-id", "sess-2"]);
+  expect(startTmux.body.process.cwd).toBe("/home/user/work");
+  const attaches = () => calls.filter((x) => x.path === "/process.Process/Start" && x.body.pty);
+  expect(attaches()).toHaveLength(1);
+  expect(attaches()[0].body.process.args).toEqual(["-l", "-c", 'exec tmux attach-session -t "$0"', "agent"]);
+
+  // The client ends while the session lives on: a new client attaches and input goes to it.
+  await term.input("drop");
+  for (let i = 0; i < 100 && attaches().length < 2; i++) await Bun.sleep(20);
+  expect(attaches()).toHaveLength(2);
+  await Bun.sleep(50);
+  await term.input("/exit\r");
+  const r = await h.done;
+  expect(r).toEqual({ code: 0, message: "", failed: false });
+  expect(inputs).toEqual(["drop", "/exit\r"]);
+  expect(e2bTerms.has(10)).toBe(false);
+  haveTmux = false;
 });
 
 test("parseProcEvent: proto3 JSON leaves zeros out", async () => {
