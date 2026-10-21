@@ -7,6 +7,7 @@ A small web console for the coding agents running on your machine: Claude Code, 
 - **See** every agent process on the machine, including ones you started in a terminal: its session name, status (working / idle), model, and its claude.ai link.
 - **Start, stop and restart** agents in a chosen folder. Every agent session is **interactive**: the real TUI in a tmux session you can watch and type into from the browser, and with Claude Code's Remote Control on, in the Claude app too. (Headless `claude -p` stays available through the API.)
 - **Turn on Remote Control** for a Claude Code session that is already running.
+- **Run targets**: run a workflow on Google Cloud Run instead of this machine.
 - **Workflows**: a saved agent launch you run by hand or on a cron schedule. Each run is a live session you can watch and step into; it closes itself when the agent is done. Every run is kept: status, duration, full logs.
 - A REST API for all of it, documented at `/api/docs`, so other agents can drive it too. The *Connect* page gives you the URL to hand an agent and makes API keys for it.
 
@@ -107,7 +108,7 @@ Environment variables, or `KEY=VALUE` lines in `.env`:
 
 ```
 lofiwave/
-├── src/       server.ts (HTTP + API), db.ts, runner.ts, scheduler.ts, cron.ts, procs.ts, agents.ts, terminal.ts
+├── src/       server.ts (HTTP + API), db.ts, runner.ts, targets.ts, scheduler.ts, cron.ts, procs.ts, agents.ts, terminal.ts
 ├── public/    the single-page UI
 ├── scripts/   start.sh, service installers, Claude Code session hook, Tailscale helpers
 └── data/      database, logs, token (created on first start, git-ignored)
@@ -145,6 +146,16 @@ curl -H "authorization: Bearer $TOKEN" -X POST localhost:7770/api/process-types 
 **Workflow** – a saved launch: type + folder + prompt + extra args + env, optionally with a cron `schedule`, a `timeout_sec`, and `allow_overlap` (default off: a scheduled tick is skipped and recorded as an `error` run if the previous one is still running). Times use the server's local timezone.
 
 A workflow with an agent type runs **interactive** (when tmux is installed), so you can watch it in *Sessions*, interrupt it or send it a message while it works. It doesn't open a desktop terminal window. A claude run **closes itself** once the agent has finished and stayed idle for `IDLE_STOP_SEC` (default 120s) with nobody viewing its terminal in the browser; it is recorded as `success`, with its last screen saved in the log. It is never closed while it waits on a permission prompt. Codex reports no idle state, so a Codex workflow run stays open until you stop it or its `timeout_sec` fires.
+
+**Target** – where a workflow runs. Default: this machine. A `cloud-run` target (made under *Settings → Run targets*) runs it as a [Cloud Run Job](https://cloud.google.com/run/docs/create-jobs) instead, through the `gcloud` CLI and whatever account it is logged in as on this machine (`gcloud auth login`; no keys are stored in lofiwave). Each run:
+
+1. writes the job spec (`gcloud run jobs replace`): one job per workflow, `lofiwave-wf-<id>`, with the target's image, the agent's headless command (the type's `args`, the prompt and extra args), `env`, Secret Manager `secrets`, CPU/memory, and `timeout_sec` as the task timeout (24h when 0);
+2. starts an execution (`gcloud run jobs execute --async`) and follows it, copying the container's stdout/stderr from Cloud Logging into the run's log every few seconds;
+3. ends as `success`/`failed` with the execution. Stopping the run cancels the execution. If the console restarts meanwhile, it picks the execution up again.
+
+**The conversation comes back.** A claude run on a target starts with a session id the console picks (`--session-id`). When claude exits (including on a cancel or timeout: the container passes the SIGTERM on and waits for it), a small wrapper prints the transcript to stdout, gzipped and base64'd in numbered chunks with a checksum (lines starting `@@lofiwave-transcript`, kept out of the run log). The console puts it back together and files it where claude looks on this machine: `~/.claude/projects/<folder>/<session>.jsonl`, where the folder is the workflow's `cwd` (here, not in the container; the home folder if it has none). The run then has the session like a local run does: **Transcript**, and **Resume here**, which continues the conversation in that folder. The files the agent changed stay in the container, though: have it commit and push to a branch, and check that branch out here before resuming. The image needs `sh`, `find`, `base64`, `fold` and `awk` (any Debian/Alpine base has them; `gzip` and `sha256sum` are used when present).
+
+The image needs the agent on `PATH`; `docker/claude/Dockerfile` builds one for Claude Code (`gcloud builds submit docker/claude --tag <region>-docker.pkg.dev/<project>/<repo>/claude:latest`, no local Docker needed). With a `repo` on the target it also needs `git`: the repo is cloned into the working dir, `/workspace` by default, before the agent starts. The agent gets no credentials from this machine: pass them as secrets, e.g. `ANTHROPIC_API_KEY=anthropic-api-key`, and give the job's service account `roles/secretmanager.secretAccessor` on them. Runs on a target are headless, so nobody answers permission prompts: give claude `--permission-mode acceptEdits` (or `--dangerously-skip-permissions`) as extra args. A workflow keeps its own target; *Run now* takes a different one for a single run (`POST /api/workflows/:id/run {"target": "..."}`).
 
 Cron: 5 fields `min hour day-of-month month day-of-week`, with `*`, lists, ranges, steps and month/day names, plus `@hourly @daily @weekly @monthly @yearly`.
 
@@ -211,10 +222,23 @@ Restarting is done through the run: `POST /api/runs/:id/restart`.
 |---|---|
 | `GET /api/workflows` | list (includes `next_run_at`, `last_run_at`, `last_run: {id, status, started_at, ended_at}`) |
 | `GET /api/workflows/:id` | one |
-| `POST /api/workflows` | create: `{name, type, cwd?, prompt?, extra_args?, env?, schedule?, enabled?, timeout_sec?, allow_overlap?}` → 201 |
+| `POST /api/workflows` | create: `{name, type, cwd?, prompt?, extra_args?, env?, schedule?, enabled?, timeout_sec?, allow_overlap?, target?}` → 201. `target` is a target's name (`""` = this machine); with one, `cwd` is optional: the folder here its claude conversation is filed under, to resume. |
 | `PUT /api/workflows/:id` | partial update of the same fields (e.g. `{"enabled": false}`) |
 | `DELETE /api/workflows/:id` | delete; past runs are kept (their `workflow_id` becomes null, `workflow_name` stays) |
-| `POST /api/workflows/:id/run` | run now → 201 with the run record; 409 if already running and overlap is off |
+| `POST /api/workflows/:id/run` | run now → 201 with the run record; 409 if already running and overlap is off. Optional `{target}` runs it there this once (`""` = this machine). |
+
+### Targets
+
+| | |
+|---|---|
+| `GET /api/targets` | `{kinds, gcloud, targets: [{id, name, kind, config, workflows}]}` (`gcloud` = its path, or null if not installed) |
+| `GET /api/targets/:name` | one |
+| `POST /api/targets` | create: `{name, kind: "cloud-run", config: {region, image, project?, service_account?, repo?, workdir?, cpu?: "2", memory?: "4Gi", env?, secrets?: {ENV: "secret-name[:version]"}}}` → 201 |
+| `PUT /api/targets/:name` | `{config}`: any subset of the fields above |
+| `DELETE /api/targets/:name` | delete (refused while a workflow uses it) |
+| `POST /api/targets/:name/check` | is it usable from here: `{ok, account, project, error?}` (gcloud installed and logged in, Cloud Run reachable in the region) |
+
+`POST /api/processes` takes `target` too. A run on a target has `meta.target` and, once started, `meta.cloud_run: {job, execution, region, project, console_url}`.
 
 ### Runs
 

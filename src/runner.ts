@@ -2,16 +2,18 @@
  * Starts and tracks managed processes ("runs"). Every process started through the
  * console — ad-hoc or from a workflow — is a row in `runs` with its own log file.
  */
-import { join, basename } from "node:path";
-import { existsSync, statSync, openSync, readSync, closeSync, appendFileSync } from "node:fs";
+import { join, basename, dirname } from "node:path";
+import { existsSync, statSync, openSync, readSync, closeSync, appendFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { db, now, hydrate, type ProcessTypeRow, type RunRow, type WorkflowRow } from "./db";
 import { config, logDir } from "./config";
 import { killTree, pidAlive } from "./procs";
-import { discoverCodexSession, codexRolloutPath, codexIndexReadable, findCodexThread, codexThreadTouched, claudeRegistry, claudeWebUrl, claudeTranscriptPath } from "./agents";
+import { discoverCodexSession, codexRolloutPath, codexIndexReadable, findCodexThread, codexThreadTouched, claudeRegistry, claudeWebUrl, claudeTranscriptPath, claudeTranscriptHome } from "./agents";
 import { openTerminalForTmux, macTabOf, typeIntoMacTab } from "./terminal";
 import { actor } from "./auth";
 import { ttyViewers } from "./tty";
 import { chatSettingsPath } from "./chat/settings";
+import { getTarget, targetConfig, startCloudRunJob, followCloudRun, cancelCloudRun, jobName, TargetError, TranscriptCatcher, type CloudRunHandle } from "./targets";
 
 export class ApiError extends Error {
   /** `extra`: more fields for the JSON error body, next to `error`. */
@@ -23,6 +25,9 @@ type LiveEntry = {
   pid: number;
   proc?: Bun.Subprocess;      // direct child (normal runs)
   tmux?: string;              // tmux session name (interactive runs)
+  /** Runs on a remote target (no local process): stops it there. */
+  cancel?: () => Promise<void>;
+  error?: string;             // the run could not start on its target
   timer?: ReturnType<typeof setTimeout>;
   killedBy?: string;
   done: Promise<void>;
@@ -64,7 +69,14 @@ export type StartOptions = {
   terminal?: string;
   /** Interactive claude runs: end the run once the agent has finished its work and sat idle (config.idleStopSec). */
   stopWhenIdle?: boolean;
+  /** Run on this target (a targets.name) instead of this machine. Always headless; `cwd` is ignored (the target says where). */
+  target?: string;
 };
+
+/** Stop a live entry: on its target, or its local process tree. */
+function stopEntry(entry: LiveEntry, force: boolean): Promise<void> {
+  return entry.cancel ? entry.cancel() : killTree(entry.pid, force);
+}
 
 /** Record (or refresh) an agent session on a run. Keyed by (run, session id) so a resumed session can belong to several runs. */
 export function recordSession(runId: number, s: { session_id: string; agent?: string; cwd?: string; transcript_path?: string; model?: string; source?: string }) {
@@ -133,12 +145,22 @@ export function buildCommand(type: ProcessTypeRow, opts: { cwd: string; prompt?:
 
 export async function startRun(opts: StartOptions): Promise<RunRow> {
   const type = getType(opts.typeName);
-  const cwd = opts.cwd?.trim();
+  const target = opts.target ? targetOf(opts.target) : null;
+  if (target && (opts.interactive || opts.resumeSession)) throw new ApiError(400, `runs on target "${target.name}" are headless: they can't be interactive or resume a session`);
+  // On a target, the process runs in the target's folder (a container's workdir, or the repo it clones).
+  const tc = target ? targetConfig(target) : null;
+  const cwd = tc ? (tc.repo ? tc.workdir || "/workspace" : tc.workdir || "/") : opts.cwd?.trim();
   if (!cwd) throw new ApiError(400, "cwd is required");
-  if (!existsSync(cwd) || !statSync(cwd).isDirectory()) throw new ApiError(400, `cwd does not exist: ${cwd}`);
+  if (!target && (!existsSync(cwd) || !statSync(cwd).isDirectory())) throw new ApiError(400, `cwd does not exist: ${cwd}`);
   const interactive = Boolean(opts.interactive) || Boolean(opts.resumeSession);
   if (interactive && !tmuxPath()) throw new ApiError(400, "interactive runs need tmux on PATH (brew install tmux / apt install tmux)");
-  const { command, args, template_len } = buildCommand(type, opts);
+  let { command, args, template_len } = buildCommand(type, { ...opts, cwd });
+  // A claude run on a target gets a session id picked here, so its transcript can come back as a session of this run
+  // (the container prints it into the logs at the end; see TRANSCRIPT_MARK). It goes in with the template, so a restart
+  // picks a new one rather than carrying this one as an extra arg.
+  const picksSession = args.some((a) => ["--session-id", "--resume", "-r", "--continue", "-c"].includes(a) || a.startsWith("--session-id="));
+  const cloudSession = target && basename(command) === "claude" && !picksSession ? randomUUID() : "";
+  if (cloudSession) { args = [...args.slice(0, template_len), "--session-id", cloudSession, ...args.slice(template_len)]; template_len += 2; }
   const typeEnv: Record<string, string> = JSON.parse(type.env || "{}");
   const env = { ...typeEnv, ...(opts.env ?? {}) };
   const t = now();
@@ -150,7 +172,14 @@ export async function startRun(opts: StartOptions): Promise<RunRow> {
   // Who started it: the logged-in person (or "api" for the token), when it comes from a request; scheduled runs have none.
   const by = actor.getStore();
   if (by) meta.started_by = by;
-  const isCodex = basename(command) === "codex";
+  if (target) {
+    meta.target = target.name; meta.target_kind = target.kind;
+    // The folder on this machine its transcript is filed under, so "Resume here" opens it there.
+    const local = opts.cwd?.trim();
+    if (local && existsSync(local) && statSync(local).isDirectory()) meta.local_cwd = local;
+    if (cloudSession) meta.claude_session = cloudSession;
+  }
+  const isCodex = basename(command) === "codex" && !target;
 
   const ins = db.prepare(
     `INSERT INTO runs (workflow_id, workflow_name, type_name, cwd, command, args, prompt, env, trigger, status, started_at, meta)
@@ -166,7 +195,7 @@ export async function startRun(opts: StartOptions): Promise<RunRow> {
   db.prepare("UPDATE runs SET log_path = ?, meta = ? WHERE id = ?").run(logPath, JSON.stringify(meta), id);
 
   const sink = Bun.file(logPath).writer();
-  const header = `# lofiwave run ${id} | ${new Date(t).toISOString()} | cwd=${cwd}\n# $ ${[command, ...args].map(shellQuote).join(" ")}\n` +
+  const header = `# lofiwave run ${id} | ${new Date(t).toISOString()} | ${target ? `target=${target.name} (${target.kind}) | ` : ""}cwd=${cwd}\n# $ ${[command, ...args].map(shellQuote).join(" ")}\n` +
     (interactive ? `# interactive: tmux session "${meta.tmux}" (attach with: tmux attach -t ${meta.tmux}); the screen is captured here when it ends\n` : "") + "\n";
   sink.write(header);
   sink.flush();
@@ -199,7 +228,34 @@ export async function startRun(opts: StartOptions): Promise<RunRow> {
   let entry: LiveEntry;
   let exited: Promise<number | null>;
 
-  if (interactive) {
+  if (target) {
+    // Nothing runs here: the job starts on the target (that takes a while, so in the background) and we follow it.
+    // Only the run's own env goes along: not this machine's environment, and never the console's token.
+    entry = { pid: 0, done };
+    const job = jobName(opts.workflow ? `wf-${opts.workflow.id}` : `${type.name}-adhoc`);
+    let handle: CloudRunHandle | null = null;
+    const write = (s: string) => { sink.write(s.endsWith("\n") ? s : s + "\n"); sink.flush(); };
+    let cancelled = false;
+    entry.cancel = async () => { cancelled = true; if (handle) await cancelCloudRun(target, handle); };
+    exited = (async () => {
+      try {
+        handle = await startCloudRunJob(target, { job, command, args, env, timeoutSec, runId: id, sessionId: cloudSession || undefined }, write);
+        meta.cloud_run = handle;
+        db.prepare("UPDATE runs SET meta = ? WHERE id = ?").run(JSON.stringify(meta), id);
+        if (cancelled) await cancelCloudRun(target, handle).catch(() => {});
+        const catcher = cloudSession ? new TranscriptCatcher(cloudSession) : undefined;
+        const r = await followCloudRun(target, handle, write, { catcher });
+        if (r.message) write(`# cloud run: ${r.message}`);
+        if (catcher) saveCloudTranscript(id, meta, catcher, write);
+        return r.code;
+      } catch (e: any) {
+        if (cancelled && !handle) return null;
+        entry.error = e?.message ?? String(e);
+        write(`# cloud run: ${entry.error}`);
+        return null;
+      }
+    })();
+  } else if (interactive) {
     // A detached tmux session owns the pty; we track the pane's process and poll its exit status.
     const sess = meta.tmux as string;
     const envFlags = Object.entries({ ...gitEnv, ...env, PATH: childEnv.PATH ?? "", AGENT_CONSOLE_RUN_ID: childEnv.AGENT_CONSOLE_RUN_ID, AGENT_CONSOLE_URL: childEnv.AGENT_CONSOLE_URL, AGENT_CONSOLE_TOKEN: childEnv.AGENT_CONSOLE_TOKEN })
@@ -295,15 +351,15 @@ export async function startRun(opts: StartOptions): Promise<RunRow> {
     });
   }
 
-  db.prepare("UPDATE runs SET pid = ? WHERE id = ?").run(entry.pid, id);
+  if (entry.pid) db.prepare("UPDATE runs SET pid = ? WHERE id = ?").run(entry.pid, id);
   if (opts.workflow) db.prepare("UPDATE workflows SET last_run_at = ? WHERE id = ?").run(t, opts.workflow.id);
   live.set(id, entry);
   starting.delete(id);
   if (timeoutSec > 0) {
     entry.timer = setTimeout(() => {
       entry.killedBy = "timeout";
-      sink.write(`\n# lofiwave: timeout after ${timeoutSec}s, killing process tree\n`);
-      killTree(entry.pid, true).catch(() => {});
+      sink.write(`\n# lofiwave: timeout after ${timeoutSec}s, ${entry.cancel ? "cancelling it" : "killing process tree"}\n`);
+      stopEntry(entry, true).catch(() => {});
     }, timeoutSec * 1000);
   }
 
@@ -316,7 +372,7 @@ export async function startRun(opts: StartOptions): Promise<RunRow> {
       if (cap.code === 0) sink.write(cap.out.replace(/^Pane is dead.*$/m, "").replace(/\n{3,}/g, "\n\n").replace(/\s+$/, "") + "\n");
       await tmux("kill-session", "-t", tmuxTarget(entry.tmux));
     }
-    const status = entry.killedBy === "timeout" ? "timeout" : entry.killedBy === "idle" ? "success" : entry.killedBy ? "killed" : code === 0 ? "success" : code === null ? "lost" : "failed";
+    const status = entry.error ? "error" : entry.killedBy === "timeout" ? "timeout" : entry.killedBy === "idle" ? "success" : entry.killedBy ? "killed" : code === 0 ? "success" : code === null ? "lost" : "failed";
     sink.write(`\n# lofiwave: exited with code ${code ?? "unknown"} (${status})\n`);
     await sink.end();
     if (isCodex && !meta.codex_session) {
@@ -331,7 +387,7 @@ export async function startRun(opts: StartOptions): Promise<RunRow> {
     }
     live.delete(id);
     db.prepare("UPDATE runs SET status = ?, ended_at = ?, exit_code = ?, output = ?, error = ? WHERE id = ?")
-      .run(status, now(), code, readTail(logPath, config.outputTailBytes), code === null && !entry.killedBy ? "tmux session disappeared" : "", id);
+      .run(status, now(), code, readTail(logPath, config.outputTailBytes), entry.error ?? (code === null && !entry.killedBy ? (target ? "the execution ended without a result (cancelled outside lofiwave?)" : "tmux session disappeared") : ""), id);
     markDone();
   })();
 
@@ -391,8 +447,14 @@ export async function sendKeys(run: RunRow, text: string, keys: string[], enter:
 
 export async function killRun(id: number, force = false): Promise<RunRow> {
   const run = getRun(id);
-  if (run.status !== "running" || !run.pid) throw new ApiError(409, `run ${id} is not running`);
   const entry = live.get(id);
+  if (run.status === "running" && entry?.cancel) {
+    entry.killedBy = "user";
+    await entry.cancel();
+    await Promise.race([entry.done, Bun.sleep(3000)]);
+    return getRun(id);
+  }
+  if (run.status !== "running" || !run.pid) throw new ApiError(409, `run ${id} is not running`);
   if (entry) entry.killedBy = "user";
   await killTree(run.pid, force);
   if (entry) {
@@ -430,6 +492,7 @@ export async function restartRun(id: number): Promise<RunRow> {
     typeName: run.type_name, cwd: run.cwd, prompt: run.prompt, extraArgs,
     env: JSON.parse(run.env || "{}"), trigger: "restart", workflow: wf, timeoutSec: meta.timeout_sec ?? 0,
     interactive: Boolean(meta.interactive), resumeSession: meta.resume_session, stopWhenIdle: Boolean(meta.stop_when_idle),
+    target: meta.target,
   });
 }
 
@@ -597,6 +660,7 @@ export function reconcileRuns() {
   for (const r of running) {
     // Still starting: opening its terminal window (osascript) can take seconds, longer if the app is slow to answer.
     if (live.has(r.id) || starting.has(r.id)) continue;
+    if (JSON.parse(r.meta || "{}").target) { reattachRemote(r); continue; }
     if (r.pid && pidAlive(r.pid)) {
       const meta = JSON.parse(r.meta || "{}");
       if (!meta.orphan) {
@@ -610,6 +674,65 @@ export function reconcileRuns() {
     db.prepare("UPDATE runs SET status = 'lost', ended_at = ?, error = ?, output = ? WHERE id = ?")
       .run(now(), "process disappeared while the console was not running", readTail(r.log_path, config.outputTailBytes), r.id);
   }
+}
+
+/**
+ * File the transcript a cloud run handed back where claude looks for it on this machine (under the run's local folder,
+ * else the home folder), and record it as the run's session: the run then has Transcript and "Resume here" like a local one.
+ */
+function saveCloudTranscript(runId: number, meta: Record<string, any>, catcher: TranscriptCatcher, write: (s: string) => void) {
+  if (!catcher.started) { write("# lofiwave: no transcript came back from the container (it was stopped before claude wrote one, or the image lacks sh/base64/fold/awk)"); return; }
+  try {
+    const data = catcher.result();
+    const cwd = meta.local_cwd || process.env.HOME || "/";
+    const path = claudeTranscriptHome(catcher.sessionId, cwd);
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+    writeFileSync(path, data, { mode: 0o600 });
+    recordSession(runId, { session_id: catcher.sessionId, agent: "claude", cwd, transcript_path: path, source: "cloud-run" });
+    write(`# lofiwave: transcript saved to ${path} (${data.length} bytes); "Resume here" continues it in ${cwd}`);
+  } catch (e: any) {
+    write(`# lofiwave: couldn't bring the transcript back: ${e?.message ?? e}`);
+  }
+}
+
+/** A target's ApiError: the same status and message. */
+function targetOf(name: string) {
+  try { return getTarget(name); } catch (e) { if (e instanceof TargetError) throw new ApiError(e.status, e.message); throw e; }
+}
+
+/**
+ * A run on a target that was still going when the console restarted: it kept running there, so follow it again.
+ * One that never got as far as starting an execution is lost.
+ */
+function reattachRemote(r: RunRow) {
+  const meta = JSON.parse(r.meta || "{}");
+  const handle: CloudRunHandle | undefined = meta.cloud_run;
+  let target: ReturnType<typeof getTarget> | null = null;
+  try { target = getTarget(meta.target); } catch { /* deleted since */ }
+  if (!handle || !target) {
+    db.prepare("UPDATE runs SET status = 'lost', ended_at = ?, error = ?, output = ? WHERE id = ?")
+      .run(now(), handle ? `target "${meta.target}" no longer exists` : "the console restarted before the job started", readTail(r.log_path, config.outputTailBytes), r.id);
+    return;
+  }
+  let markDone!: () => void;
+  const done = new Promise<void>((res) => (markDone = res));
+  const entry: LiveEntry = { pid: 0, done, cancel: () => cancelCloudRun(target!, handle) };
+  live.set(r.id, entry);
+  const write = (s: string) => { if (r.log_path) appendFileSync(r.log_path, s.endsWith("\n") ? s : s + "\n"); };
+  (async () => {
+    // Lines up to the log's last write are already in the file; a little overlap beats losing what Cloud Logging ingested late.
+    const lastWrite = r.log_path && existsSync(r.log_path) ? statSync(r.log_path).mtimeMs : r.started_at;
+    write(`# lofiwave: console restarted; following execution ${handle.execution} again`);
+    const catcher = meta.claude_session ? new TranscriptCatcher(meta.claude_session) : undefined;
+    const res = await followCloudRun(target!, handle, write, { resumeSince: new Date(lastWrite - 30_000).toISOString(), catcher }).catch((e) => ({ code: null, message: String(e?.message ?? e) }));
+    if (res.message) write(`# cloud run: ${res.message}`);
+    if (catcher) saveCloudTranscript(r.id, meta, catcher, write);
+    const status = entry.killedBy ? "killed" : res.code === 0 ? "success" : res.code === null ? "lost" : "failed";
+    write(`\n# lofiwave: exited with code ${res.code ?? "unknown"} (${status})`);
+    live.delete(r.id);
+    db.prepare("UPDATE runs SET status = ?, ended_at = ?, exit_code = ?, output = ? WHERE id = ?").run(status, now(), res.code, readTail(r.log_path, config.outputTailBytes), r.id);
+    markDone();
+  })();
 }
 
 export function isLive(id: number) { return live.has(id); }

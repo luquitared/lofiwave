@@ -3,7 +3,8 @@ import { join, dirname, basename } from "node:path";
 import { readdirSync, existsSync } from "node:fs";
 import { hostname, homedir } from "node:os";
 import { config } from "./config";
-import { db, now, hydrate, type ProcessTypeRow, type WorkflowRow, type RunRow, type SessionRow, type ApiKeyRow } from "./db";
+import { db, now, hydrate, type ProcessTypeRow, type WorkflowRow, type RunRow, type SessionRow, type ApiKeyRow, type TargetRow } from "./db";
+import { getTarget, parseTargetConfig, checkTarget, gcloudPath, TargetError, TARGET_KINDS } from "./targets";
 import { listOsProcesses, cwdOf, killTree, type OsProcess } from "./procs";
 import { ApiError, startRun, killRun, restartRun, getRun, getType, readLogFrom, isLive, buildCommand, screenOf, historyOf, sendKeys, tmuxPath, recordSession, resumeSession, resumeAgentSession, enableRemoteControl } from "./runner";
 import { describeSession, sessionForPid, locateSession, transcriptMessages, codexThreadNear, type SessionInfo } from "./agents";
@@ -400,10 +401,11 @@ route("POST", "/api/processes", async (req) => {
     env: strMap(b.env, "env"),
     timeoutSec: int(b.timeout_sec, "timeout_sec", 0),
     // Agents start interactive unless the caller asks for headless; apps stay headless unless asked.
-    interactive: bool(b.interactive, getType(typeName).kind === "agent" && Boolean(tmuxPath())),
+    interactive: bool(b.interactive, !b.target && getType(typeName).kind === "agent" && Boolean(tmuxPath())),
     stopWhenIdle: bool(b.stop_when_idle, false),
     terminal: str(b.terminal, "terminal"),
     trigger: "manual",
+    target: str(b.target, "target").trim() || undefined,
   });
   return json(runOut(run), 201);
 });
@@ -473,12 +475,15 @@ function parseWorkflowBody(b: any, cur?: WorkflowRow) {
   if (!name) throw new ApiError(400, "name is required");
   const type_name = pick("type", (v) => str(v, "type", { required: true }), cur?.type_name ?? "");
   getType(type_name);
+  const target = pick("target", (v) => str(v, "target").trim(), cur?.target ?? "");
+  if (target) targetOf(target);
+  // On a target the process runs in the target's folder; cwd is only kept for running it here.
   const cwd = pick("cwd", (v) => str(v, "cwd"), cur?.cwd ?? "") || getType(type_name).default_cwd;
-  if (!cwd) throw new ApiError(400, "cwd is required (the process type has no default_cwd)");
+  if (!cwd && !target) throw new ApiError(400, "cwd is required (the process type has no default_cwd)");
   const schedule = pick("schedule", (v) => str(v, "schedule").trim(), cur?.schedule ?? "");
   if (schedule) { const err = validateCron(schedule); if (err) throw new ApiError(400, `invalid schedule: ${err}`); }
   return {
-    name, type_name, cwd, schedule,
+    name, type_name, cwd, schedule, target,
     prompt: pick("prompt", (v) => str(v, "prompt"), cur?.prompt ?? ""),
     extra_args: pick("extra_args", (v) => strArray(v, "extra_args"), cur ? JSON.parse(cur.extra_args) : []),
     env: pick("env", (v) => strMap(v, "env"), cur ? JSON.parse(cur.env) : {}),
@@ -497,10 +502,10 @@ route("POST", "/api/workflows", async (req) => {
   let id: number;
   try {
     id = Number(db.prepare(
-      `INSERT INTO workflows (name, type_name, cwd, prompt, extra_args, env, schedule, enabled, timeout_sec, allow_overlap, next_run_at, created_at, updated_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      `INSERT INTO workflows (name, type_name, cwd, prompt, extra_args, env, schedule, enabled, timeout_sec, allow_overlap, target, next_run_at, created_at, updated_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     ).run(w.name, w.type_name, w.cwd, w.prompt, JSON.stringify(w.extra_args), JSON.stringify(w.env), w.schedule,
-      w.enabled ? 1 : 0, w.timeout_sec, w.allow_overlap ? 1 : 0, w.enabled ? computeNext(w.schedule) : null, t, t).lastInsertRowid);
+      w.enabled ? 1 : 0, w.timeout_sec, w.allow_overlap ? 1 : 0, w.target, w.enabled ? computeNext(w.schedule) : null, t, t).lastInsertRowid);
   } catch (e: any) {
     if (String(e.message).includes("UNIQUE")) throw new ApiError(409, `workflow "${w.name}" already exists`);
     throw e;
@@ -513,9 +518,9 @@ route("PUT", "/api/workflows/:id", async (req, p) => {
   const w = parseWorkflowBody(await body(req), cur);
   try {
     db.prepare(
-      `UPDATE workflows SET name=?, type_name=?, cwd=?, prompt=?, extra_args=?, env=?, schedule=?, enabled=?, timeout_sec=?, allow_overlap=?, updated_at=? WHERE id=?`,
+      `UPDATE workflows SET name=?, type_name=?, cwd=?, prompt=?, extra_args=?, env=?, schedule=?, enabled=?, timeout_sec=?, allow_overlap=?, target=?, updated_at=? WHERE id=?`,
     ).run(w.name, w.type_name, w.cwd, w.prompt, JSON.stringify(w.extra_args), JSON.stringify(w.env), w.schedule,
-      w.enabled ? 1 : 0, w.timeout_sec, w.allow_overlap ? 1 : 0, now(), cur.id);
+      w.enabled ? 1 : 0, w.timeout_sec, w.allow_overlap ? 1 : 0, w.target, now(), cur.id);
   } catch (e: any) {
     if (String(e.message).includes("UNIQUE")) throw new ApiError(409, `workflow "${w.name}" already exists`);
     throw e;
@@ -530,7 +535,61 @@ route("DELETE", "/api/workflows/:id", (_r, p) => {
   return json({ ok: true });
 });
 
-route("POST", "/api/workflows/:id/run", async (_r, p) => json(runOut(await runWorkflow(getWorkflow(Number(p.id)), "manual")), 201));
+// Optional body {target}: run it somewhere else this once ("" = this machine).
+route("POST", "/api/workflows/:id/run", async (req, p) => {
+  const wf = getWorkflow(Number(p.id));
+  const b = await body(req);
+  const target = b.target === undefined ? wf.target : str(b.target, "target").trim();
+  if (target) targetOf(target);
+  return json(runOut(await runWorkflow(wf, "manual", target)), 201);
+});
+
+// ---- targets: where runs execute besides this machine (src/targets.ts)
+function targetOf(name: string): TargetRow {
+  try { return getTarget(name); } catch (e) { if (e instanceof TargetError) throw new ApiError(e.status, e.message); throw e; }
+}
+function asApi<T>(fn: () => T): T {
+  try { return fn(); } catch (e) { if (e instanceof TargetError) throw new ApiError(e.status, e.message); throw e; }
+}
+function targetOut(t: TargetRow) {
+  const used = db.query<{ n: number }, [string]>("SELECT COUNT(*) n FROM workflows WHERE target = ?").get(t.name)!.n;
+  return { ...hydrate(t), workflows: used };
+}
+route("GET", "/api/targets", () => json({
+  kinds: TARGET_KINDS, gcloud: gcloudPath(),
+  targets: db.query<TargetRow, []>("SELECT * FROM targets ORDER BY name").all().map(targetOut),
+}));
+route("GET", "/api/targets/:name", (_r, p) => json(targetOut(targetOf(p.name))));
+route("POST", "/api/targets", async (req) => {
+  const b = await body(req);
+  const name = str(b.name, "name", { required: true }).trim();
+  if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,40}$/.test(name)) throw new ApiError(400, "name: letters, digits, . _ - (up to 41)");
+  const kind = str(b.kind, "kind") || "cloud-run";
+  const cfg = asApi(() => parseTargetConfig(kind, b.config ?? {}));
+  const t = now();
+  try {
+    db.prepare("INSERT INTO targets (name, kind, config, created_at, updated_at) VALUES (?,?,?,?,?)").run(name, kind, JSON.stringify(cfg), t, t);
+  } catch (e: any) {
+    if (String(e.message).includes("UNIQUE")) throw new ApiError(409, `target "${name}" already exists`);
+    throw e;
+  }
+  return json(targetOut(targetOf(name)), 201);
+});
+route("PUT", "/api/targets/:name", async (req, p) => {
+  const cur = targetOf(p.name);
+  const b = await body(req);
+  const cfg = asApi(() => parseTargetConfig(cur.kind, b.config ?? {}, JSON.parse(cur.config || "{}")));
+  db.prepare("UPDATE targets SET config = ?, updated_at = ? WHERE id = ?").run(JSON.stringify(cfg), now(), cur.id);
+  return json(targetOut(targetOf(cur.name)));
+});
+route("DELETE", "/api/targets/:name", (_r, p) => {
+  const cur = targetOf(p.name);
+  const used = db.query<{ n: number }, [string]>("SELECT COUNT(*) n FROM workflows WHERE target = ?").get(cur.name)!.n;
+  if (used) throw new ApiError(409, `target is used by ${used} workflow(s)`);
+  db.prepare("DELETE FROM targets WHERE id = ?").run(cur.id);
+  return json({ ok: true });
+});
+route("POST", "/api/targets/:name/check", async (_r, p) => json(await checkTarget(targetOf(p.name))));
 
 // ---- runs
 route("GET", "/api/runs", (_r, _p, url) => {

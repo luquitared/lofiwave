@@ -83,6 +83,8 @@ export const claudeWebUrl = (bridgeSessionId: string | undefined | null) =>
 
 /** Claude Code's project folder for a cwd: every non-alphanumeric character becomes '-'. */
 export const claudeProjectSlug = (cwd: string) => cwd.replace(/[^A-Za-z0-9]/g, "-");
+/** Where claude keeps a session's transcript when it runs in `cwd` (and so where `claude --resume` there looks for it). */
+export const claudeTranscriptHome = (sessionId: string, cwd: string) => join(CLAUDE_PROJECTS, claudeProjectSlug(cwd), `${sessionId}.jsonl`);
 
 export function claudeTranscriptPath(sessionId: string, cwd: string): string {
   const direct = join(CLAUDE_PROJECTS, claudeProjectSlug(cwd), `${sessionId}.jsonl`);
