@@ -49,6 +49,12 @@ export const config = {
    * `--permission-mode <mode>` unless the run's args already pick one. E.g. `bypassPermissions` on a sandbox VM.
    */
   claudePermissionMode: process.env.CLAUDE_PERMISSION_MODE?.trim() || "",
+  /**
+   * Sandbox every codex run starts in (headless, interactive, restart and resume): passed as `--sandbox <mode>` unless
+   * the run's args already pick one. `read-only`, `workspace-write` or `danger-full-access`. Without it, Codex uses its
+   * config, and `codex exec` defaults to read-only: a headless run can then change nothing.
+   */
+  codexSandboxMode: parseSandbox(process.env.CODEX_SANDBOX_MODE ?? ""),
   schedulerIntervalMs: Number(process.env.SCHEDULER_INTERVAL_MS ?? 15_000),
   /**
    * A workflow's interactive claude run ends once the agent has finished and stayed idle this long, with nobody
@@ -58,6 +64,13 @@ export const config = {
   /** How much of the end of a run's log is copied into runs.output when it finishes. */
   outputTailBytes: Number(process.env.OUTPUT_TAIL_BYTES ?? 64 * 1024),
 };
+
+function parseSandbox(v: string): string {
+  const mode = v.trim();
+  if (!mode || ["read-only", "workspace-write", "danger-full-access"].includes(mode)) return mode;
+  console.warn(`CODEX_SANDBOX_MODE: "${mode}" isn't read-only, workspace-write or danger-full-access; ignored`);
+  return "";
+}
 
 function parseGitAuthors(spec: string): Map<string, { name: string; email: string }> {
   const out = new Map<string, { name: string; email: string }>();

@@ -99,6 +99,7 @@ Environment variables, or `KEY=VALUE` lines in `.env`:
 | `GIT_AUTHORS` | *(unset)* | Git identity per signed-in person: `"lucas=Lucas N <lucas@x.com>, seth=Seth N <seth@x.com>"` (key = first word of the sign-in name, any case). Runs they start get `GIT_AUTHOR_*`/`GIT_COMMITTER_*` set, so commits carry their name; everyone else uses git's own config. |
 | `DATA_DIR` | `./data` | SQLite database, run logs, generated token |
 | `CLAUDE_PERMISSION_MODE` | *(unset)* | Permission mode every `claude` run starts in — new, restarted and resumed, headless or interactive: adds `--permission-mode <mode>` (`acceptEdits`, `bypassPermissions`, …) unless the run's args already choose one. Unset: Claude Code's own default (prompts on). |
+| `CODEX_SANDBOX_MODE` | *(unset)* | The same for `codex`: adds `--sandbox <mode>` (`read-only`, `workspace-write`, `danger-full-access`) unless the run's args already choose a sandbox. Unset: Codex's own config, where `codex exec` defaults to `read-only`, so a headless run can't change files. |
 | `SCHEDULER_INTERVAL_MS` | `15000` | How often scheduled workflows are checked |
 | `IDLE_STOP_SEC` | `120` | How long a workflow's claude session stays open once the agent is done and idle (and nobody has its terminal open) |
 | `OUTPUT_TAIL_BYTES` | `65536` | How much of the end of each log is copied into the run record (`output`) |
@@ -149,7 +150,7 @@ Cron: 5 fields `min hour day-of-month month day-of-week`, with `*`, lists, range
 
 The built-in `claude` type keeps Claude Code's permission prompts (see *Security*). A headless run has nobody to answer them, so give it `--permission-mode acceptEdits` (or `--dangerously-skip-permissions`) as extra args, or add it to the type's args under *Advanced → Types*.
 
-Useful extra args: Claude Code `--output-format json`, `--model ...`; Codex `--full-auto`, `--skip-git-repo-check`, `-m ...`.
+Useful extra args: Claude Code `--output-format json`, `--model ...`; Codex `--sandbox workspace-write` (`--full-auto` was removed from Codex), `--skip-git-repo-check`, `-m ...`.
 
 ## API
 
@@ -271,7 +272,7 @@ curl -H "authorization: Bearer $TOKEN" -X POST localhost:7770/api/processes -H '
 curl -H "authorization: Bearer $TOKEN" -X POST localhost:7770/api/workflows -H 'content-type: application/json' -d '{
   "name": "nightly-review", "type": "codex", "cwd": "/path/to/other-repo",
   "prompt": "Review yesterday'"'"'s commits and write findings to REVIEW.md",
-  "extra_args": ["--full-auto"], "schedule": "0 2 * * 1-5", "timeout_sec": 3600 }'
+  "extra_args": ["--sandbox", "workspace-write"], "schedule": "0 2 * * 1-5", "timeout_sec": 3600 }'
 
 # Tail a running log
 curl -H "authorization: Bearer $TOKEN" 'localhost:7770/api/runs/12/log?offset=0'

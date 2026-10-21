@@ -168,6 +168,10 @@ export function hydrate<T extends Record<string, any>>(row: T): T {
   return out;
 }
 
+const CODEX_DESCRIPTION = "OpenAI Codex CLI. Prompt is passed to `codex exec` (headless) or as the first message (interactive). Headless runs are read-only unless you add e.g. --sandbox workspace-write (or set CODEX_SANDBOX_MODE); --skip-git-repo-check outside a git repo.";
+/** codex itself, not the app-server daemon the TUI and the Desktop app start, nor its other helpers. */
+const CODEX_DETECT = "(^|/|\\s)codex(?!\\s+(app-server|exec-server|mcp-server|remote-control)\\b)(\\s|$)";
+
 const BUILTIN_TYPES = [
   {
     name: "claude",
@@ -181,15 +185,19 @@ const BUILTIN_TYPES = [
   },
   {
     name: "codex",
-    description: "OpenAI Codex CLI (non-interactive). Add e.g. --full-auto or --skip-git-repo-check via extra args.",
+    description: CODEX_DESCRIPTION,
     command: "codex",
     args: ["exec", "{prompt}"],
     interactive_args: ["{prompt}"],
     resume_args: ["resume", "{session}"],
     env: {},
-    detect: "(^|/|\\s)codex(\\s|$)",
+    detect: CODEX_DETECT,
   },
 ];
+
+// Built-in codex rows from before 0.16x: --full-auto is gone from Codex, and the old detect caught its app-server daemon.
+db.prepare("UPDATE process_types SET description = ? WHERE name = 'codex' AND builtin = 1 AND description LIKE 'OpenAI Codex CLI (non-interactive)%'").run(CODEX_DESCRIPTION);
+db.prepare("UPDATE process_types SET detect = ? WHERE name = 'codex' AND builtin = 1 AND detect = ?").run(CODEX_DETECT, "(^|/|\\s)codex(\\s|$)");
 
 export function seedBuiltinTypes() {
   const insert = db.prepare(
