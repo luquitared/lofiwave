@@ -726,10 +726,11 @@ async function deliver(runId: number, sess: string, text: string): Promise<{ del
 export async function sendMessage(run: RunRow, text: string): Promise<{ delivered: boolean | null; queued: boolean; attempts: number; sent_at: number }> {
   const meta = JSON.parse(run.meta || "{}");
   if (meta.e2b && meta.interactive) {
-    const t = e2bTerms.get(run.id);
-    if (!t) return { text: "", alive: false, cols: 0 };
-    if (cols >= 40 && cols <= 220 && cols !== t.cols && run.status === "running" && !t.viewers.size) await t.resize(cols, cols < 100 ? 40 : 48);
-    return { text: t.screen.text(lines).replace(/\n{3,}/g, "\n\n"), alive: run.status === "running", cols: t.cols };
+    if (run.status !== "running") throw new ApiError(409, `run ${run.id} is not running`);
+    if (!text.trim()) throw new ApiError(400, "text is required");
+    const sent_at = Date.now();
+    await sendKeys(run, text, [], true);
+    return { delivered: null, queued: false, attempts: 1, sent_at };
   }
   if (!meta.tmux) throw new ApiError(400, `run ${run.id} is not interactive`);
   if (run.status !== "running") throw new ApiError(409, `run ${run.id} is not running`);
@@ -745,6 +746,12 @@ export async function sendMessage(run: RunRow, text: string): Promise<{ delivere
 /** Current contents of an interactive run's terminal (last `lines` of scrollback + screen). `error`: tmux couldn't read it this time. */
 export async function screenOf(run: RunRow, lines = 200, cols = 0): Promise<{ text: string; alive: boolean; cols: number; error?: string }> {
   const meta = JSON.parse(run.meta || "{}");
+  if (meta.e2b && meta.interactive) {
+    const t = e2bTerms.get(run.id);
+    if (!t) return { text: "", alive: false, cols: 0 };
+    if (cols >= 40 && cols <= 220 && cols !== t.cols && run.status === "running" && !t.viewers.size) await t.resize(cols, cols < 100 ? 40 : 48);
+    return { text: t.screen.text(lines).replace(/\n{3,}/g, "\n\n"), alive: run.status === "running", cols: t.cols };
+  }
   if (!meta.tmux) throw new ApiError(400, `run ${run.id} is not interactive`);
   if (run.status === "running") screenSeenAt.set(meta.tmux, Date.now());
   let width = 0;
@@ -795,7 +802,7 @@ export async function sendKeys(run: RunRow, text: string, keys: string[], enter:
     for (const b of bytes) await t.input(b);
     // Like typing: a TUI that sees text and Enter in one read can take the Enter as part of a paste.
     if (enter) { if (text) await Bun.sleep(150); await t.input("\r"); }
-    return;
+    return {};
   }
   if (!meta.tmux) throw new ApiError(400, `run ${run.id} is not interactive`);
   if (run.status !== "running") throw new ApiError(409, `run ${run.id} is not running`);
