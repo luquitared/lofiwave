@@ -960,9 +960,8 @@ function renderRail() {
       ),
     ),
     ...live.map((r) => {
-      const s = sessOf(r);
       return h("button", { class: `rail-item ${consoleRun?.id === r.id ? "active" : ""}`, "data-run": r.id, "aria-current": consoleRun?.id === r.id ? "true" : "false", onclick: () => selectConsoleRun(r) },
-        h("div", { class: "rail-title" }, h("span", { class: `dot ${s?.status || ""}`, title: s?.status || "" }), runLabel(r)),
+        h("div", { class: "rail-title" }, h("span", { class: `dot ${actOf(r)}`, title: actOf(r) }), runLabel(r)),
         h("div", { class: "rail-sub" }, r.workflow_name ? h("span", { class: "wf-tag" }, `⌁ ${r.workflow_name}`) : "", groupTag(r), `${r.type_name} · ${shortCwd(r.cwd)}${byWho(r)}`),
         h("div", { class: "rail-sub dim rail-up" }, railUp(r)),
       );
@@ -1058,7 +1057,10 @@ function originOf(p) {
   return parent ? `${parent} · no terminal here` : "no terminal here";
 }
 
-const railUp = (r) => `up ${fmtDur((Date.now() - r.started_at) / 1000)}` + (sessOf(r)?.model ? ` · ${sessOf(r).model.replace(/^claude-/, "")}` : "");
+/** What a live run is doing (working / idle / waiting_input), from the run itself, else its session's own status. */
+const actOf = (r) => r.activity || sessOf(r)?.status || "";
+const ACT_LABEL = { working: "working", idle: "idle", waiting_input: "waiting for input" };
+const railUp = (r) => (ACT_LABEL[r.activity] ? `${ACT_LABEL[r.activity]} ${fmtDur((Date.now() - r.activity_since) / 1000)} · ` : "") + `up ${fmtDur((Date.now() - r.started_at) / 1000)}` + (sessOf(r)?.model ? ` · ${sessOf(r).model.replace(/^claude-/, "")}` : "");
 /** Keep the live bits fresh (working/idle, uptime) without touching the DOM structure. */
 function patchRail() {
   for (const r of consoleData.live) {
@@ -1068,7 +1070,7 @@ function patchRail() {
     el.classList.toggle("active", selected);
     el.setAttribute("aria-current", selected ? "true" : "false");
     const dot = $(".dot", el);
-    if (dot) { dot.className = `dot ${sessOf(r)?.status || ""}`; dot.title = sessOf(r)?.status || ""; }
+    if (dot) { dot.className = `dot ${actOf(r)}`; dot.title = actOf(r); }
     const up = $(".rail-up", el);
     if (up) up.textContent = railUp(r);
   }

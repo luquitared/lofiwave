@@ -35,7 +35,7 @@ All request and response bodies are JSON (\`content-type: application/json\`). E
 
 ## Quickstart: workflows (the usual job)
 
-A **workflow** is a saved agent launch: an agent type (\`claude\` or \`codex\`), a folder, a prompt, and optionally a cron \`schedule\`. Each time it fires it creates a **run**: a live, interactive session the person can watch and type into from the console. A claude run closes itself once the agent has finished and stayed idle (\`IDLE_STOP_SEC\`, default 120s, while nobody has its terminal open).
+A **workflow** is a saved agent launch: an agent type (\`claude\` or \`codex\`), a folder, a prompt, and optionally a cron \`schedule\`. Each time it fires it creates a **run**: a live, interactive session the person can watch and type into from the console. A claude run closes itself once the agent has finished and stayed idle (\`IDLE_STOP_SEC\`, default 120s, while nobody is watching it).
 
 \`\`\`bash
 curl -X POST ${api}/workflows -H "authorization: Bearer $KEY" -H 'content-type: application/json' -d '{
@@ -61,6 +61,28 @@ Start each worker with \`POST ${api}/processes\`: the same \`"group"\` for all o
 - \`PUT ${api}/runs/<id>/files?path=<rel>\` puts a file (or, with \`&extract=1\`, a tar.gz) in a run's folder; \`GET\` the same URL reads a file, lists a folder, or with \`&archive=1\` downloads it as a tar.gz.
 
 Details are under *Swarms* below.
+
+## Quickstart: drive an agent (a worker you start, message and wait on)
+
+\`\`\`bash
+# start an interactive claude in a folder (the folder is trusted for it, so no trust dialog stops it)
+curl -X POST ${api}/processes -H "authorization: Bearer $KEY" -H 'content-type: application/json' \\
+  -d '{"type": "claude", "cwd": "/absolute/path/to/repo", "prompt": "Fix the failing test", "extra_args": "--permission-mode acceptEdits"}'
+# → {"id": 12, "activity": "working", ...}
+
+# wait (long-poll, up to 600 s) until its turn is over; no sleep loop needed
+curl "${api}/runs/12/wait?until=idle&timeout=600" -H "authorization: Bearer $KEY"
+# → the run with "activity": "idle" (or "waiting_input": a permission prompt; answer it with /keys), "reached": true
+
+# send it a follow-up, checked: {"delivered": true, "queued": false, "sent_at": ...}. Fine while it works: it queues.
+curl -X POST ${api}/runs/12/message -H "authorization: Bearer $KEY" -H 'content-type: application/json' -d '{"text": "Now run the whole suite"}'
+# then wait for the turn that message started
+curl "${api}/runs/12/wait?until=idle&timeout=600&after=<sent_at>" -H "authorization: Bearer $KEY"
+\`\`\`
+
+- Every run has \`activity\` (\`working\` | \`idle\` | \`waiting_input\` | \`done\`) and \`activity_since\`: no need to read the screen to tell.
+- \`GET ${api}/runs/12/sessions/<session_id>/messages\` is the conversation so far; \`POST ${api}/runs/12/kill\` stops it.
+- An idle interactive claude run nobody watches ends by itself after \`AGENT_IDLE_STOP_SEC\` (default 30 min; \`"stop_when_idle": false\` keeps it, \`"idle_stop_sec": N\` sets it), so finished workers free their memory. \`wait?until=done\` waits for the end.
 
 ## Quickstart: register an app so it can be monitored, started and stopped from the console
 
@@ -114,9 +136,9 @@ export function apiIndex(base: string) {
       keys: [`GET|POST ${api}/keys`, `DELETE ${api}/keys/:id`],
       workflows: [`GET|POST ${api}/workflows`, `GET|PUT|DELETE ${api}/workflows/:id`, `POST ${api}/workflows/:id/run {target?}`],
       targets: [`GET|POST ${api}/targets {name, kind: cloud-run|e2b, config}`, `GET|PUT|DELETE ${api}/targets/:name`, `POST ${api}/targets/:name/check`, `POST ${api}/processes {target, input_dir?}`],
-      runs: [`GET ${api}/runs?workflow_id=&status=&type=&group=&parent_run=&limit=&offset=`, `GET|DELETE ${api}/runs/:id`, `GET ${api}/runs/:id/log?offset=|raw=1`, `POST ${api}/runs/:id/kill?force=1`, `POST ${api}/runs/:id/restart`],
+      runs: [`GET ${api}/runs?workflow_id=&status=&type=&group=&parent_run=&limit=&offset=`, `GET|DELETE ${api}/runs/:id`, `GET ${api}/runs/:id/wait?until=idle|done&timeout=&after=`, `GET ${api}/runs/:id/log?offset=|raw=1`, `POST ${api}/runs/:id/kill?force=1`, `POST ${api}/runs/:id/restart`],
       swarms: [`POST ${api}/processes {group?, parent_run?, files?, mkdir_cwd?, queue?}`, `GET ${api}/groups`, `GET|PUT ${api}/runs/:id/files?path=&recursive=1|archive=1|extract=1`, `GET ${api}/runs/:id/results`, `GET ${api}/system (capacity)`],
-      interactive: [`POST ${api}/processes {interactive: true}`, `GET ${api}/runs/:id/screen?lines=200`, `GET ${api}/runs/:id/history?lines=5000`, `POST ${api}/runs/:id/keys {text, keys, enter}`],
+      interactive: [`POST ${api}/processes {interactive: true, trust?, stop_when_idle?, idle_stop_sec?}`, `POST ${api}/runs/:id/message {text}`, `GET ${api}/runs/:id/screen?lines=200`, `GET ${api}/runs/:id/history?lines=5000`, `POST ${api}/runs/:id/keys {text, keys, enter}`],
       sessions: [`GET|POST ${api}/runs/:id/sessions`, `PUT ${api}/runs/:id/sessions/:session_id`, `POST ${api}/runs/:id/sessions/:session_id/resume`, `POST ${api}/sessions/resume {session_id, agent?, cwd?}`, `GET ${api}/sessions/:session_id?agent=`, `GET ${api}/runs/:id/sessions/:session_id/transcript`, `GET ${api}/runs/:id/sessions/:session_id/messages`],
       chat: [`GET ${api}/runs/:id/chat (WebSocket)`, `GET ${api}/runs/:id/chat?before=`, `GET ${api}/runs/:id/chat/blob?ref=&agent=`, `GET ${api}/runs/:id/chat/subagent/:agent_id`, `GET ${api}/runs/:id/chat/file?path=&raw=`, `POST ${api}/runs/:id/chat/paths {paths}`, `GET ${api}/sessions/:session_id/chat… (same, by session id)`, `POST ${api}/runs/:id/chat/send {text, files?, draft?}`, `POST ${api}/runs/:id/chat/interrupt`, `POST ${api}/runs/:id/uploads?name= (raw body)`, `GET ${api}/runs/:id/chat/commands`, `GET ${api}/runs/:id/chat/screen?lines=`, `GET ${api}/runs/:id/chat/requests`, `POST ${api}/runs/:id/chat/requests/:request_id {decision, suggestion?, answers?, mode?, message?}`, `POST ${api}/hooks/permission (Claude's PermissionRequest hook)`, `GET ${api}/runs/:id/chat/changes?prompt=`, `GET ${api}/runs/:id/chat/changes/file?prompt=&path=`, `POST ${api}/hooks/message | turn | statusline (Claude's MessageDisplay, UserPromptSubmit/Stop hooks and statusline)`],
     },

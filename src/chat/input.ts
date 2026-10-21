@@ -16,7 +16,7 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { createHash } from "node:crypto";
 import { config } from "../config";
-import { getRun, tmux, ApiError } from "../runner";
+import { getRun, tmux, tmuxTarget, ApiError } from "../runner";
 import { claudeRegistry } from "../agents";
 import type { RunRow } from "../db";
 
@@ -30,7 +30,7 @@ function paneOf(run: RunRow): { target: string; pid: number } {
   const meta = JSON.parse(run.meta || "{}");
   if (!meta.tmux) throw new ApiError(400, `run ${run.id} is not interactive, so there's no terminal to type into`);
   if (run.status !== "running" || !run.pid) throw new ApiError(409, `run ${run.id} is not running`);
-  return { target: meta.tmux, pid: run.pid };
+  return { target: tmuxTarget(meta.tmux), pid: run.pid };
 }
 
 const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;?]*[ -\/]*[@-~]/g, "");
