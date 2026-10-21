@@ -7,6 +7,11 @@
  * A run: create sandbox → (clone repo) → upload inputs → pre-accept claude's trust/onboarding prompts → start the
  * agent (in a PTY with the tag `lofiwave-<run>`, so a restarted console can find it again) → follow its output →
  * when it exits, copy its transcript and `out/` folder back here → kill (or pause) the sandbox.
+ *
+ * An interactive agent runs in tmux in the sandbox (installed there if the template lacks it), and the PTY followed
+ * here is a tmux client: after the sandbox is paused and resumed, or the console restarts, a new client attaches.
+ * envd's stream of a process started before a pause stays silent after the resume, so following the agent's own
+ * PTY again would leave its terminal blank. Without tmux it falls back to that.
  */
 import { join, relative, resolve, sep } from "node:path";
 import { readdirSync, statSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
@@ -306,8 +311,8 @@ export type E2BRunOpts = {
   /** Merge these into the run's meta.e2b and save it. */
   onMeta: (patch: Record<string, unknown>) => void;
   saveTranscript: (sessionId: string, data: Buffer) => void;
-  /** Re-attach to a run's sandbox after a console restart instead of creating one. */
-  attach?: { sandboxId: string };
+  /** Re-attach to a run's sandbox after a console restart instead of creating one (`tmux`: the agent is in tmux). */
+  attach?: { sandboxId: string; tmux?: boolean };
 };
 
 /** `failed`: it never got going (no key, sandbox couldn't be made, clone failed...). */
@@ -344,6 +349,30 @@ const sd = path.join(home, ".claude"); fs.mkdirSync(sd, { recursive: true });
 const sf = path.join(sd, "settings.json"), s = rd(sf); s.skipDangerousModePermissionPrompt = true;
 fs.writeFileSync(sf, JSON.stringify(s, null, 2));
 ' "$1"`;
+
+/** Puts tmux in the sandbox if it isn't there (stock templates are Debian/Ubuntu with passwordless sudo). */
+const TMUX_INSTALL = `
+command -v tmux >/dev/null 2>&1 && exit 0
+command -v apt-get >/dev/null 2>&1 || exit 1
+inst() { sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq tmux >/dev/null 2>&1; }
+inst || { sudo -n apt-get update -qq >/dev/null 2>&1 && inst; }
+command -v tmux >/dev/null 2>&1`;
+
+/** The agent's tmux session in the sandbox, and where its exit code is left when it ends. */
+const TMUX_SESSION = "agent";
+const EXIT_FILE = "/tmp/lofiwave-exit";
+
+/**
+ * Starts `$4...` (through a login shell, for the template's PATH) in a detached tmux session `$1` of `$2`x`$3`
+ * columns/rows, in the current folder. No status bar, so its terminal shows only the agent; focus events on, as claude asks.
+ */
+const TMUX_START = `
+s=$1 c=$2 r=$3; shift 3
+rm -f ${EXIT_FILE}
+tmux -f /dev/null new-session -d -s "$s" -x "$c" -y "$r" bash -l -c '"$@"; echo $? > ${EXIT_FILE}' lofiwave "$@"
+tmux set -g status off \\; set -g escape-time 0 \\; set -g history-limit 10000 \\; set -g focus-events on 2>/dev/null || true`;
+
+const TERM_ENV = { TERM: "xterm-256color", COLORTERM: "truecolor", LANG: "C.UTF-8", LC_ALL: "C.UTF-8" };
 
 const MAX_IN_FILES = 500, MAX_IN_BYTES = 200 * 1024 * 1024;
 const MAX_OUT_FILES = 1000;
@@ -382,6 +411,7 @@ export function runE2B(o: E2BRunOpts): E2BHandle {
   let sb: SandboxInfo | null = null;
   let envd: Envd | null = null;
   let pid = 0;
+  let inTmux = Boolean(o.attach?.tmux);
   let stopping = false, killed = false, paused = false, finished = false;
   let beforeStop = "";
   let ctl = new AbortController();
@@ -407,13 +437,24 @@ export function runE2B(o: E2BRunOpts): E2BHandle {
   };
   if (term) term.resume = resume;
 
+  /** A new tmux client on the agent's session, as the PTY to follow (any earlier client is detached first). */
+  const attachTmux = async () => {
+    await envd!.exec('tmux detach-client -s "$1" 2>/dev/null; true', [TMUX_SESSION]);
+    return envd!.start({
+      cmd: "/bin/bash", args: ["-l", "-c", 'exec tmux attach-session -t "$0"', TMUX_SESSION],
+      envs: TERM_ENV, cwd: workdir, tag, pty: { cols: term!.cols, rows: term!.rows },
+    }, ctl.signal);
+  };
+  /** Follow the agent again (after a resume, a restart or a dropped stream). */
+  const reconnect = () => (inTmux ? attachTmux() : envd!.connectProc({ tag }, ctl.signal));
+
   const setup = async (): Promise<AsyncGenerator<any>> => {
     if (o.attach) {
       const info = await api.connect(o.attach.sandboxId, c.timeout_sec);
       if (!info) throw new TargetError(410, `sandbox ${o.attach.sandboxId} no longer exists`);
       setEnvd(info);
       write(`# e2b: console restarted; re-attached to sandbox ${info.sandboxID}`);
-      return envd!.connectProc({ tag }, ctl.signal);
+      return reconnect();
     }
     write(`# e2b: creating a sandbox from template "${c.template}"`);
     const info = await api.create({
@@ -449,11 +490,24 @@ export function runE2B(o: E2BRunOpts): E2BHandle {
       const r = await e.exec(TRUST_SCRIPT, [workdir]);
       if (r.code !== 0) write(`# e2b: couldn't pre-accept claude's prompts: ${r.stderr.trim()}`);
     }
+    if (term) {
+      const r = await e.exec(TMUX_INSTALL, [], { timeoutMs: 180_000 });
+      if (r.code === 0) {
+        const t = await e.exec(TMUX_START, [TMUX_SESSION, String(term.cols), String(term.rows), o.command, ...o.args], { cwd: workdir, envs: TERM_ENV });
+        if (t.code === 0) {
+          inTmux = true;
+          o.onMeta({ tmux: true });
+          write(`# e2b: started ${o.command} in tmux (open its terminal from Sessions)`);
+          return attachTmux();
+        }
+        write(`# e2b: couldn't start tmux (${(t.stderr || t.stdout).trim()}); running the agent in a plain PTY`);
+      } else write("# e2b: no tmux in the sandbox and couldn't install it; running the agent in a plain PTY (its terminal goes blank if the sandbox is paused and resumed)");
+    }
     write(`# e2b: starting ${o.command}${o.interactive ? " in a PTY (open its terminal from Sessions)" : ""}`);
     // exec through a login shell so the template's PATH (npm globals) applies; argv is passed as-is, never parsed.
     return e.start({
       cmd: "/bin/bash", args: ["-l", "-c", 'exec "$0" "$@"', o.command, ...o.args],
-      envs: { TERM: "xterm-256color", COLORTERM: "truecolor", LANG: "C.UTF-8", LC_ALL: "C.UTF-8" },
+      envs: TERM_ENV,
       cwd: workdir, tag,
       ...(term ? { pty: { cols: term.cols, rows: term.rows } } : {}),
     }, ctl.signal);
@@ -466,7 +520,12 @@ export function runE2B(o: E2BRunOpts): E2BHandle {
     if (paused) await resume().catch(() => {});
     // claude clears its screen on the way out: keep what it showed before being stopped.
     if (term) beforeStop = term.screen.text(2000);
-    if (envd && pid) {
+    if (envd && inTmux) {
+      // pid is only the tmux client: signal the agent, the child of the pane's shell (which then leaves its exit code).
+      const e = envd;
+      await e.exec('p=$(tmux display -p -t "$1" "#{pane_pid}" 2>/dev/null) && pkill -TERM -P "$p"; true', [TMUX_SESSION]).catch(() => {});
+      setTimeout(() => { if (!finished) e.exec('tmux kill-session -t "$1"', [TMUX_SESSION]).catch(() => {}); }, 8000);
+    } else if (envd && pid) {
       await envd.signal(pid, "SIGNAL_SIGTERM").catch(() => {});
       setTimeout(() => { if (!finished && envd && pid) envd.signal(pid, "SIGNAL_SIGKILL").catch(() => {}); }, 8000);
     }
@@ -509,6 +568,15 @@ export function runE2B(o: E2BRunOpts): E2BHandle {
         throw e;
       }
       let misses = 0;
+      /** The tmux client ended: the agent did too, unless only the client went (then attach a new one). */
+      const agentEnded = async () => {
+        const r = await envd!.exec(`tmux has-session -t "$1" 2>/dev/null && echo live || cat ${EXIT_FILE} 2>/dev/null`, [TMUX_SESSION]).catch(() => null);
+        const out = r?.stdout.trim() ?? "";
+        if (out === "live") return false;
+        code = /^\d+$/.test(out) ? Number(out) : null;
+        message = code === null ? "the agent's tmux session ended" : "";
+        return true;
+      };
       outer: for (;;) {
         try {
           for await (const m of events) {
@@ -517,6 +585,12 @@ export function runE2B(o: E2BRunOpts): E2BHandle {
             misses = 0;
             if (ev.kind === "start") { pid = ev.pid; if (term) term.pid = pid; o.onMeta({ pid }); if (term) term.resize(term.cols, term.rows, true); }
             else if (ev.kind === "data") { touch(); if (ev.stream === "pty" && term) term.output(ev.data); else write(Buffer.from(ev.data).toString("utf8")); }
+            else if (ev.kind === "end" && inTmux) {
+              if (await agentEnded()) break outer;
+              ctl = new AbortController();
+              events = await attachTmux();
+              continue outer;
+            }
             else if (ev.kind === "end") { code = ev.code; message = ev.error || (ev.code === null ? ev.status : ""); break outer; }
           }
           throw new ConnectError("unavailable", "the process stream ended without an exit");
@@ -542,7 +616,7 @@ export function runE2B(o: E2BRunOpts): E2BHandle {
             const w = settle();
             o.onMeta({ paused: false });
             ctl = new AbortController();
-            events = envd!.connectProc({ tag }, ctl.signal);
+            events = await reconnect();
             // The stream is attached by the time its first message arrives; let the waiter go a moment later either way.
             setTimeout(() => { w?.resolve(); term?.redraw(); }, 500);
             continue;
@@ -553,7 +627,7 @@ export function runE2B(o: E2BRunOpts): E2BHandle {
           if (++misses > 8) { message = `lost the sandbox's process stream: ${e?.message ?? e}`; break; }
           await Bun.sleep(Math.min(30_000, 1000 * 2 ** misses));
           ctl = new AbortController();
-          events = envd!.connectProc({ tag }, ctl.signal);
+          events = await reconnect();
         }
       }
     } catch (e: any) {
