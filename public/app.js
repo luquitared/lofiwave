@@ -378,17 +378,25 @@ function openStartDialog({ kind, type } = {}) {
   $("#start-title").textContent = type ? `Start ${type}` : kind === "agent" ? "New session" : "Start a process";
   $(".more", sf).open = false;
   $("#start-feedback").hidden = true;
+  // Sessions can run in an E2B sandbox (a live terminal there); Cloud Run targets are headless, so workflows only.
+  const sandboxes = targets.filter((t) => t.kind === "e2b");
+  sf.target.replaceChildren(h("option", { value: "" }, "This machine"), ...sandboxes.map((t) => h("option", { value: t.name }, `${t.name} (${targetKindLabel(t)})`)));
+  sf.target.value = "";
+  $("#start-target-label").hidden = !sandboxes.length || kind === "app";
   applyStartType();
   dlg.showModal();
   (sf.cwd.value ? sf.prompt : sf.cwd).focus();
   // Prefill the folder with the one most recently used, so a test start is a single click.
   if (!sf.cwd.value) get("/paths?limit=1").then(({ paths }) => { if (dlg.open && !sf.cwd.value && paths?.[0]) sf.cwd.value = paths[0].path; }).catch(() => {});
 }
-/** Agents always start interactive (when tmux is here); apps run headless. The server applies the same default. */
-const startsInteractive = (t) => t?.kind === "agent" && Boolean(systemInfo?.tmux);
+/** Agents always start interactive (when tmux is here, or in a sandbox); apps run headless. The server applies the same default. */
+const startsInteractive = (t) => t?.kind === "agent" && (Boolean(sf.target.value) || Boolean(systemInfo?.tmux));
 function applyStartType() {
   const t = typeByName(sf.type.value);
   const interactive = startsInteractive(t);
+  $("#start-target-hint").textContent = sf.target.value
+    ? "A live terminal in its own sandbox. The agent works in the sandbox's folder; the folder above is where its conversation is filed here, for Resume."
+    : "";
   const needsPrompt = t && (t.args.some((a) => a.includes("{prompt}")) || t.command.includes("{prompt}")) && !interactive;
   sf.prompt.required = Boolean(needsPrompt);
   $("#prompt-label").hidden = t && !needsPrompt && t.kind === "app";
@@ -398,9 +406,10 @@ function applyStartType() {
   sf.extra_args.placeholder = t?.name === "claude" ? "--permission-mode acceptEdits" : t?.name === "codex" ? "--sandbox workspace-write" : "";
 }
 sf.type.onchange = applyStartType;
+sf.target.onchange = applyStartType;
 $("#start-cancel").onclick = () => dlg.close();
 function startFormBody() {
-  return { type: sf.type.value, cwd: sf.cwd.value.trim(), prompt: sf.prompt.value, extra_args: sf.extra_args.value, timeout_sec: Number(sf.timeout_sec.value || 0), interactive: startsInteractive(typeByName(sf.type.value)) };
+  return { type: sf.type.value, cwd: sf.cwd.value.trim(), prompt: sf.prompt.value, extra_args: sf.extra_args.value, timeout_sec: Number(sf.timeout_sec.value || 0), interactive: startsInteractive(typeByName(sf.type.value)), target: sf.target.value || undefined };
 }
 $("#preview-btn").onclick = guard(async () => {
   if (!sf.reportValidity()) return;
