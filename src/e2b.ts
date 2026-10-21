@@ -486,8 +486,10 @@ export function runE2B(o: E2BRunOpts): E2BHandle {
         write(`# e2b: idle for ${Math.round(idleFor / 1000)}s; pausing the sandbox (it resumes when its terminal is opened)`);
         paused = true; if (term) term.paused = true;
         o.onMeta({ paused: true });
+        // A resume can start (and replace `ctl`) while the pause is under way; only the stream from before is ended.
+        const before = ctl;
         try { await api.pause(sb.sandboxID); } catch (e: any) { write(`# e2b: pause failed: ${e?.message ?? e}`); paused = false; if (term) term.paused = false; o.onMeta({ paused: false }); return; }
-        ctl.abort();
+        before.abort();
         return;
       }
       write(`# e2b: idle for ${Math.round(idleFor / 1000)}s; stopping`);
@@ -530,13 +532,14 @@ export function runE2B(o: E2BRunOpts): E2BHandle {
                 wake = done;
               });
             }
-            resumeAsked = false;
-            const w = resumed as { resolve: () => void } | null; resumed = null;
             write(`# e2b: resuming the sandbox`);
-            const info = await api.connect(id, c.timeout_sec).catch((err) => { w?.resolve(); throw err; });
-            if (!info) { message = "the paused sandbox no longer exists"; gone = true; w?.resolve(); break; }
+            // Whoever asks while this is under way waits on the same `resumed`, so it's only taken once it's done.
+            const settle = () => { const w = resumed as { resolve: () => void } | null; resumed = null; resumeAsked = false; return w; };
+            const info = await api.connect(id, c.timeout_sec).catch((err) => { settle()?.resolve(); throw err; });
+            if (!info) { message = "the paused sandbox no longer exists"; gone = true; settle()?.resolve(); break; }
             setEnvd(info);
             paused = false; if (term) term.paused = false; touch();
+            const w = settle();
             o.onMeta({ paused: false });
             ctl = new AbortController();
             events = envd!.connectProc({ tag }, ctl.signal);
