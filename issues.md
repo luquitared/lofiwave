@@ -5,14 +5,25 @@ Open work, newest first within each status. One heading per issue; close it by m
 
 ## Open
 
-### #4 tmux targets match by prefix: a dead run's commands can reach another session
-*Opened 2026-10-17 · seen while testing #1*
+### #7 E2B sessions: what's left after running them in the sandbox's tmux
+*Opened 2026-10-21 · seen running real claude sessions on an e2b target, with all open PRs merged*
 
-`tmux … -t ac-4` picks any session whose name *starts with* `ac-4` when there's no `ac-4`, so once run 4's
-session is gone, commands meant for it go to `ac-42` (here, `capture-pane` read run 42's screen). The runner, the
-screen and keys endpoints and the chat composer all target `ac-<id>` this way (about 20 call sites), so a stale
-browser could type into the wrong run. Fix: exact targets, `=ac-4` for a session and `=ac-4:` for its pane.
-### #4 Runs as jobs: follow-ups
+Interactive sessions on an `e2b` target now work end to end, and still work after a pause and resume or a
+console restart: claude runs in tmux in the sandbox and lofiwave follows a tmux client. Before that, envd's
+stream of the agent's PTY stayed silent after a resume, so the terminal went blank while input still reached it.
+
+- [ ] The chat view shows a running sandbox session as off: it reads the transcript from this machine, and that
+      only comes back when the run ends. It could fetch it from the sandbox (`/files`) while the run is going.
+- [ ] `activity` says `working` while claude sits idle: activity for sandbox runs comes from the screen, not the
+      hook registry (no hooks in the sandbox). Parse the screen like codex's, or forward claude's hooks.
+- [ ] With `--remote-control`, no claude.ai link is picked up for the run (`remote_url` stays empty):
+      link capture watches tmux panes on this machine only. Read it from the sandbox screen instead.
+- [ ] tmux is installed with apt at the start of each run (stock `claude` template), which adds seconds. A
+      lofiwave template with tmux in it would skip that.
+- [ ] The *New session* dialog can pick a target (*Runs on*) but not set the run's env or `input_dir`; the API can.
+- [ ] Neither target mounts volumes; data goes in through `repo` and `input_dir` and out through `out/`.
+
+### #5 Runs as jobs: follow-ups
 *Opened 2026-10-17 · left over from groups, files, results and admission control (README → Swarms)*
 
 - [ ] A scheduled workflow that finds the machine full is recorded as an `error` run; it could queue instead.
@@ -23,7 +34,7 @@ browser could type into the wrong run. Fix: exact targets, `=ac-4` for a session
 - [ ] No way to delete files in a run's folder over the API, or to write outside `cwd` (e.g. a shared input folder
       for a whole group).
 
-### #4 Driving agents: what's left after message / wait / activity
+### #6 Driving agents: what's left after message / wait / activity
 *Opened 2026-10-17 · follow-ups to `swarm-1-reliable-control`*
 
 - [ ] Codex: `delivered` is always null (its input box isn't parsed), its `activity` comes from the screen only
