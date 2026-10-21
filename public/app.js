@@ -551,16 +551,20 @@ function openWorkflowDialog(w) {
 }
 const editWorkflow = (w) => openWorkflowDialog(w);
 function fillTargetSelect(cur) {
-  wf.target.replaceChildren(h("option", { value: "" }, "This machine"), ...targets.map((t) => h("option", { value: t.name }, `${t.name} (Cloud Run, ${t.config.region})`)));
+  wf.target.replaceChildren(h("option", { value: "" }, "This machine"), ...targets.map((t) => h("option", { value: t.name }, `${t.name} (${targetKindLabel(t)})`)));
   if (cur && !targets.some((t) => t.name === cur)) wf.target.append(h("option", { value: cur }, `${cur} (missing)`));
   wf.target.value = cur || "";
 }
 /** On a target the agent works in the target's folder, runs are headless, and the folder here is where its conversation is filed to resume. */
+const targetKindLabel = (t) => (t.kind === "e2b" ? `E2B sandbox, ${t.config.template}` : `Cloud Run, ${t.config.region}`);
 function syncTarget() {
   const remote = Boolean(wf.target.value);
+  const e2b = targets.find((t) => t.name === wf.target.value)?.kind === "e2b";
   $("#wf-cwd-label").firstChild.textContent = remote ? "Folder here (to resume the conversation in) " : "Folder ";
   wf.cwd.placeholder = remote ? "optional: the local checkout of the same repo" : "blank = the type's default folder";
-  $("#wf-hint").textContent = remote
+  $("#wf-hint").textContent = e2b
+    ? "Each run gets its own E2B sandbox. With the target's idle_sec and idle_action \"stop\" it is a live session you can open and type into; otherwise it runs headless. Claude's conversation and the sandbox's out/ folder come back at the end."
+    : remote
     ? "Each run starts a Cloud Run Job and runs the agent headless there; follow it in the run's log. Claude's conversation comes back at the end, to resume here. Nobody can answer permission prompts: give claude e.g. --permission-mode acceptEdits in Extra args."
     : "Each run opens as a live session you can watch and type into. Claude runs close once the agent is done and idle.";
 }
@@ -639,21 +643,22 @@ const loadTargets = guard(async () => {
   const r = await get("/targets");
   targets = r.targets;
   $("#target-table tbody").replaceChildren(...targets.map((t) => h("tr", {},
-    h("td", { class: "full" }, h("b", {}, t.name), h("div", { class: "muted wf-sub" }, "Cloud Run")),
-    h("td", { "data-l": "where" }, t.config.region, t.config.project ? h("div", { class: "muted wf-sub" }, t.config.project) : ""),
-    h("td", { class: "mono trunc", "data-l": "image", title: t.config.image }, t.config.image, t.config.repo ? h("div", { class: "muted wf-sub", title: t.config.repo }, `+ ${t.config.repo}`) : ""),
+    h("td", { class: "full" }, h("b", {}, t.name), h("div", { class: "muted wf-sub" }, t.kind === "e2b" ? "E2B sandbox" : "Cloud Run")),
+    t.kind === "e2b" ? h("td", { "data-l": "where" }, "E2B", h("div", { class: "muted wf-sub" }, t.config.idle_sec ? `idle ${t.config.idle_sec}s → ${t.config.idle_action}` : "no idle limit"))
+      : h("td", { "data-l": "where" }, t.config.region, t.config.project ? h("div", { class: "muted wf-sub" }, t.config.project) : ""),
+    h("td", { class: "mono trunc", "data-l": "image", title: t.kind === "e2b" ? t.config.template : t.config.image }, t.kind === "e2b" ? `template ${t.config.template}` : t.config.image, t.config.repo ? h("div", { class: "muted wf-sub", title: t.config.repo }, `+ ${t.config.repo}`) : ""),
     h("td", { "data-l": "used by" }, t.workflows ? `${t.workflows} workflow${t.workflows === 1 ? "" : "s"}` : h("span", { class: "muted" }, "–")),
     h("td", { class: "row" },
       h("button", { class: "small", onclick: () => checkTarget(t.name) }, "Check"),
-      h("button", { class: "small", onclick: () => openTargetDialog(t) }, "Edit"),
+      t.kind === "e2b" ? h("button", { class: "small", disabled: true, title: "edit E2B targets with PUT /api/targets/:name (see the API docs)" }, "Edit") : h("button", { class: "small", onclick: () => openTargetDialog(t) }, "Edit"),
       h("button", { class: "small danger", onclick: () => confirmDo(`Delete target "${t.name}"?`, async () => { await del(`/targets/${encodeURIComponent(t.name)}`); toast("deleted", true); loadTargets(); }) }, "Delete"),
     ),
   )));
-  if (!targets.length) $("#target-table tbody").replaceChildren(h("tr", {}, h("td", { colspan: 5, class: "muted empty" }, r.gcloud ? "No targets yet. Workflows run on this machine." : "No targets yet. Cloud Run targets need the gcloud CLI on this machine, which isn't installed.")));
+  if (!targets.length) $("#target-table tbody").replaceChildren(h("tr", {}, h("td", { colspan: 5, class: "muted empty" }, r.gcloud || r.e2b_key ? "No targets yet. Workflows run on this machine." : "No targets yet. Cloud Run targets need the gcloud CLI on this machine; E2B targets need E2B_API_KEY in lofiwave's environment.")));
 });
 const checkTarget = (name) => guard(async () => {
   const c = await post(`/targets/${encodeURIComponent(name)}/check`);
-  toast(c.ok ? `${name}: ok (${c.account}, ${c.project})` : `${name}: ${c.error}`, c.ok);
+  toast(c.ok ? `${name}: ok (${c.account ? `${c.account}, ${c.project}` : `E2B key works, ${c.running} sandbox(es) running`})` : `${name}: ${c.error}`, c.ok);
 })();
 const tdlg = $("#target-dialog"), tf = $("#target-form");
 const linesOf = (map) => Object.entries(map || {}).map(([k, v]) => `${k}=${v}`).join("\n");
@@ -744,7 +749,8 @@ const refreshRunDetail = guard(async (full = false) => {
         h("summary", { class: "muted" }, `${r.type_name} · ${shortCwd(r.cwd)} · ${r.trigger} · ${fmtRel(r.started_at)}${r.meta?.remote_url ? " · " : ""}`, r.meta?.remote_url ? h("a", { href: r.meta.remote_url, target: "_blank", onclick: (e) => e.stopPropagation() }, "open on web ↗") : ""),
       h("dl", {},
         h("dt", {}, "type"), h("dd", {}, r.type_name),
-        r.meta?.target ? h("dt", {}, "target") : "", r.meta?.target ? h("dd", {}, `${r.meta.target} (Cloud Run)`, r.meta.cloud_run ? [" · ", h("a", { href: r.meta.cloud_run.console_url, target: "_blank", rel: "noopener" }, `execution ${r.meta.cloud_run.execution} ↗`)] : h("span", { class: "muted" }, "  (starting the job…)")) : "",
+        r.meta?.target ? h("dt", {}, "target") : "", r.meta?.target && r.meta.target_kind === "e2b" ? h("dd", {}, `${r.meta.target} (E2B)`, r.meta.e2b?.sandbox_id ? h("span", { class: "muted" }, `  sandbox ${r.meta.e2b.sandbox_id}${r.meta.e2b.paused ? " (paused while idle)" : ""}${r.meta.e2b.out_files ? ` · ${r.meta.e2b.out_files} file(s) from out/ in ${r.meta.e2b.out_dir}` : ""}`) : h("span", { class: "muted" }, "  (starting the sandbox…)"))
+          : r.meta?.target ? h("dd", {}, `${r.meta.target} (Cloud Run)`, r.meta.cloud_run ? [" · ", h("a", { href: r.meta.cloud_run.console_url, target: "_blank", rel: "noopener" }, `execution ${r.meta.cloud_run.execution} ↗`)] : h("span", { class: "muted" }, "  (starting the job…)")) : "",
         h("dt", {}, "cwd"), h("dd", {}, r.cwd),
         h("dt", {}, "command"), h("dd", {}, quoteArgs([r.command, ...r.args])),
         r.prompt ? h("dt", {}, "prompt") : "", r.prompt ? h("dd", { style: "white-space:pre-wrap" }, r.prompt) : "",
@@ -1159,7 +1165,7 @@ function paneFor(r) {
       : mode === "chat" ? [h("div", { id: "console-chat" })]
       : [h("pre", { id: "console-screen", class: "screen" }, "connecting to the terminal…"), keysForm(r.id, () => pollScreenInto($("#console-screen"), r.id, true))]),
     mode === "terminal" ? h("div", { class: "term-hint muted" }, copyHint()) : "",
-    h("div", { class: "pane-foot muted mono" }, `tmux attach -t ${r.meta?.tmux || "?"}`),
+    h("div", { class: "pane-foot muted mono" }, r.meta?.e2b ? `E2B sandbox ${r.meta.e2b.sandbox_id || "(starting…)"}${r.meta.e2b.paused ? " · paused while idle; opening the terminal resumes it" : ""}` : `tmux attach -t ${r.meta?.tmux || "?"}`),
   ];
 }
 

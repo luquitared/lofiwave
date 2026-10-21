@@ -13,7 +13,9 @@ import { openTerminalForTmux, macTabOf, typeIntoMacTab } from "./terminal";
 import { actor } from "./auth";
 import { ttyViewers } from "./tty";
 import { chatSettingsPath } from "./chat/settings";
-import { getTarget, targetConfig, startCloudRunJob, followCloudRun, cancelCloudRun, jobName, TargetError, TranscriptCatcher, type CloudRunHandle } from "./targets";
+import { getTarget, targetConfig, startCloudRunJob, followCloudRun, cancelCloudRun, jobName, TargetError, TranscriptCatcher, e2bConfig, type CloudRunHandle, type E2BConfig } from "./targets";
+import { runE2B, sandboxEnv, e2bTerms, type E2BHandle } from "./e2b";
+import { keyBytes } from "./vtscreen";
 
 export class ApiError extends Error {
   /** `extra`: more fields for the JSON error body, next to `error`. */
@@ -28,6 +30,7 @@ type LiveEntry = {
   /** Runs on a remote target (no local process): stops it there. */
   cancel?: () => Promise<void>;
   error?: string;             // the run could not start on its target
+  lostWhy?: string;           // why a run on a target ended without an exit code
   timer?: ReturnType<typeof setTimeout>;
   killedBy?: string;
   done: Promise<void>;
@@ -69,8 +72,13 @@ export type StartOptions = {
   terminal?: string;
   /** Interactive claude runs: end the run once the agent has finished its work and sat idle (config.idleStopSec). */
   stopWhenIdle?: boolean;
-  /** Run on this target (a targets.name) instead of this machine. Always headless; `cwd` is ignored (the target says where). */
+  /**
+   * Run on this target (a targets.name) instead of this machine; `cwd` is ignored (the target says where). Headless,
+   * except on an e2b target, where an interactive run gets a live terminal in its sandbox.
+   */
   target?: string;
+  /** e2b targets: a local folder uploaded to the sandbox's `<workdir>/in/` before the agent starts. */
+  inputDir?: string;
 };
 
 /** Stop a live entry: on its target, or its local process tree. */
@@ -118,7 +126,7 @@ function templateFor(type: ProcessTypeRow, interactive: boolean, resume: boolean
   return ia.length ? ia : JSON.parse(type.args || "[]");
 }
 
-export function buildCommand(type: ProcessTypeRow, opts: { cwd: string; prompt?: string; extraArgs?: string[]; interactive?: boolean; resumeSession?: string }) {
+export function buildCommand(type: ProcessTypeRow, opts: { cwd: string; prompt?: string; extraArgs?: string[]; interactive?: boolean; resumeSession?: string; permissionMode?: string }) {
   const templateArgs = templateFor(type, Boolean(opts.interactive), Boolean(opts.resumeSession));
   const prompt = opts.prompt ?? "";
   const needsPrompt = templateArgs.some((a) => a.includes("{prompt}")) || type.command.includes("{prompt}");
@@ -131,7 +139,8 @@ export function buildCommand(type: ProcessTypeRow, opts: { cwd: string; prompt?:
   const extra = opts.extraArgs ?? [];
   // The configured default mode goes in with the template (so restarts don't count it as an extra arg); args that pick a mode win.
   const picksMode = [...templ, ...extra].some((a) => a === "--dangerously-skip-permissions" || a === "--permission-mode" || a.startsWith("--permission-mode="));
-  if (config.claudePermissionMode && basename(command) === "claude" && !picksMode) templ.push("--permission-mode", config.claudePermissionMode);
+  const mode = opts.permissionMode || config.claudePermissionMode;
+  if (mode && basename(command) === "claude" && !picksMode) templ.push("--permission-mode", mode);
   // The same for codex's sandbox (CODEX_SANDBOX_MODE). --full-auto is gone from Codex but still counts as a choice.
   const picksSandbox = [...templ, ...extra].some((a) => /^(-s|--sandbox(=.*)?|--dangerously-bypass-approvals-and-sandbox|--full-auto|--approve-for-me)$/.test(a) || /^sandbox_mode\s*=/.test(a));
   if (config.codexSandboxMode && basename(command) === "codex" && !picksSandbox) templ.push("--sandbox", config.codexSandboxMode);
@@ -146,15 +155,24 @@ export function buildCommand(type: ProcessTypeRow, opts: { cwd: string; prompt?:
 export async function startRun(opts: StartOptions): Promise<RunRow> {
   const type = getType(opts.typeName);
   const target = opts.target ? targetOf(opts.target) : null;
-  if (target && (opts.interactive || opts.resumeSession)) throw new ApiError(400, `runs on target "${target.name}" are headless: they can't be interactive or resume a session`);
+  const e2b = target?.kind === "e2b" ? asApiErr(() => e2bConfig(target)) : null;
+  if (target && opts.resumeSession) throw new ApiError(400, `runs on target "${target.name}" can't resume a session`);
+  if (target && opts.interactive && !e2b) throw new ApiError(400, `runs on target "${target.name}" are headless: they can't be interactive`);
+  if (opts.inputDir && !e2b) throw new ApiError(400, "input_dir is for runs on an e2b target");
+  if (opts.inputDir && (!existsSync(opts.inputDir) || !statSync(opts.inputDir).isDirectory())) throw new ApiError(400, `input_dir does not exist: ${opts.inputDir}`);
   // On a target, the process runs in the target's folder (a container's workdir, or the repo it clones).
   const tc = target ? targetConfig(target) : null;
-  const cwd = tc ? (tc.repo ? tc.workdir || "/workspace" : tc.workdir || "/") : opts.cwd?.trim();
+  const cwd = e2b ? e2b.workdir : tc ? (tc.repo ? tc.workdir || "/workspace" : tc.workdir || "/") : opts.cwd?.trim();
   if (!cwd) throw new ApiError(400, "cwd is required");
   if (!target && (!existsSync(cwd) || !statSync(cwd).isDirectory())) throw new ApiError(400, `cwd does not exist: ${cwd}`);
   const interactive = Boolean(opts.interactive) || Boolean(opts.resumeSession);
-  if (interactive && !tmuxPath()) throw new ApiError(400, "interactive runs need tmux on PATH (brew install tmux / apt install tmux)");
-  let { command, args, template_len } = buildCommand(type, { ...opts, cwd });
+  if (interactive && !e2b && !tmuxPath()) throw new ApiError(400, "interactive runs need tmux on PATH (brew install tmux / apt install tmux)");
+  let { command, args, template_len } = buildCommand(type, { ...opts, cwd, permissionMode: e2b?.permission_mode });
+  // Remote Control needs a claude.ai login: in a sandbox that only has an API key, leave it out.
+  if (e2b && !sandboxEnv(e2b, { ...JSON.parse(type.env || "{}"), ...(opts.env ?? {}) }, [config.authToken]).CLAUDE_CODE_OAUTH_TOKEN) {
+    const drop = args.slice(0, template_len).filter((a) => a === "--remote-control").length;
+    if (drop) { args = [...args.slice(0, template_len).filter((a) => a !== "--remote-control"), ...args.slice(template_len)]; template_len -= drop; }
+  }
   // A claude run on a target gets a session id picked here, so its transcript can come back as a session of this run
   // (the container prints it into the logs at the end; see TRANSCRIPT_MARK). It goes in with the template, so a restart
   // picks a new one rather than carrying this one as an extra arg.
@@ -191,12 +209,14 @@ export async function startRun(opts: StartOptions): Promise<RunRow> {
   const id = Number(ins.lastInsertRowid);
   starting.add(id);
   const logPath = join(logDir, `run-${id}.log`);
-  if (interactive) { meta.interactive = true; meta.tmux = tmuxSessionName(id); }
+  if (interactive) { meta.interactive = true; if (!e2b) meta.tmux = tmuxSessionName(id); }
+  if (e2b) meta.e2b = { tag: `lofiwave-${id}` };
   db.prepare("UPDATE runs SET log_path = ?, meta = ? WHERE id = ?").run(logPath, JSON.stringify(meta), id);
 
   const sink = Bun.file(logPath).writer();
   const header = `# lofiwave run ${id} | ${new Date(t).toISOString()} | ${target ? `target=${target.name} (${target.kind}) | ` : ""}cwd=${cwd}\n# $ ${[command, ...args].map(shellQuote).join(" ")}\n` +
-    (interactive ? `# interactive: tmux session "${meta.tmux}" (attach with: tmux attach -t ${meta.tmux}); the screen is captured here when it ends\n` : "") + "\n";
+    (interactive && e2b ? `# interactive: a PTY in the run's E2B sandbox (open it from Sessions); the screen is captured here when it ends\n` : "") +
+    (interactive && !e2b ? `# interactive: tmux session "${meta.tmux}" (attach with: tmux attach -t ${meta.tmux}); the screen is captured here when it ends\n` : "") + "\n";
   sink.write(header);
   sink.flush();
 
@@ -228,7 +248,30 @@ export async function startRun(opts: StartOptions): Promise<RunRow> {
   let entry: LiveEntry;
   let exited: Promise<number | null>;
 
-  if (target) {
+  if (e2b) {
+    // Nothing runs here: the agent runs in its own sandbox, and we follow it (src/e2b.ts).
+    entry = { pid: 0, done };
+    const write = (s: string) => { sink.write(s.endsWith("\n") ? s : s + "\n"); sink.flush(); };
+    let h: E2BHandle;
+    try {
+      h = runE2B({
+        runId: id, c: e2b, command, args, env, interactive, sessionId: cloudSession || undefined,
+        inputDir: opts.inputDir, outDir: join(config.dataDir, "runs", String(id), "out"),
+        forbiddenValues: [config.authToken], write,
+        onMeta: (patch) => { meta.e2b = { ...meta.e2b, ...patch }; db.prepare("UPDATE runs SET meta = ? WHERE id = ?").run(JSON.stringify(meta), id); },
+        saveTranscript: (sid, data) => saveTranscript(id, meta, sid, data, "e2b", write),
+      });
+    } catch (e: any) {
+      await fail(e?.message ?? String(e));
+    }
+    entry.cancel = h!.cancel;
+    exited = h!.done.then((r) => {
+      if (r.message) write(`# e2b: ${r.message}`);
+      if (r.failed) entry.error = r.message || "the sandbox run failed to start";
+      else if (r.message) entry.lostWhy = r.message;
+      return r.code;
+    });
+  } else if (target) {
     // Nothing runs here: the job starts on the target (that takes a while, so in the background) and we follow it.
     // Only the run's own env goes along: not this machine's environment, and never the console's token.
     entry = { pid: 0, done };
@@ -387,7 +430,7 @@ export async function startRun(opts: StartOptions): Promise<RunRow> {
     }
     live.delete(id);
     db.prepare("UPDATE runs SET status = ?, ended_at = ?, exit_code = ?, output = ?, error = ? WHERE id = ?")
-      .run(status, now(), code, readTail(logPath, config.outputTailBytes), entry.error ?? (code === null && !entry.killedBy ? (target ? "the execution ended without a result (cancelled outside lofiwave?)" : "tmux session disappeared") : ""), id);
+      .run(status, now(), code, readTail(logPath, config.outputTailBytes), entry.error ?? (code === null && !entry.killedBy ? (entry.lostWhy ? entry.lostWhy : target ? "the execution ended without a result (cancelled outside lofiwave?)" : "tmux session disappeared") : ""), id);
     markDone();
   })();
 
@@ -397,6 +440,12 @@ export async function startRun(opts: StartOptions): Promise<RunRow> {
 /** Current contents of an interactive run's terminal (last `lines` of scrollback + screen). */
 export async function screenOf(run: RunRow, lines = 200, cols = 0): Promise<{ text: string; alive: boolean; cols: number }> {
   const meta = JSON.parse(run.meta || "{}");
+  if (meta.e2b && meta.interactive) {
+    const t = e2bTerms.get(run.id);
+    if (!t) return { text: "", alive: false, cols: 0 };
+    if (cols >= 40 && cols <= 220 && cols !== t.cols && run.status === "running" && !t.viewers.size) await t.resize(cols, cols < 100 ? 40 : 48);
+    return { text: t.screen.text(lines).replace(/\n{3,}/g, "\n\n"), alive: run.status === "running", cols: t.cols };
+  }
   if (!meta.tmux) throw new ApiError(400, `run ${run.id} is not interactive`);
   let width = 0;
   const size = await tmux("display-message", "-p", "-t", tmuxTarget(meta.tmux), "#{window_width}");
@@ -419,6 +468,8 @@ export async function screenOf(run: RunRow, lines = 200, cols = 0): Promise<{ te
  */
 export async function historyOf(run: RunRow, lines = 5000): Promise<{ text: string; own_scroll: boolean }> {
   const meta = JSON.parse(run.meta || "{}");
+  // A sandbox's terminal: plain text from the headless screen (no colors).
+  if (meta.e2b && meta.interactive) { const t = e2bTermOf(run); return { text: t.screen.text(lines), own_scroll: t.screen.altOn }; }
   if (!meta.tmux) throw new ApiError(400, `run ${run.id} is not interactive`);
   const cap = await tmux("capture-pane", "-p", "-e", "-J", "-t", tmuxTarget(meta.tmux), "-S", String(-lines));
   if (cap.code !== 0) throw new ApiError(409, `run ${run.id} has no terminal`);
@@ -431,6 +482,16 @@ export async function historyOf(run: RunRow, lines = 5000): Promise<{ text: stri
 /** Type text and/or named keys (tmux names: Up, Down, Escape, C-c, Tab ...) into an interactive run's terminal, then optionally Enter. */
 export async function sendKeys(run: RunRow, text: string, keys: string[], enter: boolean): Promise<void> {
   const meta = JSON.parse(run.meta || "{}");
+  if (meta.e2b && meta.interactive) {
+    if (run.status !== "running") throw new ApiError(409, `run ${run.id} is not running`);
+    const bytes = keys.map((k) => { const b = keyBytes(k); if (b === null) throw new ApiError(400, `bad key name: ${k}`); return b; });
+    const t = e2bTermOf(run);
+    if (text) await t.input(text);
+    for (const b of bytes) await t.input(b);
+    // Like typing: a TUI that sees text and Enter in one read can take the Enter as part of a paste.
+    if (enter) { if (text) await Bun.sleep(150); await t.input("\r"); }
+    return;
+  }
   if (!meta.tmux) throw new ApiError(400, `run ${run.id} is not interactive`);
   if (run.status !== "running") throw new ApiError(409, `run ${run.id} is not running`);
   if (text) {
@@ -494,6 +555,13 @@ export async function restartRun(id: number): Promise<RunRow> {
     interactive: Boolean(meta.interactive), resumeSession: meta.resume_session, stopWhenIdle: Boolean(meta.stop_when_idle),
     target: meta.target,
   });
+}
+
+/** An interactive e2b run's live terminal (throws when it isn't up). */
+function e2bTermOf(run: RunRow) {
+  const t = e2bTerms.get(run.id);
+  if (!t) throw new ApiError(409, `run ${run.id}'s sandbox terminal isn't attached (still starting, or ended)`);
+  return t;
 }
 
 /** Reopen a recorded session interactively (tmux) using the agent type's resume_args. */
@@ -660,7 +728,9 @@ export function reconcileRuns() {
   for (const r of running) {
     // Still starting: opening its terminal window (osascript) can take seconds, longer if the app is slow to answer.
     if (live.has(r.id) || starting.has(r.id)) continue;
-    if (JSON.parse(r.meta || "{}").target) { reattachRemote(r); continue; }
+    const m = JSON.parse(r.meta || "{}");
+    if (m.target && m.target_kind === "e2b") { reattachE2B(r); continue; }
+    if (m.target) { reattachRemote(r); continue; }
     if (r.pid && pidAlive(r.pid)) {
       const meta = JSON.parse(r.meta || "{}");
       if (!meta.orphan) {
@@ -683,16 +753,65 @@ export function reconcileRuns() {
 function saveCloudTranscript(runId: number, meta: Record<string, any>, catcher: TranscriptCatcher, write: (s: string) => void) {
   if (!catcher.started) { write("# lofiwave: no transcript came back from the container (it was stopped before claude wrote one, or the image lacks sh/base64/fold/awk)"); return; }
   try {
-    const data = catcher.result();
-    const cwd = meta.local_cwd || process.env.HOME || "/";
-    const path = claudeTranscriptHome(catcher.sessionId, cwd);
-    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-    writeFileSync(path, data, { mode: 0o600 });
-    recordSession(runId, { session_id: catcher.sessionId, agent: "claude", cwd, transcript_path: path, source: "cloud-run" });
-    write(`# lofiwave: transcript saved to ${path} (${data.length} bytes); "Resume here" continues it in ${cwd}`);
+    saveTranscript(runId, meta, catcher.sessionId, catcher.result(), "cloud-run", write);
   } catch (e: any) {
     write(`# lofiwave: couldn't bring the transcript back: ${e?.message ?? e}`);
   }
+}
+
+/** File a transcript that came back from a target, and record it as the run's session. */
+function saveTranscript(runId: number, meta: Record<string, any>, sessionId: string, data: Buffer, source: string, write: (s: string) => void) {
+  try {
+    const cwd = meta.local_cwd || process.env.HOME || "/";
+    const path = claudeTranscriptHome(sessionId, cwd);
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+    writeFileSync(path, data, { mode: 0o600 });
+    recordSession(runId, { session_id: sessionId, agent: "claude", cwd, transcript_path: path, source });
+    write(`# lofiwave: transcript saved to ${path} (${data.length} bytes); "Resume here" continues it in ${cwd}`);
+  } catch (e: any) {
+    write(`# lofiwave: couldn't save the transcript: ${e?.message ?? e}`);
+  }
+}
+
+/** startRun's TargetErrors as ApiErrors. */
+function asApiErr<T>(fn: () => T): T {
+  try { return fn(); } catch (e) { if (e instanceof TargetError) throw new ApiError(e.status, e.message); throw e; }
+}
+
+/**
+ * An e2b run that was going when the console restarted: its sandbox kept running (until its time to live ran out),
+ * so connect to it again (resuming it if it paused) and pick its process back up by tag.
+ */
+function reattachE2B(r: RunRow) {
+  const meta = JSON.parse(r.meta || "{}");
+  const write = (s: string) => { if (r.log_path) appendFileSync(r.log_path, s.endsWith("\n") ? s : s + "\n"); };
+  const lose = (why: string) => db.prepare("UPDATE runs SET status = 'lost', ended_at = ?, error = ?, output = ? WHERE id = ?").run(now(), why, readTail(r.log_path, config.outputTailBytes), r.id);
+  let c: E2BConfig;
+  try { c = e2bConfig(getTarget(meta.target)); } catch { lose(`target "${meta.target}" no longer exists`); return; }
+  if (!meta.e2b?.sandbox_id) { lose("the console restarted before the sandbox was created"); return; }
+  let h: E2BHandle;
+  try {
+    h = runE2B({
+      runId: r.id, c, command: r.command, args: JSON.parse(r.args || "[]"), env: {}, interactive: Boolean(meta.interactive),
+      sessionId: meta.claude_session || undefined, outDir: join(config.dataDir, "runs", String(r.id), "out"),
+      forbiddenValues: [config.authToken], write, attach: { sandboxId: meta.e2b.sandbox_id },
+      onMeta: (patch) => { meta.e2b = { ...meta.e2b, ...patch }; db.prepare("UPDATE runs SET meta = ? WHERE id = ?").run(JSON.stringify(meta), r.id); },
+      saveTranscript: (sid, data) => saveTranscript(r.id, meta, sid, data, "e2b", write),
+    });
+  } catch (e: any) { lose(e?.message ?? String(e)); return; }
+  let markDone!: () => void;
+  const done = new Promise<void>((res) => (markDone = res));
+  const entry: LiveEntry = { pid: 0, done, cancel: h.cancel };
+  live.set(r.id, entry);
+  (async () => {
+    const res = await h.done;
+    if (res.message) write(`# e2b: ${res.message}`);
+    const status = entry.killedBy === "timeout" ? "timeout" : entry.killedBy ? "killed" : res.code === 0 ? "success" : res.code === null ? "lost" : "failed";
+    write(`\n# lofiwave: exited with code ${res.code ?? "unknown"} (${status})`);
+    live.delete(r.id);
+    db.prepare("UPDATE runs SET status = ?, ended_at = ?, exit_code = ?, output = ?, error = ? WHERE id = ?").run(status, now(), res.code, readTail(r.log_path, config.outputTailBytes), res.code === null && !entry.killedBy ? res.message : "", r.id);
+    markDone();
+  })();
 }
 
 /** A target's ApiError: the same status and message. */
