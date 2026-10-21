@@ -12,6 +12,16 @@ Open work, newest first within each status. One heading per issue; close it by m
 session is gone, commands meant for it go to `ac-42` (here, `capture-pane` read run 42's screen). The runner, the
 screen and keys endpoints and the chat composer all target `ac-<id>` this way (about 20 call sites), so a stale
 browser could type into the wrong run. Fix: exact targets, `=ac-4` for a session and `=ac-4:` for its pane.
+### #4 Runs as jobs: follow-ups
+*Opened 2026-10-17 · left over from groups, files, results and admission control (README → Swarms)*
+
+- [ ] A scheduled workflow that finds the machine full is recorded as an `error` run; it could queue instead.
+- [ ] The UI shows `queued` runs in the run list but has no button to cancel one (`POST /api/runs/:id/kill`
+      does) and doesn't show the capacity (`GET /api/system` → `capacity`).
+- [ ] The default `MAX_AGENT_RUNS` assumes ~600 MB per agent. Measure real claude/codex RSS on a small box
+      and count agents the console didn't start (they use memory but hold no slot; only `MIN_FREE_MEM_MB` sees them).
+- [ ] No way to delete files in a run's folder over the API, or to write outside `cwd` (e.g. a shared input folder
+      for a whole group).
 
 ### #3 Chat view, toggleable with the terminal
 *Opened 2026-10-09 · designed in [`docs/rendered-view.md`](docs/rendered-view.md) · phases 1 (read-only chat view), 2 (composer), 3 (approvals), 4 (files panel) and 5 (live polish) built*

@@ -1,6 +1,6 @@
 import type { ServerWebSocket } from "bun";
 import { join, dirname, basename } from "node:path";
-import { readdirSync, existsSync } from "node:fs";
+import { readdirSync, existsSync, statSync } from "node:fs";
 import { hostname, homedir } from "node:os";
 import { config } from "./config";
 import { db, now, hydrate, type ProcessTypeRow, type WorkflowRow, type RunRow, type SessionRow, type ApiKeyRow, type TargetRow } from "./db";
@@ -19,6 +19,9 @@ import { permissionHook, answerRequest, requestsFor } from "./chat/approvals";
 import { messageHook, statuslineHook, turnHook } from "./chat/live";
 import { turnChanges, turnFileDiff, dropCheckpoints } from "./chat/checkpoints";
 import { actor, identify, touch, online, passwordMatches, cleanName, makeSession, sessionCookie, loginBlocked, loginFailed, TOKEN_ACTOR, KEY_ACTOR_PREFIX, createApiKey } from "./auth";
+import { startJob, startQueue } from "./jobs";
+import { capacity } from "./capacity";
+import { insidePath, listDir, writeFiles, decodeContent, extractInto, archiveOf, resultsOf, makeFolder } from "./files";
 
 const PUBLIC_DIR = join(config.root, "public");
 const startedAt = now();
@@ -105,7 +108,11 @@ function workflowOut(w: WorkflowRow) {
 
 function runOut(r: RunRow, { withOutput = true } = {}) {
   const h = hydrate(r);
-  const out: any = { ...h, duration_ms: (r.ended_at ?? now()) - r.started_at, live: isLive(r.id) };
+  const meta: any = h.meta ?? {};
+  const out: any = {
+    ...h, duration_ms: (r.ended_at ?? now()) - r.started_at, live: isLive(r.id),
+    group: meta.group ?? null, parent_run: meta.parent_run ?? null, out_dir: (h.env as any)?.LOFIWAVE_OUT_DIR ?? null,
+  };
   if (!withOutput) delete out.output;
   else out.sessions = sessionsOf(r.id);
   return out;
@@ -233,7 +240,7 @@ route("GET", "/api/system", async () => {
   return json({
     hostname: hostname(), platform: process.platform, pid: process.pid, bun: Bun.version,
     tmux: tmuxPath(), host: config.host, port: config.port, data_dir: config.dataDir, auth_required: true,
-    uptime_ms: now() - startedAt, addresses, tailscale, server_time: now(),
+    uptime_ms: now() - startedAt, addresses, tailscale, server_time: now(), capacity: capacity(),
   });
 });
 
@@ -390,12 +397,33 @@ route("DELETE", "/api/process-types/:name", (_r, p) => {
 route("GET", "/api/processes", async (_r, _p, url) =>
   json(await listConsoleProcesses(url.searchParams.get("type") ?? undefined, url.searchParams.get("kind") ?? undefined)));
 
+/** A swarm's name: shared by the runs started for one job. */
+function groupName(v: unknown): string | null {
+  const g = str(v, "group").trim();
+  if (!g) return null;
+  if (!/^[A-Za-z0-9_.:@-]{1,100}$/.test(g)) throw new ApiError(400, "group may only contain letters, digits and _ . : @ - (up to 100)");
+  return g;
+}
+
 route("POST", "/api/processes", async (req) => {
   const b = await body(req);
   const typeName = str(b.type, "type", { required: true });
-  const run = await startRun({
+  const cwd = str(b.cwd, "cwd") || getType(typeName).default_cwd;
+  // The controller run that started this one: the body's parent_run, or the X-Lofiwave-Run header (its AGENT_CONSOLE_RUN_ID).
+  const parentRaw = b.parent_run ?? req.headers.get("x-lofiwave-run") ?? null;
+  const parent = parentRaw === null || parentRaw === "" ? null : getRunOr400(int(parentRaw, "parent_run", 0));
+  // A worker joins its controller's group unless it names its own.
+  const group = groupName(b.group) ?? (parent ? JSON.parse(parent.meta || "{}").group ?? null : null);
+  if (b.files !== undefined && (typeof b.files !== "object" || b.files === null || Array.isArray(b.files))) throw new ApiError(400, "files must be an object of {path: content}");
+  const files = Object.entries(b.files ?? {}).map(([path, v]) => ({ path, data: decodeContent(v, `files["${path}"]`) }));
+  const mkdirCwd = bool(b.mkdir_cwd, false);
+  const meta: Record<string, any> = {};
+  if (group) meta.group = group;
+  if (parent) meta.parent_run = parent.id;
+  const run = await startJob({
     typeName,
-    cwd: str(b.cwd, "cwd") || getType(typeName).default_cwd,
+    cwd,
+    meta,
     prompt: str(b.prompt, "prompt"),
     extraArgs: strArray(b.extra_args, "extra_args"),
     env: strMap(b.env, "env"),
@@ -408,9 +436,25 @@ route("POST", "/api/processes", async (req) => {
     trigger: "manual",
     target: str(b.target, "target").trim() || undefined,
     inputDir: str(b.input_dir, "input_dir").trim() || undefined,
+  }, {
+    queue: bool(b.queue, false),
+    // Once it is going to start (or wait in the queue): make its folder and put its files in.
+    prepare: () => {
+      if (mkdirCwd && cwd && !existsSync(cwd)) makeFolder(cwd, config.cwdRoots);
+      if (files.length) {
+        if (!cwd || !existsSync(cwd)) throw new ApiError(400, `cwd does not exist: ${cwd} (pass "mkdir_cwd": true to create it)`);
+        writeFiles(cwd, files);
+      }
+    },
   });
-  return json(runOut(run), 201);
+  return json(runOut(run), run.status === "queued" ? 202 : 201);
 });
+
+function getRunOr400(id: number): RunRow {
+  const r = db.query<RunRow, [number]>("SELECT * FROM runs WHERE id = ?").get(id);
+  if (!r) throw new ApiError(400, `parent_run ${id} not found`);
+  return r;
+}
 
 // ---- console (the session-first working view): everything live, in one call
 route("GET", "/api/console", async () => {
@@ -602,6 +646,8 @@ route("GET", "/api/runs", (_r, _p, url) => {
   if (q.get("status")) { where.push("status = ?"); params.push(q.get("status")); }
   if (q.get("type")) { where.push("type_name = ?"); params.push(q.get("type")); }
   if (q.get("trigger")) { where.push("trigger = ?"); params.push(q.get("trigger")); }
+  if (q.get("group")) { where.push("json_extract(meta, '$.group') = ?"); params.push(q.get("group")); }
+  if (q.get("parent_run")) { where.push("json_extract(meta, '$.parent_run') = ?"); params.push(int(q.get("parent_run"), "parent_run", 0)); }
   const limit = Math.min(int(q.get("limit"), "limit", 50), 500);
   const offset = int(q.get("offset"), "offset", 0);
   const sql = `SELECT * FROM runs ${where.length ? "WHERE " + where.join(" AND ") : ""} ORDER BY started_at DESC LIMIT ? OFFSET ?`;
@@ -611,6 +657,50 @@ route("GET", "/api/runs", (_r, _p, url) => {
 });
 
 route("GET", "/api/runs/:id", (_r, p) => json(runOut(getRun(Number(p.id)))));
+
+// ---- groups (the runs started for one job, e.g. a controller and its workers)
+route("GET", "/api/groups", () => {
+  const rows = db.query<{ g: string; status: string; n: number; first: number; last: number }, []>(
+    `SELECT json_extract(meta, '$.group') g, status, COUNT(*) n, MIN(started_at) first, MAX(started_at) last
+     FROM runs WHERE json_extract(meta, '$.group') IS NOT NULL GROUP BY g, status`).all();
+  const groups = new Map<string, { group: string; total: number; by_status: Record<string, number>; first_started_at: number; last_started_at: number }>();
+  for (const r of rows) {
+    const g = groups.get(r.g) ?? { group: r.g, total: 0, by_status: {}, first_started_at: r.first, last_started_at: r.last };
+    g.total += r.n; g.by_status[r.status] = r.n;
+    g.first_started_at = Math.min(g.first_started_at, r.first); g.last_started_at = Math.max(g.last_started_at, r.last);
+    groups.set(r.g, g);
+  }
+  return json([...groups.values()].sort((a, b) => b.last_started_at - a.last_started_at));
+});
+
+// ---- files in a run's folder (paths relative to its cwd; see src/files.ts)
+route("GET", "/api/runs/:id/files", (_r, p, url) => {
+  const run = getRun(Number(p.id));
+  const { root, abs, rel } = insidePath(run.cwd, url.searchParams.get("path") ?? "");
+  if (!existsSync(abs)) throw new ApiError(404, `no such file in run ${run.id}: ${rel || "."}`);
+  if (statSync(abs).isDirectory()) {
+    if (bool(url.searchParams.get("archive"), false)) return archiveOf(root, rel);
+    return json({ path: rel, type: "dir", ...listDir(abs, { recursive: bool(url.searchParams.get("recursive"), false) }) });
+  }
+  // An agent wrote this: never let it run as a page on the console's origin (HTML, SVG, scripts go out as plain text).
+  const f = Bun.file(abs);
+  return new Response(f, /html|svg|xml|javascript/.test(f.type) ? { headers: { "content-type": "text/plain; charset=utf-8" } } : undefined);
+});
+// Raw body → the file at ?path= (folders made as needed). A tar or tar.gz with ?extract=1 (or content-type gzip/tar) is unpacked into ?path= instead.
+route("PUT", "/api/runs/:id/files", async (req, p, url) => {
+  const run = getRun(Number(p.id));
+  const path = url.searchParams.get("path") ?? "";
+  const data = new Uint8Array(await req.arrayBuffer());
+  const ct = req.headers.get("content-type") ?? "";
+  const extract = url.searchParams.has("extract") ? bool(url.searchParams.get("extract"), false) : /gzip|x-tar|x-gtar/.test(ct);
+  if (extract) return json(extractInto(run.cwd, path, data), 201);
+  return json(writeFiles(run.cwd, [{ path, data }])[0], 201);
+});
+// What the run left in <cwd>/out/ (LOFIWAVE_OUT_DIR), small text files inlined.
+route("GET", "/api/runs/:id/results", (_r, p) => {
+  const run = getRun(Number(p.id));
+  return json({ run_id: run.id, status: run.status, ...resultsOf(run.cwd) });
+});
 
 route("GET", "/api/runs/:id/log", (_r, p, url) => {
   const run = getRun(Number(p.id));
@@ -878,6 +968,7 @@ async function dispatch(req: Request, url: URL): Promise<Response> {
 }
 
 startScheduler();
+startQueue();
 console.log(`lofiwave listening on http://${server.hostname}:${server.port}  (data: ${config.dataDir})`);
 if (config.tokenGenerated) {
   // First start: hand the person a link that logs the browser in (the UI keeps the token and drops it from the URL).

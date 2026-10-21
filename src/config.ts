@@ -1,6 +1,7 @@
 import { join, resolve } from "node:path";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
+import { totalmem, homedir, tmpdir } from "node:os";
 
 const ROOT = resolve(import.meta.dir, "..");
 const dataDir = resolve(process.env.DATA_DIR ?? join(ROOT, "data"));
@@ -63,6 +64,15 @@ export const config = {
   idleStopSec: Number(process.env.IDLE_STOP_SEC ?? 120),
   /** How much of the end of a run's log is copied into runs.output when it finishes. */
   outputTailBytes: Number(process.env.OUTPUT_TAIL_BYTES ?? 64 * 1024),
+  /**
+   * Admission control, so a swarm can't OOM the machine (and the console with it): at most this many agent runs at
+   * once (0 = no cap), and none started while less than `minFreeMemMb` of memory is available (0 = no check).
+   * The default cap leaves 1 GB for the system and allows ~600 MB per agent, between 1 and 16.
+   */
+  maxAgentRuns: Number(process.env.MAX_AGENT_RUNS ?? Math.max(1, Math.min(16, Math.floor((totalmem() / 2 ** 20 - 1024) / 600)))),
+  minFreeMemMb: Number(process.env.MIN_FREE_MEM_MB ?? 500),
+  /** `mkdir_cwd` on POST /api/processes may only create folders under these (colon-separated; default: home and temp dirs). */
+  cwdRoots: (process.env.CWD_ROOTS ?? `${homedir()}:${tmpdir()}`).split(":").map((p) => p.trim()).filter(Boolean).map((p) => resolve(p)),
 };
 
 function parseSandbox(v: string): string {

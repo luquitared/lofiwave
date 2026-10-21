@@ -104,11 +104,14 @@ Environment variables, or `KEY=VALUE` lines in `.env`:
 | `SCHEDULER_INTERVAL_MS` | `15000` | How often scheduled workflows are checked |
 | `IDLE_STOP_SEC` | `120` | How long a workflow's claude session stays open once the agent is done and idle (and nobody has its terminal open) |
 | `OUTPUT_TAIL_BYTES` | `65536` | How much of the end of each log is copied into the run record (`output`) |
+| `MAX_AGENT_RUNS` | *(from RAM)* | At most this many agent runs at once; more are refused with 429 or queued (see *Swarms*). Default: (total RAM − 1 GB) / 600 MB, between 1 and 16. `0` = no cap. |
+| `MIN_FREE_MEM_MB` | `500` | No agent run starts while less memory than this is available (Linux `MemAvailable`; macOS free + inactive pages). `0` = no check. |
+| `CWD_ROOTS` | home and temp dirs | Colon-separated folders under which `mkdir_cwd` may create a run's folder |
 | `OPEN_TERMINAL` | `auto` | Desktop terminal window opened on an interactive run. `auto` = iTerm then Terminal.app on macOS, the first of wezterm/kitty/alacritty/ghostty/foot/gnome-terminal/konsole/tilix/xfce4-terminal/mate-terminal/terminator/urxvt/xterm found on Linux; `none` to keep runs headless; or name one (`iterm`, `terminal`, `kitty`, …). Ignored on a headless machine (no `DISPLAY`/`WAYLAND_DISPLAY`). |
 
 ```
 lofiwave/
-├── src/       server.ts (HTTP + API), db.ts, runner.ts, targets.ts, e2b.ts, connect.ts, vtscreen.ts, scheduler.ts, cron.ts, procs.ts, agents.ts, terminal.ts
+├── src/       server.ts (HTTP + API), db.ts, runner.ts, targets.ts, e2b.ts, jobs.ts, capacity.ts, files.ts, connect.ts, vtscreen.ts, scheduler.ts, cron.ts, procs.ts, agents.ts, terminal.ts
 ├── public/    the single-page UI
 ├── scripts/   start.sh, service installers, Claude Code session hook, Tailscale helpers
 └── data/      database, logs, token (created on first start, git-ignored)
@@ -141,7 +144,7 @@ curl -H "authorization: Bearer $TOKEN" -X POST localhost:7770/api/process-types 
 
 **Process** – an OS process that either matches a type's `detect` regex or was started by the console. Console-started processes are *managed*: they have a run record, a log, and can be restarted. Children of a managed process are attributed to the same run (`child: true`).
 
-**Run** – one execution of a type (ad-hoc, from a workflow, or a restart). Statuses: `running`, `success` (exit 0), `failed` (non-zero), `killed` (stopped via the console), `timeout`, `lost` (the console restarted and the process was gone), `error` (could not start). Killing a run kills its whole process tree.
+**Run** – one execution of a type (ad-hoc, from a workflow, or a restart). Statuses: `queued` (waiting for room on the machine, see *Swarms*), `running`, `success` (exit 0), `failed` (non-zero), `killed` (stopped via the console), `timeout`, `lost` (the console restarted and the process was gone), `error` (could not start). Killing a run kills its whole process tree.
 
 **Workflow** – a saved launch: type + folder + prompt + extra args + env, optionally with a cron `schedule`, a `timeout_sec`, and `allow_overlap` (default off: a scheduled tick is skipped and recorded as an `error` run if the previous one is still running). Times use the server's local timezone.
 
@@ -220,7 +223,7 @@ API keys are named and revocable; make them on the *Connect* page. Runs started 
 | | |
 |---|---|
 | `GET /api/processes?type=&kind=` | running processes matching any type (filter by type name or kind): `{pid, ppid, user, cmd, cwd, elapsedSec, rssKb, cpu, type, managed, child, run_id, workflow_name, session}` – `session` is `{session_id, agent, title, name, status, model, web_url, resume_cmd, ...}` or null |
-| `POST /api/processes` | start one: `{type, cwd?, prompt?, extra_args?, env?, timeout_sec?, interactive?, stop_when_idle?, terminal?}` → 201 with the run record. `cwd` falls back to the type's `default_cwd`. `interactive` (default: true for agent types when tmux is installed) starts it in a tmux session that stays open (see Concepts); `stop_when_idle` closes a claude session once it is done, like a workflow run. |
+| `POST /api/processes` | start one: `{type, cwd?, prompt?, extra_args?, env?, timeout_sec?, interactive?, stop_when_idle?, terminal?, group?, parent_run?, files?, mkdir_cwd?, queue?}` → 201 with the run record. `cwd` falls back to the type's `default_cwd`. `interactive` (default: true for agent types when tmux is installed) starts it in a tmux session that stays open (see Concepts); `stop_when_idle` closes a claude session once it is done, like a workflow run. The rest is for running agents as jobs (see *Swarms* below): `group` tags the run, `parent_run` (or an `X-Lofiwave-Run: <run id>` header) names the run that started it, `files` (`{"rel/path": "utf-8 text" or {"base64": "..."}}`) are written into `cwd` before it starts, `mkdir_cwd: true` creates a missing `cwd` (under `CWD_ROOTS`), and when the machine is full an agent run gets **429** unless `queue: true`, which answers **202** with a `queued` run. |
 | `POST /api/processes/preview` | same body; returns the `{command, args}` that would be executed, without running |
 | `DELETE /api/processes/:pid?force=1` | SIGTERM (or SIGKILL with `force`) the process **tree**. Works on unmanaged processes too. If the pid belongs to a run, the run is marked `killed`. |
 | `POST /api/processes/:pid/remote-control` | Turn on Remote Control for a claude session that is already running, so it shows up in the Claude app. If it is in a tmux pane (an interactive run, or any claude started inside tmux), or on macOS in an iTerm or Terminal.app tab (found by its tty; the first time, macOS asks to let lofiwave control that app), the console clears its input box (Ctrl+Y brings a draft back) and types `/remote-control`, so the session keeps running; it refuses while the session is working. → `{status: "enabled"\|"pending"\|"already", web_url}`. Anywhere else there is nothing to type into: `{replace: true, terminal?}` stops the process and reopens the same conversation here in tmux with the type's `resume_args` → 201 `{status: "replaced", run}`; without `replace` it answers 409. |
@@ -256,17 +259,50 @@ Restarting is done through the run: `POST /api/runs/:id/restart`.
 
 | | |
 |---|---|
-| `GET /api/runs?workflow_id=&status=&type=&trigger=&limit=50&offset=0` | newest first: `{total, limit, offset, runs: [...]}` (without `output`) |
+| `GET /api/runs?workflow_id=&status=&type=&trigger=&group=&parent_run=&limit=50&offset=0` | newest first: `{total, limit, offset, runs: [...]}` (without `output`) |
 | `GET /api/runs/:id` | full record incl. `output` (log tail), `duration_ms`, `live` |
 | `GET /api/runs/:id/log?offset=0` | `{data, offset, size, status}` – poll with the returned `offset` to tail a running log |
 | `GET /api/runs/:id/log?raw=1` | the whole log as `text/plain` |
-| `POST /api/runs/:id/kill?force=1` | stop (tree) → updated run |
+| `POST /api/runs/:id/kill?force=1` | stop (tree) → updated run. A `queued` run is taken out of the queue (`killed`). |
 | `POST /api/runs/:id/restart` | start a new run with the same parameters (kills the old one first if it is running) → 201 |
 | `GET /api/runs/:id/screen?lines=200&cols=` | interactive runs: `{text, alive, cols}` – the terminal's last `lines` lines (scrollback + screen). `cols` (40–220) resizes the tmux window to the viewer's width first, so the TUI reflows for a phone. |
 | `POST /api/runs/:id/keys` | interactive runs: type into the terminal: `{text?, keys?: ["Down", "Escape", "C-c", ...], enter?: true}` (`keys` are tmux key names, sent after `text`) |
 | `DELETE /api/runs/:id` | delete record + log (must not be running) |
 
-Run record fields: `id, workflow_id, workflow_name, type_name, cwd, command, args, prompt, env, trigger (manual|schedule|restart), status, pid, started_at, ended_at, exit_code, log_path, output, error, meta {timeout_sec, orphan, interactive, tmux}`. `GET /api/runs/:id` also includes `sessions` (below).
+Run record fields: `id, workflow_id, workflow_name, type_name, cwd, command, args, prompt, env, trigger (manual|schedule|restart), status, pid, started_at, ended_at, exit_code, log_path, output, error, group, parent_run, out_dir, meta {timeout_sec, orphan, interactive, tmux, group, parent_run, queued_at}`. `GET /api/runs/:id` also includes `sessions` (below).
+
+### Swarms: runs as jobs (groups, files, results, capacity)
+
+For a controller (a person's script, or an agent that is itself a lofiwave run) starting workers and collecting what they produce, without SSH, tar pipes or another user's home directory. Files are read and written as the console's own user.
+
+- **Group.** Runs started for one job share a `group` (`[A-Za-z0-9_.:@-]`, up to 100). A run started from inside another lofiwave run can pass `"parent_run": $AGENT_CONSOLE_RUN_ID` (or the header `X-Lofiwave-Run: $AGENT_CONSOLE_RUN_ID`); it then joins the parent's group unless it names its own. Restarting a run keeps both.
+- **Output folder.** Every run gets `LOFIWAVE_OUT_DIR=<cwd>/out` in its environment, and the folder is created (except in the home folder or `/`). Tell workers to put their results there (`$LOFIWAVE_OUT_DIR/REPORT.md`); `GET /api/runs/:id/results` returns them.
+- **Capacity.** At most `MAX_AGENT_RUNS` agent runs at once, and none started while less than `MIN_FREE_MEM_MB` of memory is available (app types are not limited). Over that, starting an agent run answers **429** with the reason; with `queue: true` it is kept as a run with status `queued` and started, oldest first, one at a time, as soon as there is room (the queue survives a console restart). While runs are queued, new ones queue behind them. The limit holds for every agent start (the UI, restarts, resumes, workflows); only `POST /api/processes` can queue, and a scheduled workflow that finds the machine full is recorded as an `error` run. `GET /api/system` shows `capacity: {max_agent_runs, live_agent_runs, queued, mem_available_mb, min_free_mem_mb, blocked}`.
+
+| | |
+|---|---|
+| `GET /api/groups` | `[{group, total, by_status: {running: 2, success: 3, ...}, first_started_at, last_started_at}]`, most recently active first |
+| `GET /api/runs?group=<g>` | the group's runs (also `?parent_run=<id>`: the runs a controller started) |
+| `PUT /api/runs/:id/files?path=<rel>` | raw body → that file in the run's folder (parent folders made as needed) → 201 `{path, size}`. With `?extract=1` (or `content-type: application/gzip` / `application/x-tar`) the body is a tar or tar.gz, unpacked into `path` (a folder; `""` = the run's folder) → 201 `{extracted: [{path, size}], dirs, skipped}`. Only regular files and folders are unpacked; links, devices and macOS metadata (`._*`, `.DS_Store`, `__MACOSX/`) are skipped. |
+| `GET /api/runs/:id/files?path=<rel>` | a file's contents; for a folder, `{path, type: "dir", entries: [{path, type, size, mtime}], truncated}` (`&recursive=1` walks subfolders), or with `&archive=1` the folder as a `.tar.gz` download. `path` defaults to the run's folder. |
+| `GET /api/runs/:id/results` | what the run left in `out/`: `{run_id, status, out_dir, exists, files: [{path, type, size, mtime, text?}], truncated}`; UTF-8 files up to 64 KB come inlined as `text` (1 MB in all) |
+
+Paths are relative to the run's `cwd` and must stay inside it: absolute paths, `..` that leaves it, and symlinks that point outside it are refused with 400. This also works before the run starts (`files` on `POST /api/processes`) and after it ends.
+
+```bash
+# controller: start a worker with its brief, in a fresh folder, waiting for room if the machine is full
+curl -H "authorization: Bearer $TOKEN" -X POST localhost:7770/api/processes -H 'content-type: application/json' -d '{
+  "type": "claude", "cwd": "/home/me/jobs/fix-42/worker-1", "mkdir_cwd": true, "queue": true,
+  "group": "fix-42", "parent_run": '"$AGENT_CONSOLE_RUN_ID"', "interactive": false,
+  "prompt": "Follow BRIEF.md. Write your findings to $LOFIWAVE_OUT_DIR/REPORT.md.",
+  "extra_args": "--permission-mode acceptEdits",
+  "files": {"BRIEF.md": "# Task\n..."} }'
+# more inputs, as a tarball
+tar -czf - data/ | curl -H "authorization: Bearer $TOKEN" -X PUT --data-binary @- -H 'content-type: application/gzip' 'localhost:7770/api/runs/57/files?path=inputs'
+# how is the swarm doing, and what did worker 57 produce
+curl -H "authorization: Bearer $TOKEN" 'localhost:7770/api/runs?group=fix-42'
+curl -H "authorization: Bearer $TOKEN" localhost:7770/api/runs/57/results
+```
 
 ### Sessions (linking a run to its Claude Code transcript)
 
