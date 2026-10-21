@@ -1,6 +1,9 @@
 # Rendered view: a chat UI you can toggle with the terminal
 
-Status: **design, nothing built yet** (2026-10-09); tracked as issues.md #3. Research behind it: claude-code-viewer (upstream v0.8.2),
+Status: **phases 1–5 built** (2026-10-09: read-only chat view, `src/chat/`, `public/chat.js`; 2026-10-11: the
+composer, `src/chat/input.ts`; 2026-10-11: approvals, `src/chat/approvals.ts`; 2026-10-11: the files panel,
+`src/chat/files.ts`; 2026-10-17: live polish, `src/chat/live.ts`, `src/chat/checkpoints.ts`); phase 6 open.
+Tracked as issues.md #3. Research behind it: claude-code-viewer (upstream v0.8.2),
 T3 Code (pingdotgg/t3code), claude.ai/code, the Claude Code source (2026-03 snapshot) checked against the
 installed 2.1.296, and Codex CLI 0.153.4.
 
@@ -80,9 +83,11 @@ Claude-specific facts the parser depends on (from the source and real transcript
 `waitingFor`, for example `"approve Bash"`. I checked that it updates live on 2.1.296. Map it from the pane's
 pid. This is what drives the working spinner and the "the terminal needs you" banner (see Input).
 
-**Streaming text (later phase):** the new `MessageDisplay` hook sends assistant text in line batches while it
+**Streaming text (later phase):** the `MessageDisplay` hook sends assistant text a paragraph at a time while it
 streams (`{turn_id, message_id, index, final, delta}`). Without it, text shows up a whole block at a time, which
-is acceptable for v1.
+is acceptable for v1, because the transcript gets the message only once it's finished. **The TUI waits for this
+hook before drawing each paragraph,** so lofiwave's hook has to answer at once and do its work afterwards (see
+the spike results).
 
 **Usage and context % (optional):** the statusline command receives a JSON object on each update, and an
 injected statusline script can POST it to lofiwave. Todos are in `~/.claude/tasks/<sid>/*.json` and can also
@@ -159,7 +164,9 @@ Everything goes through the run's tmux pane, which gets a new helper in `runner.
 
 **Images and files:** the Claude TUI turns any pasted absolute path ending in
 `.png/.jpg/.jpeg/.gif/.webp` into an image attachment. The rule is in `usePasteHandler.ts` and unchanged in
-2.1.296.
+2.1.296. Confirmed live: it has to be a bracketed paste (`paste-buffer -p`), since `send-keys -l` leaves the
+path as text. Paths with spaces work. Pasting text and a path together also attaches the image, but the TUI
+moves the `[Image #N]` chip to the front, so paste each image on its own as step 3 says.
 1. The browser uploads by drag-drop, paste or the `+` button to `POST /api/runs/:id/uploads`. Enforce a
    size cap.
 2. The server saves it to `data/uploads/<run>/<sha>.<ext>` with mode 600.
@@ -172,14 +179,15 @@ Everything goes through the run's tmux pane, which gets a new helper in `runner.
 5. Clean up uploads after the run ends, using the same retention as logs.
 
 **Approvals, questions and plan approval:** start Claude with an injected `--settings` that adds a
-`PermissionRequest` hook calling lofiwave. The hook can be `http` or a command hook like the existing session
-hook.
+`PermissionRequest` hook calling lofiwave. Use an `http` hook: it needs no `allowedHttpHookUrls` entry, and
+`"Authorization": "Bearer $AGENT_CONSOLE_TOKEN"` works with `"allowedEnvVars": ["AGENT_CONSOLE_TOKEN"]`.
+The injected hooks run alongside the user's own hooks and the project's (they merge, they don't replace).
 - **How it works:** lofiwave holds the request open, shows a card above the composer (T3's pattern, with keys
   1–9 for options), and answers with `{behavior:"allow"|"deny", updatedInput?, updatedPermissions?, message?}`.
   The TUI shows the same dialog at the same time, and whichever is answered first wins; Claude removes the other
   (`interactiveHandler.ts`, the `claim()` race).
-- **AskUserQuestion:** allow with `updatedInput.answers = {"<question>": "<label>"}`. For multiple choices,
-  separate the labels with commas.
+- **AskUserQuestion:** allow with `updatedInput.answers = {"<question>": "<label>"}` (confirmed: the TUI then
+  shows "User answered Claude's questions"). For multiple choices, separate the labels with commas.
 - **Plan approval (ExitPlanMode):** allow with `updatedPermissions: [{type:"setMode", mode, destination:"session"}]`
   to pick the mode after the plan, or deny with a `message` to give feedback.
 - **The hook input has no `tool_use_id`,** so match it to the open tool_use by tool name and input.
@@ -217,7 +225,8 @@ earlier", rather than a virtualization library.
 
 **Files panel (the "click the edited markdown file" request):**
 - **What opens it:** clicking an edited file row, or any `path:line` in assistant text (linkify paths that exist).
-- **The file:** `GET /api/runs/:id/file?path=` returns the current contents from disk, with a 1MB cap.
+- **The file:** `GET /api/runs/:id/chat/file?path=` returns the current contents from disk, with a 1MB cap
+  (`&raw=1` serves an image's bytes). `POST …/chat/paths {paths}` says which paths in the text are files to link.
   - The path must resolve inside the run's cwd or `$HOME`. Use `realpath` so symlinks can't escape.
 - **Tabs:** *Diff* (this edit's hunks), *Current* (highlighted, scrolled to the line), and **Preview** for `.md`
   (rendered markdown) and images. claude-code-viewer has no markdown preview, so that is ours to add.
@@ -242,36 +251,43 @@ earlier", rather than a virtualization library.
 ## Edge cases checklist
 
 Reading:
-- [ ] Partial last line, a file that shrinks, a file that doesn't exist yet (a new session has no file until the first prompt)
-- [ ] Rewind/edit branches: render only the active chain
-- [ ] `/clear` (new file), `/compact` (divider), `--resume` (same file), `--fork-session` (new file)
+- [x] Partial last line, a file that shrinks, a file that doesn't exist yet (a new session has no file until the first prompt)
+- [x] Rewind/edit branches: render only the active chain
+- [x] `/clear` (new file), `/compact` (divider), `--resume` (same file), `--fork-session` (new file)
 - [ ] Two live runs on one session id (ideas-fridge §4): writes interleave. Show a warning and use the active
       chain, never file order.
-- [ ] Parallel tool calls whose results interleave between the assistant's block lines
-- [ ] Subagents in separate files, both old and new layouts; nested subagents
-- [ ] Huge outputs (tool results above 1MB, base64 images): omit and fetch on demand
-- [ ] Unknown entry types and tools: a raw row, never a crash
-- [ ] Interrupted turns, API errors, `turn_duration`, background `<task-notification>`
+- [x] Parallel tool calls whose results interleave between the assistant's block lines
+- [x] Subagents in separate files, both old and new layouts
+- [ ] Nested subagents (a subagent's own subagents: untested)
+- [x] Huge outputs (tool results above 1MB, base64 images): omit and fetch on demand
+- [x] Unknown entry types and tools: a raw row, never a crash
+- [x] Interrupted turns, API errors, `turn_duration`, background `<task-notification>`
 - [ ] Transcripts of sessions lofiwave didn't start (read-only), and sessions on a remote host (later, fridge §3)
 
 Input:
-- [ ] Multi-line text, text starting with `/`, `!` or `#`, very long pastes, emoji and other non-ASCII
-- [ ] Sending while busy (queued), while waiting (blocked by a dialog), or while the pane is dead
-- [ ] An unsent draft in the TUI input box
-- [ ] Image paste timing (wait for `[Image #N]`), unsupported formats, size caps, several images in one message
-- [ ] Interrupt during a tool versus during text
+- [x] Multi-line text, text starting with `/` or `!`
+- [ ] Very long pastes, emoji and other non-ASCII (`#` is no longer a special prefix)
+- [x] Sending while busy (queued), while waiting (blocked by a dialog), or while the pane is dead
+- [x] An unsent draft in the TUI input box
+- [x] Image paste timing (wait for `[Image #N]`), files as `@path`, size caps
+- [ ] Several images in one message, HEIC conversion
+- [x] Interrupt during text
+- [ ] Interrupt during a tool
 - [ ] Two browsers typing at once (fine, same as tmux), plus one in Terminal and one in Chat
 
 Approvals:
-- [ ] The web and the TUI both answering (first answer wins; clear the loser)
-- [ ] The hook timing out, the server restarting while a request is held, or the run ending while held
-- [ ] Bypass mode (only questions and plans prompt), `acceptEdits`, plan mode
+- [x] The web and the TUI both answering (first answer wins; clear the loser)
+- [ ] The hook timing out, or the server restarting while a request is held
+- [x] The run ending while a request is held
+- [ ] Bypass mode (only questions and plans prompt), `acceptEdits`
+- [x] Plan mode
 - [ ] Prompts not handled through hooks (trust, MCP auth, `/config`): fall back to the terminal banner
+- [ ] Permission requests from inside a subagent (no matching row in the main transcript)
 
 Display:
-- [ ] Untrusted markdown and HTML in transcripts: sanitize; images only from our blob endpoint
-- [ ] Linkify only paths that exist; file reads restricted to cwd or `$HOME` through `realpath`
-- [ ] Scroll anchoring with late-rendering markdown, images and syntax highlighting
+- [x] Untrusted markdown and HTML in transcripts: sanitize; images only from our blob endpoint
+- [x] Linkify only paths that exist; file reads restricted to cwd or `$HOME` through `realpath`
+- [x] Scroll anchoring with late-rendering markdown, images and syntax highlighting
 - [ ] Mobile layout and the composer under the on-screen keyboard
 
 ## Codex
@@ -286,7 +302,7 @@ status list. The plan for the view:
 - **Not in the rollout:** streaming text, commands still running, and approval or trust prompts. So for Codex,
   `capabilities.approvals = false`, and approvals go through the "terminal needs you" banner, detected from
   `capture-pane`, with key buttons.
-- **Input:** tmux paste, the same as for Claude. Image paste into the Codex TUI is untested.
+- **Input:** tmux paste, the same as for Claude. Pasting an image path into the Codex TUI attaches it (0.162.1).
 - **Finding the rollout:** `~/.codex/state_<n>.sqlite`, the `threads` table, opened read-only (built for issues.md
   #1, see `findCodexThread` in `src/agents.ts`). Not `immutable=1`, which skips the WAL and misses the newest
   threads, and not `lsof`: since 0.16x a shared `codex app-server` daemon holds the rollouts, not the TUI.
@@ -314,14 +330,161 @@ status list. The plan for the view:
 6. **Codex:** the issues.md #1 fixes, then a read-only rollout adapter, then the composer, then the
    app-server spike.
 
-## Spikes to run before phase 2 and 3
+## Phase 2 findings (2026-10-11, Claude Code 2.1.296)
 
-1. Paste an absolute `.png` path into a live TUI with `tmux paste-buffer -p`. Does `[Image #1]` appear?
-   Does it also work with `send-keys -l`?
-2. `--settings '{"hooks":{…}}'`: is it merged with the user's own hooks, or does it replace them? T3 issue
-   #15073 saw a replacement happen through the SDK.
-3. HTTP hooks: do they need an `allowedHttpHookUrls` entry? Can headers interpolate `$AGENT_CONSOLE_TOKEN`? If
-   either answer is no, use a command hook (curl, plus the token from the environment).
-4. `MessageDisplay`: payload shape and how often it fires on 2.1.296.
-5. Codex 0.153 TUI: is the rollout paginated-mode and flushed per item when started from tmux? Does pasting
-   an image path attach it?
+Checked against a live TUI in tmux while building the composer:
+
+- **The input box** is the lines between the last two `─` rules on screen, starting with `❯` (or `!` in shell
+  mode). When it's empty it shows a **dim** placeholder ("Try …", a suggested next prompt, "Press up to edit
+  queued messages"), so `capture-pane -e` is needed to tell a placeholder from a draft.
+- **Clearing a draft:** `C-u` deletes only to the start of the current line, and Esc Esc clears the box but
+  interrupts a busy turn (and opens the rewind menu on an empty box). The composer repeats
+  `C-e C-u Delete BSpace` and re-reads the box until it's empty, which works mid-turn and wherever the cursor is.
+- **Queued messages** (sent while busy) land in the transcript as an `attachment` of type `queued_command`, not
+  a `user` entry. The adapter shows them as user messages inside the turn that read them.
+- **Autocomplete takes the Enter.** A pasted `/clea` runs the highlighted `/clear` (the TUI does that for typed
+  text too). A pasted `@path` at the very end opens the file picker and Enter picks a file instead of
+  submitting, so file references go on the first line, followed by a newline or a space.
+- **Images:** the `[Image #N]` chip shows up within ~100ms of the paste. N keeps counting across messages, so
+  the composer waits for the number of chips to go up.
+- **Stop:** Escape interrupts the turn, and the TUI then sends any queued message straight away.
+- **Status `shell`:** the pid file says `shell` when the turn is over but a background command it started is
+  still running. It accepts messages like `idle`.
+
+## Phase 5 findings (2026-10-17, Claude Code 2.1.302)
+
+Checked against a live TUI in tmux, through a lofiwave started on its own port:
+
+- **One settings file for everything:** `data/claude-chat.json` (`src/chat/settings.ts`, was `claude-approvals.json`)
+  now carries the PermissionRequest hook, `MessageDisplay` (timeout 2s), `UserPromptSubmit` and `Stop` (10s), and a
+  `statusLine`. Runs started with it get `meta.live` next to `meta.approvals`; the capabilities `streaming`, `usage`
+  and `checkpoints` follow it.
+- **`MessageDisplay`'s `message_id` is not in the transcript.** It's a UUID of its own, not the API's `msg_…` id
+  nor an entry's `uuid`. `prompt_id` is, as `promptId` on the prompt's user entries. One "message" is one text
+  block. So a stream is matched to the transcript by text: it's done once an assistant item written after the
+  stream began starts with what streamed. A 600-word answer arrived as 8 updates over 11s, and the transcript's
+  copy replaced it 0.3s after the last one.
+- **Deltas aren't always one paragraph:** a delta can carry a paragraph plus the start of the next. They're joined by
+  `index`, never split.
+- **The statusline JSON has what the footer needs:** `model.display_name`, `context_window.used_percentage` and
+  `current_usage`, `cost.total_cost_usd`, and `rate_limits.five_hour` / `seven_day` (`used_percentage`,
+  `resets_at` in seconds). A `statusLine` in `--settings` replaces the user's own, so
+  `scripts/claude-statusline.ts` posts a copy to lofiwave and then runs the one it replaced (project local,
+  project, then user settings) and prints that.
+- **Task lists:** 2.1.302 has no TodoWrite. TaskCreate/TaskUpdate keep `~/.claude/tasks/<session>/<id>.json`
+  (`subject`, `activeForm`, `status`). The feed reads that folder every 2s, for any session; TodoWrite inputs
+  in the transcript are the fallback for older versions. The tools weren't offered to the model in the test
+  session, so the strip was checked with task files written by hand.
+- **Checkpoints:** `UserPromptSubmit` waits up to 3s for the start snapshot, so it's taken before Claude can change
+  anything. A Stop snapshot ends the turn. With no Stop (Esc), the next prompt's start does, and a turn with
+  neither has no card yet. Built in a copy of the index (`GIT_INDEX_FILE`): the user's index, branch and stash
+  are untouched, and an untracked 6 MB file was left out as designed. The card lists files changed through Bash too
+  ("via a command"), and the panel's *Turn diff* is the git diff for that file.
+- **Not covered:** a message queued mid-turn. If it fires its own UserPromptSubmit (unchecked), the turn it lands
+  in is split in two for git. Checkpoints in a repo the size of a monorepo (the snapshot is serialized per repo and
+  capped at 30s per git command, but untested at that size). Usage for sessions lofiwave didn't start (no statusline
+  of ours there).
+
+## Phase 4 findings (2026-10-11, Claude Code 2.1.296)
+
+Checked against a live TUI in tmux while building the files panel:
+
+- **Parallel tool results branch off the chain.** With two Edits in one message, the transcript's chain runs
+  through the *last* call's result; the first call's result has the first `tool_use` as its parent and nothing
+  after it. Walking parents from the newest entry missed it, so the first edit stayed "running" forever (a
+  phase 1 bug). `activeChain` now puts a result whose parent is on the chain back right after that parent.
+- **Paths in Claude's text** come as inline code (`` `src/x.ts:12` ``), plain text, or markdown links to a
+  relative path (`[x.ts](src/x.ts#L12)`). All three are linked, but only after the server says the file exists
+  (one batched `POST …/chat/paths` per render), so `and/or` or a path in another worktree stays plain text.
+- **Edits made through Bash** (`printf >> file`, `sed -i`) leave no `file_change` item, so they don't show in the
+  turn's "Edited N files" card. Git checkpoints (phase 5) would catch them.
+- **The panel is opened, not inline:** an edit row now opens the panel on its diff instead of expanding in
+  place. A diff's new line numbers jump to that line of the file as it is now. When Claude edits the open file
+  again, the Current and Preview tabs reload.
+- **Markdown preview images:** relative images are served through `…/chat/file?raw=1` (same cwd/`$HOME` rule).
+  Remote images are not loaded: the viewer's browser would fetch whatever URL the file names.
+
+## Phase 3 findings (2026-10-11, Claude Code 2.1.296)
+
+Checked against a live TUI in tmux while building the approval cards:
+
+- **The hook settings go in a file,** `data/claude-approvals.json`, passed with `--settings` to interactive claude
+  runs (not to runs that bring their own `--settings`). The run id reaches the hook as a header,
+  `X-Lofiwave-Run: $AGENT_CONSOLE_RUN_ID`, next to the token, so one file serves every run. The hook's
+  `timeout` is 1800s and lofiwave lets go 20s before that.
+- **Bun's idle timeout** (10s) would close a held request: the server turns it off for `/api/hooks/permission`.
+- **ExitPlanMode needs `updatedInput`.** An `allow` without it (with or without `setMode`) is accepted by the
+  hook and then ignored: the plan dialog stays up. With `updatedInput` set to the original input, the plan is
+  approved and `setMode` applies. `deny` with a `message` sends Claude back to planning with that feedback.
+- **AskUserQuestion with several questions** works with `updatedInput.answers`, one entry per question;
+  multiple choices are comma-separated ("Pear, Plum").
+- **`deny` with a `message`** reaches Claude as the tool's error text, with nothing marking it as a denial. The
+  message starts with "The user denied this from lofiwave", which is how the chat view labels the row "denied"
+  instead of "failed". (Claude may treat an odd-looking message as suspicious, so it's phrased as the user's.)
+- **`permission_suggestions`** are the TUI's own "Yes, and always …" options (`addRules`, `addDirectories`,
+  `setMode`). Sending one back as `updatedPermissions` applies it.
+- **The pid file says `waiting`, with `waitingFor: "permission prompt"`,** while the hook is held, for permissions,
+  questions and plans alike.
+- **Matching a request to its tool call:** the tool_use is in the transcript before the hook fires, but its input's
+  keys can be in a different order from the hook's `tool_input`, so they're compared with sorted keys.
+- **When the terminal answers first,** the tool_result lands and the card goes within a second. Claude doesn't
+  always hang up on the held hook, so lofiwave also watches the pid file (waiting → not waiting) and the
+  transcript.
+
+## Spike results (2026-10-11, Claude Code 2.1.296, codex-cli 0.162.1)
+
+Each spike was run against a real TUI in tmux, with a local listener standing in for lofiwave.
+
+1. **Image paste: works with bracketed paste.** `tmux load-buffer` + `paste-buffer -p` with an absolute
+   `.png` path gives `[Image #1]` in both the Claude and the Codex TUI. A path with a space works.
+   `send-keys -l` with the same path stays plain text. A paste mixing text and a path attaches the image but
+   puts the chip before the text.
+2. **`--settings` hooks merge.** With a `SessionStart` hook in `--settings`, another in the project's
+   `.claude/settings.json` and the user's own global one (lofiwave's session hook), all three fired. Injecting
+   hooks doesn't disable lofiwave's existing session hook or anyone else's.
+3. **HTTP hooks: no allowlist needed, and the token gets through.**
+   - A hook posting to `http://127.0.0.1:<port>` was sent with no `allowedHttpHookUrls` entry. That key is a
+     managed-settings restriction: it only blocks URLs when an admin sets it.
+   - Header values interpolate `$VAR` only for names in the hook's own `allowedEnvVars`. An unlisted variable
+     arrives as an empty string. `$AGENT_CONSOLE_TOKEN` came through, despite the binary having a "credential,
+     not interpolated" check.
+   - The answer goes in the response body: `{"hookSpecificOutput":{"hookEventName":"PermissionRequest",
+     "decision":{"behavior":"allow"}}}` approves the tool, and the TUI shows "Allowed by PermissionRequest
+     hook". `{}` means no decision, and the TUI dialog stays up.
+   - **The race works both ways.** While the hook is held open, the TUI dialog is already on screen. Answer in
+     the terminal first and the late `allow` is dropped (the command never ran). Let the hook answer first and
+     the open dialog closes and the tool runs.
+   - **AskUserQuestion goes through PermissionRequest too**, with `tool_input.questions`. Answering with
+     `updatedInput.answers` worked.
+   - The payload has `tool_name`, `tool_input`, `permission_suggestions`, `permission_mode` and `prompt_id`,
+     and no `tool_use_id`.
+   - ExitPlanMode and `deny` with a `message` weren't tried.
+4. **`MessageDisplay` streams by paragraph, and blocks the screen.**
+   - One call per paragraph (split at blank lines), ~0.1–1.5s apart. A 900-word answer made 52 calls over
+     26s. The payload is `{turn_id, message_id, prompt_id, index, final, delta}`, with `final: true` on the
+     last delta of each message.
+   - Short answers can arrive as one or two calls right at the end.
+   - The transcript gets the assistant message only once it's complete, so live text has to come from this
+     hook.
+   - **The TUI waits for the hook before drawing each paragraph.** With a 3s hook, the last paragraph showed
+     4.6s after the message was already in the transcript. Calls overlap rather than queue.
+   - So lofiwave must answer the hook immediately (an HTTP hook to an endpoint that returns `{}` straight
+     away, with a short `timeout`) and never do work inline. The binary also suggests the hook can rewrite
+     the text it's given, via `displayContent`. Don't return that.
+5. **Codex rollout: written item by item, from tmux too.**
+   - The file only appears when the first prompt is sent, not when the TUI starts.
+   - It's appended as each item completes: the user message (with the pasted image), each assistant message,
+     the tool call, its output, then `task_complete`. There's no streaming inside a message.
+   - The format has moved since the 0.153 audit:
+     - tool calls are `custom_tool_call` / `custom_tool_call_output` response items
+     - `item_completed` event_msgs sit alongside them
+     - there are new top-level `world_state`, `turn_context` and `token_usage_record` lines
+   - The Codex adapter should key off `item_completed` and treat unknown types as raw rows, as the Claude one
+     does.
+
+(Phase 5 correction: `message_id` doesn't match anything in the transcript; see "Phase 5 findings".)
+
+**What this changes for phase 2:** nothing in the composer design. Images go in as a bracketed paste of the
+path on its own, then the text. **For phase 3:** use an HTTP `PermissionRequest` hook with the token header, and
+reply `{}` when lofiwave has nothing to say. **For phase 5:** the `MessageDisplay` endpoint must reply
+immediately.

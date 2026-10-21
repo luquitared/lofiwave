@@ -14,7 +14,7 @@ screen and keys endpoints and the chat composer all target `ac-<id>` this way (a
 browser could type into the wrong run. Fix: exact targets, `=ac-4` for a session and `=ac-4:` for its pane.
 
 ### #3 Chat view, toggleable with the terminal
-*Opened 2026-10-09 · designed in [`docs/rendered-view.md`](docs/rendered-view.md), nothing built*
+*Opened 2026-10-09 · designed in [`docs/rendered-view.md`](docs/rendered-view.md) · phases 1 (read-only chat view), 2 (composer), 3 (approvals), 4 (files panel) and 5 (live polish) built*
 
 An interactive run gets a second view: the same live session as messages, tool cards, diffs and images,
 with a composer that takes uploads and answers approvals. You can switch between it and the xterm view at
@@ -22,12 +22,26 @@ any time. The TUI in tmux stays the only process running the session; the chat v
 and types into the pane. It also ends the terminal scrolling back-and-forth (`81e63a9` → `ed62c8d` →
 `ad17cb8`), because the chat view scrolls separately in each browser.
 
-Six phases, one PR each (in the doc). First, the five spikes at the end of the doc:
-- Does pasting an image path into a live TUI with `tmux paste-buffer -p` attach it?
-- Do `--settings` hooks merge with the user's own hooks or replace them?
-- Do HTTP hooks need `allowedHttpHookUrls`, and can their headers carry the token?
-- What does `MessageDisplay` send, and how often?
-- Is a Codex TUI's rollout written item by item, and does pasting an image path work there?
+Six phases, one PR each (in the doc). Phase 1 is in: the Chat view for Claude runs and, read-only in a dialog,
+for Claude sessions lofiwave didn't start. Phase 2 adds the composer: text, Stop, queued messages, the
+unsent-draft check, image and file uploads, the `/` list, and a "terminal needs you" banner with a live snapshot.
+Phase 3 answers permission prompts, questions and plans from cards in the chat view, through a `PermissionRequest`
+hook injected with `--settings`. Phase 4 adds the files panel: an edit row, a turn's "Edited N files" card or a
+path in Claude's text opens the file beside the conversation, with the edit's diff, the file as it is now (at the
+line), and a preview for markdown and images. Phase 5 streams Claude's text as it's written (`MessageDisplay`), shows
+the model, context, cost and rate limits from the statusline, keeps a live task-list strip above the composer, and
+lists what each turn changed from git checkpoints (hidden refs), commands' changes included. Still untested from
+phase 5: a message queued mid-turn (if it fires its own prompt hook, it splits the turn for git), checkpoints in a very large repo, and the strip
+with real TaskCreate calls (the test session didn't offer the tools). Still untested from phase 4: the panel as an overlay on a real phone,
+files near the 1 MB cap, and edits made inside a subagent. Still untested from phase 3: the hook timing out, a server restart while a request
+is held, bypass and `acceptEdits` modes, requests from inside a subagent, and the cards on a real phone.
+Still untested from phase 2: very long pastes and non-ASCII text, several images in one message, HEIC, Stop
+during a tool call, two browsers sending at once. Still open from phase 1's checklist: warning when two live runs share
+a session id, nested subagents, the phone layout on a real device. Before phases 2 and 3, the five spikes at the
+end of the doc. All five ran on 2026-10-11 (results at the end of the doc). Image paste, hook merging, HTTP hooks
+with the token, and the approval race all work. `MessageDisplay` streams by paragraph but blocks the TUI
+until it returns, so lofiwave's endpoint must reply at once. ExitPlanMode and `deny` with a message were
+checked in phase 3 (ExitPlanMode needs `updatedInput` on allow; see the doc's "Phase 3 findings").
 
 ### #2 Codex: untested paths
 *Opened 2026-10-09 · audit against `codex-cli 0.153.4`; see #1 for what's confirmed broken*
@@ -38,7 +52,7 @@ Never exercised end to end:
 - [ ] Restarting a Codex run
 - [ ] Cleaning up Codex's child processes when a run is killed
 - [ ] `codex exec resume`
-- [ ] Image attachment (`exec -i`, and pasting a path into the TUI)
+- [ ] Image attachment with `exec -i` (pasting a path into the TUI works on 0.162.1, see `docs/rendered-view.md`)
 - [ ] The xterm view with Codex (scrolling, resizing)
 - [ ] Approval and trust menus on the phone view
 - [ ] Codex on Linux

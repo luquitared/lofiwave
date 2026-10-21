@@ -1,0 +1,470 @@
+/**
+ * The chat view's server side: a read-only projection of a Claude Code session, kept live over a WebSocket.
+ * The TUI in tmux stays the only process running the session; this only reads its files.
+ *
+ * A *feed* follows one source (a run of ours, or any session on this machine by id) and is shared by every browser
+ * watching it. It works out which transcript is current (a /clear starts a new file), tails it, projects the
+ * active chain into items, and sends each viewer whole-item upserts and removals.
+ *
+ * Wire protocol, server → client JSON text frames:
+ *   {t:"hello", session_id, cwd, read_only, capabilities, status, waiting_for, items, floor, has_earlier}
+ *   {t:"items", upsert: Item[], remove: string[]}
+ *   {t:"status", status, waiting_for, read_only}
+ *   {t:"requests", requests}   (runs only: the approvals waiting on the browser, see ./approvals.ts; also in hello)
+ *   {t:"todos", todos}         (the session's task list, from ~/.claude/tasks or the last TodoWrite; also in hello)
+ *   {t:"usage", usage}         (runs only: model, context, cost and rate limits from the statusline; also in hello)
+ *   {t:"changes", changes}     (runs only: what each finished turn changed in git, by prompt id; also in hello)
+ * While a run's Claude is writing, its text arrives as an assistant item with `streaming: true` (from the
+ * MessageDisplay hook, see ./live.ts), replaced by the real one once the transcript has it.
+ * The client sends nothing on the socket. Older turns come from GET …/chat?before=<ordinal>, big payloads from
+ * GET …/chat/blob?ref=, files on disk from GET …/chat/file?path= (see ./files.ts), typing goes through POST /api/runs/:id/chat/send (see ./input.ts), and answers through
+ * POST /api/runs/:id/chat/requests/:rid.
+ */
+import type { ServerWebSocket } from "bun";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
+import { db, type RunRow, type SessionRow } from "../db";
+import { ApiError } from "../runner";
+import { claudeRegistry, claudeTranscriptPath } from "../agents";
+import { JsonlTail, readLineAt, type LineLoc } from "./tail";
+import { activeChain, capabilities, extractBlob, ingest, project, type Item, type Rec } from "./claude";
+import { onRequests, requestsFor, settleAnswered } from "./approvals";
+import { dropStream, onLive, streamsFor, usageFor } from "./live";
+import { checkpointedPrompts, turnChanges, type TurnChanges } from "./checkpoints";
+
+/** How much of the conversation a viewer gets on connect; "Load earlier" fetches the rest. */
+const WINDOW_TURNS = 30;
+const WINDOW_ITEMS = 500;
+/** A feed with no viewers stays warm this long, so flipping views or reloading is instant. */
+const LINGER_MS = 60_000;
+
+export type ChatData = { kind: "chat"; key: string; user: string };
+
+// ---------------------------------------------------------------- sources
+
+type Located = { path: string; sessionId: string; pid: number | null };
+/** readOnly(): nothing can be typed into it (not our run, or its pane is gone). approvals, live: started with our hooks. */
+type Source = { key: string; runId?: number; approvals?: boolean; live?: boolean; readOnly(): boolean; locate(): Located };
+
+/** The run's current Claude session: the newest of what the session hook recorded and what the pid file says. */
+function runSource(runId: number): Source {
+  const run = db.query<RunRow, [number]>("SELECT * FROM runs WHERE id = ?").get(runId);
+  if (!run) throw new ApiError(404, `run ${runId} not found`);
+  const meta = JSON.parse(run.meta || "{}");
+  const rows = db.query<SessionRow, [number]>("SELECT * FROM sessions WHERE run_id = ? ORDER BY started_at").all(runId);
+  if (meta.codex_session || rows.some((s) => s.agent === "codex") || /(^|\/)codex$/.test(typeTool(run.type_name)))
+    throw new ApiError(400, "the chat view reads Claude Code sessions; Codex support comes later");
+  return {
+    key: `run:${runId}`,
+    runId,
+    approvals: Boolean(meta.approvals),
+    live: Boolean(meta.live),
+    readOnly() {
+      const cur = db.query<RunRow, [number]>("SELECT * FROM runs WHERE id = ?").get(runId);
+      return !(cur?.status === "running" && JSON.parse(cur.meta || "{}").tmux);
+    },
+    locate() {
+      const cur = db.query<RunRow, [number]>("SELECT * FROM runs WHERE id = ?").get(runId);
+      const pid = cur?.status === "running" ? cur.pid : null;
+      const candidates: Located[] = [];
+      const last = db.query<SessionRow, [number]>("SELECT * FROM sessions WHERE run_id = ? AND agent = 'claude' ORDER BY started_at DESC LIMIT 1").get(runId);
+      if (last) candidates.push({ path: last.transcript_path || claudeTranscriptPath(last.session_id, last.cwd || cur?.cwd || ""), sessionId: last.session_id, pid });
+      const reg = pid ? claudeRegistry().byPid.get(pid) : undefined;
+      if (reg && reg.sessionId !== last?.session_id) candidates.push({ path: claudeTranscriptPath(reg.sessionId, reg.cwd), sessionId: reg.sessionId, pid });
+      const mtime = (p: string) => { try { return p ? statSync(p).mtimeMs : -1; } catch { return -1; } };
+      candidates.sort((a, b) => mtime(b.path) - mtime(a.path));
+      return candidates[0] ?? { path: "", sessionId: "", pid };
+    },
+  };
+}
+
+const typeTool = (name: string) => db.query<{ command: string }, [string]>("SELECT command FROM process_types WHERE name = ?").get(name)?.command ?? "";
+
+/** Any Claude session on this machine, by id (the Agents tab's sessions, which lofiwave didn't start). Read-only. */
+function sessionSource(sid: string): Source {
+  if (!/^[A-Za-z0-9_.-]+$/.test(sid) || sid.includes("..")) throw new ApiError(400, "session id has unexpected characters");
+  const path = claudeTranscriptPath(sid, claudeRegistry().bySession.get(sid)?.cwd ?? "");
+  if (!path) throw new ApiError(404, `no Claude transcript for session ${sid} on this machine`);
+  return {
+    key: `session:${sid}`,
+    readOnly: () => true,
+    locate: () => ({ path, sessionId: sid, pid: claudeRegistry().bySession.get(sid)?.pid ?? null }),
+  };
+}
+
+export function chatSource(kind: "run" | "session", id: string): Source {
+  return kind === "run" ? runSource(Number(id)) : sessionSource(id);
+}
+
+// ---------------------------------------------------------------- a transcript, followed
+
+class Transcript {
+  byUuid = new Map<string, Rec>();
+  order: string[] = [];
+  items: Item[] = [];
+  chain: Rec[] = [];
+  cwd = "";
+  private tail: JsonlTail;
+  private timer: ReturnType<typeof setTimeout> | null = null;
+
+  constructor(readonly path: string, private onItems: () => void) {
+    this.tail = new JsonlTail(path, (e, loc) => this.add(e, loc), () => this.schedule(), () => this.reset());
+    this.tail.start();
+    this.recompute();
+  }
+
+  close() { this.tail.close(); if (this.timer) clearTimeout(this.timer); }
+
+  private add(e: any, loc: LineLoc) {
+    const r = ingest(e, loc);
+    if (!r) return;
+    if (!this.byUuid.has(r.uuid)) this.order.push(r.uuid);
+    this.byUuid.set(r.uuid, r);
+    if (r.cwd) this.cwd = r.cwd;
+  }
+
+  private reset() { this.byUuid.clear(); this.order = []; }
+
+  /** Entries land one block at a time, often in bursts: project once per burst. */
+  private schedule() {
+    if (this.timer) return;
+    this.timer = setTimeout(() => { this.timer = null; this.recompute(); this.onItems(); }, 80);
+  }
+
+  recompute() { this.chain = activeChain(this.byUuid, this.order); this.items = project(this.chain); }
+
+  /** The active chain's tool calls, oldest first, and whether each has finished (for matching approval requests). */
+  calls() {
+    const status = new Map(this.items.map((i) => [i.id, i.status]));
+    return this.chain.flatMap((r) => (r.blocks ?? []).flatMap((b) => b.type === "tool_use" ? [{ id: b.id, name: b.name, input: b.input, done: status.get(b.id) !== "running" }] : []));
+  }
+
+  loc(uuid: string): LineLoc | undefined { return this.byUuid.get(uuid)?.loc; }
+}
+
+// ---------------------------------------------------------------- feeds
+
+type Status = { status: string; waiting_for: string; read_only: boolean };
+export type Todo = { text: string; active: string; status: string };
+
+/** How many of a run's latest turns get their changes sent. */
+const CHANGES_TURNS = 100;
+/** A stream counts as the transcript's message when that message was written no earlier than this before it began. */
+const STREAM_MATCH_SLACK_MS = 3000;
+const norm = (s: string) => s.replace(/\s+/g, " ").trim();
+
+class Feed {
+  subs = new Set<ServerWebSocket<ChatData>>();
+  transcript: Transcript | null = null;
+  located: Located = { path: "", sessionId: "", pid: null };
+  status: Status = { status: "", waiting_for: "", read_only: true };
+  /** What each item looked like when last sent, to send only what changed. */
+  private sent = new Map<string, string>();
+  private timer: ReturnType<typeof setInterval>;
+  private ticks = 0;
+  private unlisten = () => {};
+  private unlistenLive = () => {};
+  todos: Todo[] = [];
+  private todosSig = "[]";
+  changes: Record<string, TurnChanges> = {};
+  private changesBusy = false;
+  private changesAgain = false;
+  lastUsed = Date.now();
+
+  constructor(readonly source: Source) {
+    if (source.runId) this.unlisten = onRequests((runId) => { if (runId === source.runId) { this.linkRequests(); this.sendRequests(); } });
+    if (source.runId && source.live) this.unlistenLive = onLive((runId, what) => {
+      if (runId !== source.runId) return;
+      if (what === "streams") this.broadcastItems();
+      else if (what === "usage") this.send({ t: "usage", usage: usageFor(runId) });
+      else this.refreshChanges();
+    });
+    this.relocate();
+    this.pollStatus();
+    this.pollTodos();
+    this.refreshChanges();
+    this.timer = setInterval(() => {
+      this.ticks++;
+      if (this.ticks % 2 === 0) { this.relocate(); this.pollTodos(); }
+      this.pollStatus();
+      if (!this.subs.size && Date.now() - this.lastUsed > LINGER_MS) this.close();
+    }, 1000);
+  }
+
+  close() {
+    clearInterval(this.timer);
+    this.unlisten();
+    this.unlistenLive();
+    this.transcript?.close();
+    feeds.delete(this.source.key);
+  }
+
+  /** Follow the current transcript; when it changes (/clear, a resume that forked), every viewer starts over. */
+  private relocate() {
+    let next: Located;
+    try { next = this.source.locate(); } catch { return; }
+    const changed = next.path !== this.located.path;
+    this.located = next;
+    if (!changed && this.transcript) return;
+    this.transcript?.close();
+    this.transcript = next.path ? new Transcript(next.path, () => this.broadcastItems()) : null;
+    this.sent = new Map(this.items().map((i) => [i.id, JSON.stringify(i)]));
+    for (const ws of this.subs) this.hello(ws);
+  }
+
+  private pollStatus() {
+    const reg = this.located.pid ? claudeRegistry().byPid.get(this.located.pid) : this.located.sessionId ? claudeRegistry().bySession.get(this.located.sessionId) : undefined;
+    const next: Status = { status: reg?.status ?? "", waiting_for: (reg as any)?.waitingFor ?? "", read_only: this.source.readOnly() };
+    if (next.status === this.status.status && next.waiting_for === this.status.waiting_for && next.read_only === this.status.read_only) return;
+    const settled = this.status.status === "busy" && next.status !== "busy";
+    this.status = next;
+    this.send({ t: "status", ...next });
+    if (settled && streamsFor(this.source.runId ?? 0).length) setTimeout(() => this.broadcastItems(), 5000);
+  }
+
+  /**
+   * The transcript's items, then what's still streaming. A stream is dropped once the transcript has the message
+   * (its text starts with what streamed), or a while after the turn ended without it showing up.
+   */
+  items(): Item[] {
+    const base = this.transcript?.items ?? [];
+    const runId = this.source.runId;
+    if (!runId || !this.source.live) return base;
+    const list = streamsFor(runId);
+    if (!list.length) return base;
+    const said = base.filter((i) => i.kind === "assistant").slice(-40).map((i) => ({ text: norm((i as any).text), at: i.startedAt ?? 0 }));
+    const last = base.at(-1);
+    const out: Item[] = [];
+    for (const s of list) {
+      const text = s.parts.join("");
+      const n = norm(text);
+      if (!n) continue;
+      const landed = said.some((a) => a.at >= s.at - STREAM_MATCH_SLACK_MS && a.text.startsWith(n));
+      const stale = this.status.status !== "busy" && Date.now() - s.at > 30_000;
+      if (landed || stale) { dropStream(runId, s.messageId); continue; }
+      out.push({ id: `stream:${s.messageId}`, kind: "assistant", text, streaming: true, status: "running", turnId: last?.turnId ?? "start",
+        ordinal: (last?.ordinal ?? -1) + 1 + out.length, native: { agent: "claude", ref: s.messageId }, startedAt: s.at });
+    }
+    return out.length ? [...base, ...out] : base;
+  }
+
+  /** The session's task list: Claude's task files (TaskCreate/TaskUpdate), else the last TodoWrite in the transcript. */
+  private pollTodos() {
+    let list: Todo[] = [];
+    const sid = this.located.sessionId;
+    const dir = sid && /^[A-Za-z0-9_.-]+$/.test(sid) ? join(process.env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude"), "tasks", sid) : "";
+    try {
+      const files = dir ? readdirSync(dir).filter((f) => f.endsWith(".json")) : [];
+      const tasks = files.flatMap((f) => { try { return [JSON.parse(readFileSync(join(dir, f), "utf8"))]; } catch { return []; } })
+        .filter((t) => t && typeof t === "object" && t.status !== "deleted")
+        .sort((a, b) => (Number(a.id) || 0) - (Number(b.id) || 0));
+      list = tasks.map((t) => ({ text: String(t.subject ?? t.description ?? ""), active: String(t.activeForm ?? ""), status: String(t.status ?? "pending") }));
+    } catch { /* no task files for this session */ }
+    if (!list.length && this.transcript) {
+      for (let i = this.transcript.chain.length - 1; i >= 0 && !list.length; i--) {
+        const call = this.transcript.chain[i].blocks?.findLast((b) => b.type === "tool_use" && b.name === "TodoWrite") as any;
+        if (call) list = (call.input?.todos ?? []).map((t: any) => ({ text: String(t.content ?? ""), active: String(t.activeForm ?? ""), status: String(t.status ?? "pending") }));
+      }
+    }
+    const sig = JSON.stringify(list);
+    if (sig === this.todosSig) return;
+    this.todosSig = sig; this.todos = list;
+    this.send({ t: "todos", todos: list });
+  }
+
+  /** What each finished turn changed, from its git checkpoints. Runs one refresh at a time. */
+  private async refreshChanges() {
+    const runId = this.source.runId;
+    if (!runId || !this.source.live) return;
+    if (this.changesBusy) { this.changesAgain = true; return; }
+    this.changesBusy = true;
+    try {
+      let any = false;
+      for (const pid of checkpointedPrompts(runId).slice(-CHANGES_TURNS)) {
+        if (this.changes[pid]) continue;
+        const c = await turnChanges(runId, pid, { finishedOnly: true });
+        if (c) { this.changes[pid] = c; any = true; }
+      }
+      if (any) this.send({ t: "changes", changes: this.changes });
+    } catch (e) { console.error("[changes]", e); }
+    finally {
+      this.changesBusy = false;
+      if (this.changesAgain) { this.changesAgain = false; this.refreshChanges(); }
+    }
+  }
+
+  private send(msg: unknown) {
+    const s = JSON.stringify(msg);
+    for (const ws of this.subs) if (ws.readyState === 1) ws.send(s);
+  }
+
+  /** Tie open approval requests to their tool calls, and drop the ones the terminal already answered. */
+  private linkRequests(): boolean {
+    return Boolean(this.source.runId && this.transcript && settleAnswered(this.source.runId, this.transcript.calls()));
+  }
+
+  private sendRequests() { if (this.source.runId) this.send({ t: "requests", requests: requestsFor(this.source.runId) }); }
+
+  private broadcastItems() {
+    if (this.linkRequests()) this.sendRequests();
+    const items = this.items();
+    const upsert: Item[] = [];
+    const seen = new Set<string>();
+    for (const it of items) {
+      seen.add(it.id);
+      const s = JSON.stringify(it);
+      if (this.sent.get(it.id) !== s) { upsert.push(it); this.sent.set(it.id, s); }
+    }
+    const remove = [...this.sent.keys()].filter((id) => !seen.has(id));
+    for (const id of remove) this.sent.delete(id);
+    if (upsert.length || remove.length) this.send({ t: "items", upsert, remove });
+  }
+
+  hello(ws: ServerWebSocket<ChatData>) {
+    const items = this.items();
+    const { slice, floor, hasEarlier } = windowBefore(items, Infinity);
+    this.linkRequests();
+    ws.send(JSON.stringify({
+      t: "hello", session_id: this.located.sessionId, cwd: this.transcript?.cwd ?? "",
+      capabilities: { ...capabilities, approvals: Boolean(this.source.approvals), streaming: Boolean(this.source.live), usage: Boolean(this.source.live), checkpoints: Boolean(this.source.live) }, ...this.status,
+      requests: this.source.runId ? requestsFor(this.source.runId) : [], todos: this.todos,
+      usage: this.source.runId ? usageFor(this.source.runId) : null, changes: this.changes, items: slice, floor, has_earlier: hasEarlier, waiting_for_file: !this.transcript || !existsSync(this.located.path),
+    }));
+  }
+
+  earlier(before: number) {
+    this.lastUsed = Date.now();
+    const { slice, floor, hasEarlier } = windowBefore(this.items(), before);
+    return { items: slice, floor, has_earlier: hasEarlier };
+  }
+}
+
+/** The last WINDOW_TURNS turns (or WINDOW_ITEMS items) before ordinal `before`, cut on a turn boundary. */
+function windowBefore(items: Item[], before: number): { slice: Item[]; floor: number; hasEarlier: boolean } {
+  let end = items.length;
+  while (end > 0 && items[end - 1].ordinal >= before) end--;
+  let start = end, turns = 0, turn = "";
+  while (start > 0) {
+    const t = items[start - 1].turnId;
+    if (t !== turn) { if (turns >= WINDOW_TURNS || end - start >= WINDOW_ITEMS) break; turns++; turn = t; }
+    start--;
+  }
+  return { slice: items.slice(start, end), floor: items[start]?.ordinal ?? 0, hasEarlier: start > 0 };
+}
+
+const feeds = new Map<string, Feed>();
+
+function feedFor(source: Source): Feed {
+  let f = feeds.get(source.key);
+  if (!f) { f = new Feed(source); feeds.set(source.key, f); }
+  f.lastUsed = Date.now();
+  return f;
+}
+
+// ---------------------------------------------------------------- socket
+
+/** Validate before upgrading (errors go back as HTTP); the feed itself is made on open. */
+export function chatFor(kind: "run" | "session", id: string, user: string): ChatData {
+  return { kind: "chat", key: chatSource(kind, id).key, user };
+}
+
+export const chatSocket = {
+  open(ws: ServerWebSocket<ChatData>) {
+    const [kind, id] = splitKey(ws.data.key);
+    let feed: Feed;
+    try { feed = feedFor(chatSource(kind, id)); } catch (e: any) { ws.close(1011, String(e?.message ?? e).slice(0, 120)); return; }
+    feed.subs.add(ws);
+    feed.hello(ws);
+  },
+  message() { /* the client sends nothing yet */ },
+  close(ws: ServerWebSocket<ChatData>) {
+    const f = feeds.get(ws.data.key);
+    if (f) { f.subs.delete(ws); f.lastUsed = Date.now(); }
+  },
+};
+
+const splitKey = (key: string): ["run" | "session", string] => {
+  const i = key.indexOf(":");
+  return [key.slice(0, i) as "run" | "session", key.slice(i + 1)];
+};
+
+// ---------------------------------------------------------------- HTTP: earlier turns, blobs, subagents
+
+export function chatEarlier(kind: "run" | "session", id: string, before: number) {
+  const feed = feedFor(chatSource(kind, id));
+  return { session_id: feed.located.sessionId, ...feed.earlier(before) };
+}
+
+const IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
+
+/** A payload left in the transcript: `ref` is "<uuid>/<path>" from an item; `agent` points into a subagent's file. */
+export function chatBlob(kind: "run" | "session", id: string, ref: string, agent: string): Response {
+  const feed = feedFor(chatSource(kind, id));
+  const [uuid, ...path] = ref.split("/");
+  let file: string, loc: LineLoc | undefined;
+  if (agent) {
+    const sub = subagentTranscript(feed, agent);
+    file = sub.path; loc = sub.locs.get(uuid);
+  } else {
+    file = feed.transcript?.path ?? ""; loc = feed.transcript?.loc(uuid);
+  }
+  if (!file || !loc) throw new ApiError(404, "no such payload in this session (it may have been rewound away)");
+  const blob = extractBlob(readLineAt(file, loc), path);
+  if (!blob) throw new ApiError(404, "payload not found");
+  if (blob.image) {
+    if (!IMAGE_TYPES.has(blob.image.mediaType)) throw new ApiError(415, `unsupported image type ${blob.image.mediaType}`);
+    return new Response(Buffer.from(blob.image.data, "base64"), { headers: { "content-type": blob.image.mediaType, "cache-control": "private, max-age=3600" } });
+  }
+  return new Response(blob.text ?? "", { headers: { "content-type": "text/plain; charset=utf-8" } });
+}
+
+const subCache = new Map<string, { key: string; items: Item[]; locs: Map<string, LineLoc>; path: string }>();
+/** Subagent transcripts are small and finished (or nearly): read whole, cached by size and mtime. */
+function subagentTranscript(feed: Feed, agentId: string) {
+  if (!/^[A-Za-z0-9_-]+$/.test(agentId)) throw new ApiError(400, "agent id has unexpected characters");
+  const main = feed.transcript?.path;
+  if (!main) throw new ApiError(404, "no transcript yet");
+  const dir = dirname(main), sid = feed.located.sessionId;
+  const path = [join(dir, sid, "subagents", `agent-${agentId}.jsonl`), join(dir, `agent-${agentId}.jsonl`)].find((p) => existsSync(p));
+  if (!path) throw new ApiError(404, `no transcript for subagent ${agentId}`);
+  const st = statSync(path);
+  const key = `${st.size}:${st.mtimeMs}`;
+  const hit = subCache.get(path);
+  if (hit && hit.key === key) return hit;
+  if (st.size > 64 * 1024 * 1024) throw new ApiError(413, "subagent transcript is too big to show");
+  const byUuid = new Map<string, Rec>(), order: string[] = [], locs = new Map<string, LineLoc>();
+  const buf = readFileSync(path);
+  let start = 0;
+  while (start < buf.length) {
+    let nl = buf.indexOf(10, start);
+    if (nl < 0) nl = buf.length;
+    if (nl > start) {
+      try {
+        const e = JSON.parse(buf.toString("utf8", start, nl));
+        // Subagent files mark every entry as a sidechain; inside their own file that's the main line.
+        if (e && typeof e === "object") e.isSidechain = false;
+        const loc = { offset: start, length: nl - start };
+        const r = ingest(e, loc);
+        if (r) { if (!byUuid.has(r.uuid)) order.push(r.uuid); byUuid.set(r.uuid, r); locs.set(r.uuid, loc); }
+      } catch { /* partial or junk line */ }
+    }
+    start = nl + 1;
+  }
+  const out = { key, items: project(activeChain(byUuid, order)), locs, path };
+  subCache.set(path, out);
+  if (subCache.size > 50) subCache.delete(subCache.keys().next().value!);
+  return out;
+}
+
+/** The folder the session's relative paths are in: Claude's cwd from the transcript, else the run's (for ./files.ts). */
+export function chatCwd(kind: "run" | "session", id: string): string {
+  const feed = feedFor(chatSource(kind, id));
+  if (feed.transcript?.cwd) return feed.transcript.cwd;
+  return feed.source.runId ? db.query<RunRow, [number]>("SELECT * FROM runs WHERE id = ?").get(feed.source.runId)?.cwd ?? "" : "";
+}
+
+export function chatSubagent(kind: "run" | "session", id: string, agentId: string) {
+  const sub = subagentTranscript(feedFor(chatSource(kind, id)), agentId);
+  return { agent_id: agentId, items: sub.items };
+}

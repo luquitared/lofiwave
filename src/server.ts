@@ -1,3 +1,4 @@
+import type { ServerWebSocket } from "bun";
 import { join, dirname, basename } from "node:path";
 import { readdirSync, existsSync } from "node:fs";
 import { hostname, homedir } from "node:os";
@@ -10,6 +11,12 @@ import { startScheduler, refreshNextRun, runWorkflow, computeNext } from "./sche
 import { validateCron } from "./cron";
 import { renderDocs, apiIndex } from "./docs";
 import { ttyFor, ttySocket, type TtyData } from "./tty";
+import { chatFor, chatSocket, chatEarlier, chatBlob, chatSubagent, chatCwd, type ChatData } from "./chat";
+import { chatFile, chatPaths } from "./chat/files";
+import { chatSend, chatInterrupt, chatScreen, chatCommands, chatUpload, deleteUploads, opensMenu } from "./chat/input";
+import { permissionHook, answerRequest, requestsFor } from "./chat/approvals";
+import { messageHook, statuslineHook, turnHook } from "./chat/live";
+import { turnChanges, turnFileDiff, dropCheckpoints } from "./chat/checkpoints";
 import { actor, identify, touch, online, passwordMatches, cleanName, makeSession, sessionCookie, loginBlocked, loginFailed, TOKEN_ACTOR, KEY_ACTOR_PREFIX, createApiKey } from "./auth";
 
 const PUBLIC_DIR = join(config.root, "public");
@@ -626,10 +633,75 @@ route("GET", "/api/runs/:id/sessions/:sid/transcript", (_r, p) =>
 route("GET", "/api/runs/:id/sessions/:sid/messages", (_r, p, url) =>
   json(transcriptMessages(transcriptOf(p.id, p.sid), int(url.searchParams.get("limit"), "limit", 500) || 500)));
 
+// ---- chat view (read-only, from the transcript; the live updates come over the /chat WebSocket, see src/chat)
+// GET …/chat?before=<ordinal>: the turns before what the browser has. GET …/chat/blob?ref=: an image or a long output.
+// GET …/chat/subagent/:agent: a subagent's own conversation. GET …/chat/file?path=[&raw=1]: a file as it is on disk
+// now, for the files panel; POST …/chat/paths {paths}: which paths in Claude's text are files to link (see src/chat/files.ts).
+// The same exist for any session by id.
+for (const [prefix, kind] of [["/api/runs/:id", "run"], ["/api/sessions/:id", "session"]] as const) {
+  route("GET", `${prefix}/chat`, (_r, p, url) => json(chatEarlier(kind, p.id, int(url.searchParams.get("before"), "before", Number.MAX_SAFE_INTEGER))));
+  route("GET", `${prefix}/chat/blob`, (_r, p, url) => chatBlob(kind, p.id, str(url.searchParams.get("ref") ?? undefined, "ref", { required: true }), url.searchParams.get("agent") ?? ""));
+  route("GET", `${prefix}/chat/subagent/:agent`, (_r, p) => json(chatSubagent(kind, p.id, p.agent)));
+  route("GET", `${prefix}/chat/file`, (_r, p, url) => chatFile(chatCwd(kind, p.id), str(url.searchParams.get("path") ?? undefined, "path", { required: true }), url.searchParams.get("raw") === "1"));
+  route("POST", `${prefix}/chat/paths`, async (req, p) => json(chatPaths(chatCwd(kind, p.id), strArray((await body(req)).paths, "paths"))));
+}
+
+// ---- chat composer (runs only: it types into the run's tmux pane, see src/chat/input.ts)
+// POST …/chat/send {text, files: [upload ids], draft?: "replace"|"append"}: 409 with {draft} when the terminal has an unsent draft.
+route("POST", "/api/runs/:id/chat/send", async (req, p) => {
+  const b = await body(req);
+  const draft = str(b.draft, "draft");
+  if (draft && draft !== "replace" && draft !== "append") throw new ApiError(400, `draft must be "replace" or "append"`);
+  const text = str(b.text, "text");
+  const r = await chatSend(Number(p.id), { text, files: strArray(b.files, "files"), draft: draft as "replace" | "append" | "" });
+  return json({ ...r, opens_menu: opensMenu(text) });
+});
+route("POST", "/api/runs/:id/chat/interrupt", async (_r, p) => json(await chatInterrupt(Number(p.id))));
+route("GET", "/api/runs/:id/chat/screen", async (_r, p, url) => json(await chatScreen(Number(p.id), int(url.searchParams.get("lines"), "lines", 20))));
+route("GET", "/api/runs/:id/chat/commands", (_r, p) => json(chatCommands(Number(p.id))));
+route("POST", "/api/runs/:id/uploads", async (req, p, url) => json(await chatUpload(Number(p.id), req, url.searchParams.get("name") ?? ""), 201));
+
+// ---- approvals (see src/chat/approvals.ts): Claude's PermissionRequest hook is held open until the browser answers
+// POST …/chat/requests/:rid {decision: "allow"|"deny", suggestion?, answers?, mode?, message?}; 409 once it's gone.
+route("GET", "/api/runs/:id/chat/requests", (_r, p) => json({ requests: requestsFor(getRun(Number(p.id)).id) }));
+route("POST", "/api/runs/:id/chat/requests/:rid", async (req, p) => {
+  const b = await body(req);
+  const answers = b.answers;
+  if (answers !== undefined && (typeof answers !== "object" || answers === null || Array.isArray(answers) || Object.values(answers).some((v) => typeof v !== "string")))
+    throw new ApiError(400, "answers must be an object of question → answer strings");
+  const suggestion = int(b.suggestion, "suggestion", -1);
+  return json(answerRequest(Number(p.id), p.rid, {
+    decision: str(b.decision, "decision", { required: true }) as "allow" | "deny",
+    suggestion: suggestion < 0 ? undefined : suggestion, answers, mode: str(b.mode, "mode"), message: str(b.message, "message"),
+  }));
+});
+// Claude calls this (the run's env has the token and run id). It answers when someone decides, or with {} to leave it to the TUI.
+route("POST", "/api/hooks/permission", async (req) => json(await permissionHook(req, await body(req))));
+
+// ---- live polish (see src/chat/live.ts): streaming text, usage, and per-turn git checkpoints
+// Hooks: MessageDisplay → /api/hooks/message (answered at once), UserPromptSubmit and Stop → /api/hooks/turn, and the
+// statusline script → /api/hooks/statusline. All reply {}.
+route("POST", "/api/hooks/message", async (req) => { messageHook(req, await body(req)); return json({}); });
+route("POST", "/api/hooks/turn", async (req) => { await turnHook(req, await body(req)); return json({}); });
+route("POST", "/api/hooks/statusline", async (req) => { statuslineHook(req, await body(req)); return json({}); });
+// GET …/chat/changes?prompt=: what a turn changed in git, per file. GET …/chat/changes/file?prompt=&path=: one file's diff.
+route("GET", "/api/runs/:id/chat/changes", async (_r, p, url) => {
+  const c = await turnChanges(getRun(Number(p.id)).id, str(url.searchParams.get("prompt") ?? undefined, "prompt", { required: true }));
+  if (!c) throw new ApiError(404, "no checkpoints for that turn (the run isn't in a git repo, or it started before checkpoints)");
+  return json(c);
+});
+route("GET", "/api/runs/:id/chat/changes/file", async (_r, p, url) => {
+  const d = await turnFileDiff(getRun(Number(p.id)).id, str(url.searchParams.get("prompt") ?? undefined, "prompt", { required: true }), str(url.searchParams.get("path") ?? undefined, "path", { required: true }));
+  if (!d) throw new ApiError(404, "no diff for that file in that turn");
+  return json(d);
+});
+
 route("DELETE", "/api/runs/:id", async (_r, p) => {
   const run = getRun(Number(p.id));
   if (run.status === "running") throw new ApiError(409, "kill the run before deleting it");
+  await dropCheckpoints(run.id); // before the rows cascade away: it reads them to delete the refs
   db.prepare("DELETE FROM runs WHERE id = ?").run(run.id);
+  deleteUploads(run.id);
   if (run.log_path) { try { await Bun.file(run.log_path).delete(); } catch { /* already gone */ } }
   return json({ ok: true });
 });
@@ -671,32 +743,48 @@ function clientIp(req: Request): string {
   return peer;
 }
 
-const server = Bun.serve<TtyData>({
+type WsData = TtyData | ChatData;
+const isChat = (ws: ServerWebSocket<WsData>): ws is ServerWebSocket<ChatData> => (ws.data as ChatData).kind === "chat";
+
+const server = Bun.serve<WsData>({
   hostname: config.host,
   port: config.port,
   async fetch(req, srv) {
     peers.set(req, srv.requestIP(req)?.address ?? "");
-    const tty = new URL(req.url).pathname.match(/^\/api\/runs\/(\d+)\/tty$/);
-    if (tty && req.headers.get("upgrade")?.toLowerCase() === "websocket") {
-      const r = upgradeTty(req, srv, Number(tty[1]));
+    const path = new URL(req.url).pathname;
+    // A held approval stays open with nothing sent until someone answers: no idle timeout for it.
+    if (path === "/api/hooks/permission") srv.timeout(req, 0);
+    const ws = req.headers.get("upgrade")?.toLowerCase() === "websocket";
+    const tty = ws && path.match(/^\/api\/runs\/(\d+)\/tty$/);
+    const chat = ws && path.match(/^\/api\/(runs|sessions)\/([^/]+)\/chat$/);
+    if (tty || chat) {
+      const r = upgradeSocket(req, srv, (url, who) => tty ? ttyFor(Number(tty[1]), url, who) : chatFor(chat![1] === "runs" ? "run" : "session", decodeURIComponent(chat![2]), who));
       return r ? harden(r) : undefined;
     }
     return harden(await handle(req));
   },
-  websocket: ttySocket,
+  websocket: {
+    open: (ws) => (isChat(ws) ? chatSocket.open(ws) : ttySocket.open(ws as ServerWebSocket<TtyData>)),
+    message: (ws, msg) => (isChat(ws) ? chatSocket.message() : ttySocket.message(ws as ServerWebSocket<TtyData>, msg)),
+    close: (ws) => (isChat(ws) ? chatSocket.close(ws) : ttySocket.close(ws as ServerWebSocket<TtyData>)),
+  },
 });
 
-/** GET /api/runs/:id/tty (WebSocket): a live terminal on an interactive run (see src/tty.ts). Returns a Response only on failure. */
-function upgradeTty(req: Request, srv: Bun.Server<TtyData>, runId: number): Response | undefined {
+/**
+ * The WebSockets: GET /api/runs/:id/tty, a live terminal on an interactive run (see src/tty.ts), and
+ * GET /api/runs/:id/chat or /api/sessions/:sid/chat, the chat view's live feed (see src/chat). Returns a Response
+ * only on failure.
+ */
+function upgradeSocket(req: Request, srv: Bun.Server<WsData>, make: (url: URL, who: string) => WsData): Response | undefined {
   const url = new URL(req.url);
   const who = identify(req, url);
   if (!who) return json({ error: "unauthorized" }, 401);
   // Browsers send Origin on every WebSocket and don't apply CORS to it: refuse other sites' pages outright.
   const origin = req.headers.get("origin");
-  if (origin) { try { if (new URL(origin).host !== req.headers.get("host")) return json({ error: "cross-origin terminal refused" }, 403); } catch { return json({ error: "bad origin" }, 403); } }
+  if (origin) { try { if (new URL(origin).host !== req.headers.get("host")) return json({ error: "cross-origin socket refused" }, 403); } catch { return json({ error: "bad origin" }, 403); } }
   touch(who);
-  let data: TtyData;
-  try { data = ttyFor(runId, url, who); } catch (e: any) { return json({ error: e.message }, e instanceof ApiError ? e.status : 500); }
+  let data: WsData;
+  try { data = make(url, who); } catch (e: any) { return json({ error: e.message }, e instanceof ApiError ? e.status : 500); }
   return srv.upgrade(req, { data }) ? undefined : json({ error: "websocket upgrade failed" }, 400);
 }
 
@@ -722,7 +810,7 @@ async function dispatch(req: Request, url: URL): Promise<Response> {
     }
     return json({ error: `no route for ${req.method} ${url.pathname}` }, 404);
   } catch (e: any) {
-    if (e instanceof ApiError) return json({ error: e.message }, e.status);
+    if (e instanceof ApiError) return json({ error: e.message, ...e.extra }, e.status);
     console.error(`[api] ${req.method} ${url.pathname}`, e);
     return json({ error: e?.message ?? "internal error" }, 500);
   }
