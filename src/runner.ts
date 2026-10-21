@@ -166,7 +166,7 @@ function templateFor(type: ProcessTypeRow, interactive: boolean, resume: boolean
   return ia.length ? ia : JSON.parse(type.args || "[]");
 }
 
-export function buildCommand(type: ProcessTypeRow, opts: { cwd: string; prompt?: string; extraArgs?: string[]; interactive?: boolean; resumeSession?: string; permissionMode?: string }) {
+export function buildCommand(type: ProcessTypeRow, opts: { cwd: string; prompt?: string; extraArgs?: string[]; interactive?: boolean; resumeSession?: string; permissionMode?: string; target?: string }) {
   const templateArgs = templateFor(type, Boolean(opts.interactive), Boolean(opts.resumeSession));
   const prompt = opts.prompt ?? "";
   const needsPrompt = templateArgs.some((a) => a.includes("{prompt}")) || type.command.includes("{prompt}");
@@ -188,9 +188,9 @@ export function buildCommand(type: ProcessTypeRow, opts: { cwd: string; prompt?:
   if (config.codexSandboxMode && basename(command) === "codex" && !picksSandbox) templ.push("--sandbox", config.codexSandboxMode);
   // Interactive claude runs get lofiwave's hooks and statusline (src/chat/settings.ts): approvals, streaming text, usage
   // and per-turn checkpoints in the chat view. They merge with the user's and the project's hooks. A run that brings
-  // its own --settings is left alone.
+  // its own --settings is left alone, and so is a run on a target: the file is on this machine, not in the sandbox.
   const picksSettings = [...templ, ...extra].some((a) => a === "--settings" || a.startsWith("--settings="));
-  if ((opts.interactive || opts.resumeSession) && basename(command) === "claude" && !picksSettings) templ.push("--settings", chatSettingsPath());
+  if ((opts.interactive || opts.resumeSession) && basename(command) === "claude" && !picksSettings && !opts.target) templ.push("--settings", chatSettingsPath());
   return { command, args: [...templ, ...extra], template_len: templ.length };
 }
 
