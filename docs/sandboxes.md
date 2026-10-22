@@ -1,29 +1,26 @@
-# Sandboxed runs: Cloud Run vs E2B
+# Sandboxed runs on E2B
 
-lofiwave can run an agent somewhere other than this machine through a *run target* (`src/targets.ts`). Two kinds
-exist: `cloud-run`, which runs a Google Cloud Run Job, and `e2b`, which gives each run its own E2B sandbox (`src/e2b.ts`).
-Both bring the claude transcript back so **Transcript** and **Resume here** work locally. Here is how to choose.
+lofiwave can run an agent somewhere other than this machine through a *run target* (`src/targets.ts`). The one kind
+is `e2b`: each run gets its own E2B sandbox (`src/e2b.ts`), a Firecracker microVM with a live terminal you open
+and type into from *Sessions*, files in (`input_dir`) and out (`out/`), and the claude transcript back at the end so
+**Transcript** and **Resume here** work locally.
 
-| | Cloud Run (`cloud-run`) | E2B (`e2b`) |
-|---|---|---|
-| Isolation | A gen2 container (gVisor sandbox) per execution, in your GCP project, with its own service account | A Firecracker microVM per run, on E2B's infrastructure |
-| Live terminal (TUI) | No. Headless only: output is copied from Cloud Logging every few seconds | **Yes.** The agent runs in a PTY. The browser terminal, `/screen` and `/keys` all work, and several viewers can share it as with tmux |
-| Steering a run | Not possible. Nobody can answer permission prompts, so set a permission mode | Type into it, answer prompts, interrupt it, send it more work |
-| Files in | Only through a `repo` cloned at start | `repo` clone, plus `input_dir` uploaded to `<workdir>/in/` |
-| Files out | Lost unless the agent pushes them; only the transcript comes back (through the logs) | The transcript and `<workdir>/out/` are copied to `DATA_DIR/runs/<id>/out/`. With `on_exit: "pause"` the whole sandbox is kept to inspect later |
-| Idle | Not applicable (the run ends when the agent exits) | `idle_sec` pauses the sandbox (memory and disk kept; opening the terminal resumes it) or ends the run |
-| Console restart | Follows the execution again | Reconnects to the sandbox and to the agent's PTY by tag (resuming the sandbox if it paused) |
-| Credentials | Secret Manager secrets, read by the job's service account. Nothing leaves this machine | `ANTHROPIC_API_KEY` / `CLAUDE_CODE_OAUTH_TOKEN` (or what `env_from` names) are sent from this machine's env into the sandbox at creation. lofiwave's own token never goes in |
-| Setup | `gcloud` logged in on this machine, an image with the agent (`docker/claude/Dockerfile`), and a region | `E2B_API_KEY` in lofiwave's environment. The stock `claude` template works as is |
-| Image / size | Any image. CPU and memory set per target | An E2B template (build your own from `claude` for extra tools). CPU and memory come from the template (default 2 vCPU / 4 GiB) |
-| Limits | Task timeout up to 24h. Startup is tens of seconds (job update + execution) | Sandbox lifetime 1h on Hobby, 24h on Pro (renewed while active, capped by plan). 20 concurrent sandboxes on Hobby, 100 on Pro. Startup takes a few seconds |
-| Cost | Cloud Run Jobs vCPU/GiB-seconds while the task runs, plus Logging | About $0.05 per vCPU-hour and $0.016 per GiB-hour, so the default size is about $0.17/h while running. Hobby: $100 one-time credit. Pro: $150/month plus usage. E2B's pricing page doesn't say how paused sandboxes are billed |
-| Where it runs | Your GCP project and region | E2B's cloud, so data leaves your cloud account |
+## Why not Cloud Run
 
-**Pick E2B** when a person should be able to watch and steer each worker (a swarm with a human in the loop),
-when results are files rather than pushed commits, or when you want per-run VMs without managing images.
-**Pick Cloud Run** for unattended scheduled jobs that must stay inside your own GCP project and IAM, or that run
-longer than E2B's plan limit.
+A `cloud-run` kind (a Google Cloud Run Job per run, driven with `gcloud`) was built in PR #12 and dropped before it
+landed. It could only run headless: no terminal, nobody to answer a prompt, no files back unless the agent pushed
+them. That is the opposite of what lofiwave is for, and keeping both kinds meant every feature needed a "what about
+Cloud Run" answer. What it offered that E2B doesn't (code and data never leaving your own GCP project and IAM, and
+24h jobs on any plan) is parked in `ideas-fridge.md`.
+
+## Limits and cost
+
+- Sandbox lifetime: 1h on E2B's Hobby plan, 24h on Pro, renewed every minute while the run is active.
+  20 concurrent sandboxes on Hobby, 100 on Pro. Startup takes a few seconds (plus installing tmux on the stock template).
+- About $0.05 per vCPU-hour and $0.016 per GiB-hour, so the stock template's size (2 vCPU / 4 GiB) is about
+  $0.17/h while running. Hobby: $100 one-time credit. Pro: $150/month plus usage.
+- It runs in E2B's cloud, so code and data leave your machine. Claude's credentials go in from this machine's env;
+  `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`) makes it use a Claude subscription instead of API billing.
 
 ## How the E2B target works
 
@@ -33,6 +30,10 @@ longer than E2B's plan limit.
   big-endian length + JSON) for output. Client streaming would need HTTP/2, so input goes through unary
   `SendInput` calls, batched and in order. `src/connect.ts` implements the framing. Files go through envd's
   `/files` endpoint.
+- **tmux in the sandbox.** An interactive agent runs in a tmux session there (installed with apt when the template
+  lacks it), and the PTY lofiwave follows is a tmux client. After the sandbox is paused and resumed, envd's stream
+  of a process started before the pause sends nothing more (input still reaches it), so following the agent's own
+  PTY would leave its terminal blank; a fresh client after a resume, a console restart or a dropped stream avoids that.
 - **Terminal bridge.** `E2BTerm` holds the PTY's output stream. It fans output out to every browser terminal,
   keeps the last 512 KB for a new viewer, and feeds a small headless terminal (`src/vtscreen.ts`) that tracks the
   screen as text for `/screen`, `/history` (plain text, no colours) and the run log. When a viewer opens the
@@ -43,7 +44,6 @@ longer than E2B's plan limit.
 
 ## Not done yet
 
-- No settings form for e2b targets (use `POST/PUT /api/targets`).
 - **Resume here** continues the conversation locally, not in a new sandbox.
 - `/history` on an E2B run is plain text, without colours.
 - The 512 KB replay plus the forced repaint is a good-enough picture for a new viewer. It isn't the exact

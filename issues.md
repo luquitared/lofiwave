@@ -5,6 +5,24 @@ Open work, newest first within each status. One heading per issue; close it by m
 
 ## Open
 
+### #7 E2B sessions: what's left after running them in the sandbox's tmux
+*Opened 2026-10-21 · seen running real claude sessions on an e2b target, with all open PRs merged*
+
+Interactive sessions on an `e2b` target now work end to end, and still work after a pause and resume or a
+console restart: claude runs in tmux in the sandbox and lofiwave follows a tmux client. Before that, envd's
+stream of the agent's PTY stayed silent after a resume, so the terminal went blank while input still reached it.
+
+- [ ] The chat view shows a running sandbox session as off: it reads the transcript from this machine, and that
+      only comes back when the run ends. It could fetch it from the sandbox (`/files`) while the run is going.
+- [ ] `activity` says `working` while claude sits idle: activity for sandbox runs comes from the screen, not the
+      hook registry (no hooks in the sandbox). Parse the screen like codex's, or forward claude's hooks.
+- [ ] With `--remote-control`, no claude.ai link is picked up for the run (`remote_url` stays empty):
+      link capture watches tmux panes on this machine only. Read it from the sandbox screen instead.
+- [ ] tmux is installed with apt at the start of each run (stock `claude` template), which adds seconds. A
+      lofiwave template with tmux in it would skip that.
+- [ ] The *New session* dialog can pick a target (*Runs on*) but not set the run's env or `input_dir`; the API can.
+- [ ] No volumes: data goes in through `repo` and `input_dir` and out through `out/`.
+
 ### #3 Chat view, toggleable with the terminal
 *Opened 2026-10-09 · designed in [`docs/rendered-view.md`](docs/rendered-view.md), nothing built*
 

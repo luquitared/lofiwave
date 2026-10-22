@@ -3,7 +3,7 @@ import { readdirSync, existsSync } from "node:fs";
 import { hostname, homedir } from "node:os";
 import { config } from "./config";
 import { db, now, hydrate, type ProcessTypeRow, type WorkflowRow, type RunRow, type SessionRow, type ApiKeyRow, type TargetRow } from "./db";
-import { getTarget, parseTargetConfig, checkTarget, gcloudPath, TargetError, TARGET_KINDS } from "./targets";
+import { getTarget, parseTargetConfig, checkTarget, TargetError, TARGET_KINDS } from "./targets";
 import { listOsProcesses, cwdOf, killTree, type OsProcess } from "./procs";
 import { ApiError, startRun, killRun, restartRun, getRun, getType, readLogFrom, isLive, buildCommand, screenOf, historyOf, sendKeys, tmuxPath, recordSession, resumeSession, resumeAgentSession, enableRemoteControl } from "./runner";
 import { describeSession, sessionForPid, locateSession, type SessionInfo } from "./agents";
@@ -390,7 +390,7 @@ route("POST", "/api/processes", async (req) => {
     timeoutSec: int(b.timeout_sec, "timeout_sec", 0),
     // Agents start interactive unless the caller asks for headless; apps stay headless unless asked.
     // On an e2b target an agent gets a live terminal in its sandbox, so it starts interactive there too.
-    interactive: bool(b.interactive, getType(typeName).kind === "agent" && (b.target ? targetOf(str(b.target, "target").trim()).kind === "e2b" : Boolean(tmuxPath()))),
+    interactive: bool(b.interactive, getType(typeName).kind === "agent" && (b.target ? Boolean(targetOf(str(b.target, "target").trim())) : Boolean(tmuxPath()))),
     stopWhenIdle: bool(b.stop_when_idle, false),
     terminal: str(b.terminal, "terminal"),
     trigger: "manual",
@@ -534,7 +534,7 @@ function targetOut(t: TargetRow) {
   return { ...hydrate(t), workflows: used };
 }
 route("GET", "/api/targets", () => json({
-  kinds: TARGET_KINDS, gcloud: gcloudPath(), e2b_key: Boolean(process.env.E2B_API_KEY?.trim()),
+  kinds: TARGET_KINDS, e2b_key: Boolean(process.env.E2B_API_KEY?.trim()),
   targets: db.query<TargetRow, []>("SELECT * FROM targets ORDER BY name").all().map(targetOut),
 }));
 route("GET", "/api/targets/:name", (_r, p) => json(targetOut(targetOf(p.name))));
@@ -542,7 +542,7 @@ route("POST", "/api/targets", async (req) => {
   const b = await body(req);
   const name = str(b.name, "name", { required: true }).trim();
   if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,40}$/.test(name)) throw new ApiError(400, "name: letters, digits, . _ - (up to 41)");
-  const kind = str(b.kind, "kind") || "cloud-run";
+  const kind = str(b.kind, "kind") || "e2b";
   const cfg = asApi(() => parseTargetConfig(kind, b.config ?? {}));
   const t = now();
   try {
