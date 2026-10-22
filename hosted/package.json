@@ -1,0 +1,20 @@
+{
+  "name": "lofiwave-hosted",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Hosted lofiwave: Google sign-in, one E2B sandbox per user running lofiwave, and a proxy in front of it.",
+  "type": "module",
+  "scripts": {
+    "start": "scripts/start.sh",
+    "dev": "bun --watch run src/server.ts",
+    "build-template": "bun run template/build.ts",
+    "test": "bun test test/"
+  },
+  "dependencies": {
+    "e2b": "2.58.0"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "license": "MIT"
+}

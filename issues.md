@@ -5,6 +5,28 @@ Open work, newest first within each status. One heading per issue; close it by m
 
 ## Open
 
+### #8 Hosted lofiwave: what's left after the first control plane
+*Opened 2026-10-22 · `hosted/`, see `hosted/README.md`*
+
+People sign in with Google and get their own E2B sandbox running lofiwave, behind a proxy that holds the
+sandbox's traffic token and lofiwave's token. Sign-in, machine creation, the proxied UI and terminal, and waking a
+paused machine all work (`hosted/test/e2e.ts`, and by hand in Chrome). Left:
+
+- [ ] Google sign-in against a real OAuth client (only the dev sign-in has run).
+- [ ] Cron workflows: lofiwave's scheduler only runs while the machine is awake. The control plane should read
+      each machine's schedules and wake it in time (or keep machines with schedules awake).
+- [ ] Pausing while an agent is mid-turn: the keeper extends machines whose agents are `working`, but a turn that
+      starts between two keeper ticks just before the timeout can still be paused, and its API connection drops.
+- [ ] Remote Control from the Claude app can't wake a paused machine: it doesn't come through the proxy.
+- [ ] API keys made on a machine's *Connect* page don't work from outside: every request needs the browser
+      cookie. Needs per-machine hostnames (or a key prefix the proxy can route on).
+- [ ] lofiwave updates: machines keep the lofiwave they were created with. Pull + restart on wake, or a button.
+- [ ] Billing and abuse: nothing but `MAX_USERS` and `ALLOW_EMAILS`. Card on file / metered machine-hours /
+      per-user caps before opening sign-ups.
+- [ ] One machine per user; no way to delete your machine from the UI.
+- [ ] The keeper reads only the first page of E2B's sandbox list.
+- [ ] Ask E2B: paused-storage pricing, and whether paused sandboxes count toward the concurrency limit.
+
 ### #3 Chat view, toggleable with the terminal
 *Opened 2026-10-09 · designed in [`docs/rendered-view.md`](docs/rendered-view.md), nothing built*
 
