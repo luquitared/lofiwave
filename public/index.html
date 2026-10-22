@@ -110,9 +110,9 @@
   <section id="tab-settings" class="tab">
     <div class="card">
       <div class="card-head"><h2>Run targets</h2><button class="primary small" id="target-new-btn">+ New target</button></div>
-      <p class="muted">Where a workflow can run besides this machine. A Cloud Run target runs the agent headless as a Cloud Run Job, using this machine's <code>gcloud</code> login; its output lands in the run's log. An E2B target gives each run its own sandbox VM, with a live terminal you can open from Sessions (create one with <code>POST /api/targets</code>, kind <code>e2b</code>; see the API docs).</p>
+      <p class="muted">Where sessions and workflows can run besides this machine. An E2B target gives each run its own sandbox VM, with a live terminal you can open from Sessions. Needs <code>E2B_API_KEY</code> in lofiwave's environment.</p>
       <table id="target-table">
-        <thead><tr><th>Name</th><th>Where</th><th>Image</th><th>Used by</th><th></th></tr></thead>
+        <thead><tr><th>Name</th><th>When idle</th><th>Template</th><th>Used by</th><th></th></tr></thead>
         <tbody></tbody>
       </table>
     </div>
@@ -229,21 +229,21 @@
 </dialog>
 <dialog id="target-dialog" aria-labelledby="target-title">
   <form id="target-form" class="grid" method="dialog">
-    <h3 class="wide" id="target-title">New Cloud Run target</h3>
+    <h3 class="wide" id="target-title">New E2B target</h3>
     <input type="hidden" name="orig">
-    <label>Name <input name="name" required autocomplete="off" pattern="[A-Za-z0-9][A-Za-z0-9_.\-]{0,40}" placeholder="cloud"></label>
-    <label>Region <input name="region" required autocomplete="off" placeholder="us-central1"></label>
-    <label class="wide">Image <input name="image" required autocomplete="off" placeholder="us-docker.pkg.dev/my-project/agents/claude:latest"><small class="muted">A container image with the agent installed (e.g. <code>claude</code> on PATH).</small></label>
-    <label>Project <input name="project" autocomplete="off" placeholder="blank = gcloud's default"></label>
-    <label>Service account <input name="service_account" autocomplete="off" placeholder="blank = default compute"></label>
-    <label class="wide">Git repo <input name="repo" autocomplete="off" placeholder="https://github.com/you/repo.git (optional)"><small class="muted">Cloned before each run; the agent works inside it. Needs git in the image.</small></label>
-    <label class="wide">Secrets (ENV=secret-name[:version] per line) <textarea name="secrets" rows="2" placeholder="ANTHROPIC_API_KEY=anthropic-api-key"></textarea><small class="muted">From Secret Manager. The job's service account needs access to them.</small></label>
+    <label>Name <input name="name" required autocomplete="off" pattern="[A-Za-z0-9][A-Za-z0-9_.\-]{0,40}" placeholder="sandbox"></label>
+    <label>Template <input name="template" autocomplete="off" placeholder="claude"><small class="muted">An E2B template with the agent installed; <code>claude</code> is E2B's stock one.</small></label>
+    <label class="wide">Git repo <input name="repo" autocomplete="off" placeholder="https://github.com/you/repo.git (optional)"><small class="muted">Cloned into the sandbox before each run; the agent works inside it.</small></label>
+    <label>Permission mode <select name="permission_mode"><option value="">lofiwave's default</option><option value="acceptEdits">acceptEdits</option><option value="bypassPermissions">bypassPermissions</option><option value="plan">plan</option><option value="default">default (asks)</option></select></label>
+    <label>When idle for (s) <input name="idle_sec" type="number" min="0" step="60" placeholder="0 = never"></label>
+    <label>…then <select name="idle_action"><option value="pause">pause the sandbox (resumes when opened)</option><option value="stop">end the run</option></select></label>
     <details class="wide more"><summary class="muted">More options</summary>
       <div class="grid">
-        <label>CPU <input name="cpu" placeholder="2"></label>
-        <label>Memory <input name="memory" placeholder="4Gi"></label>
-        <label class="wide">Working dir in the container <input name="workdir" autocomplete="off" placeholder="blank = the image's (or /workspace with a repo)"></label>
+        <label>Working dir in the sandbox <input name="workdir" autocomplete="off" placeholder="/home/user/work"></label>
+        <label>Sandbox lifetime (s) <input name="timeout_sec" type="number" min="300" max="86400" placeholder="3600"><small class="muted">Renewed while the run is active; E2B caps it by plan.</small></label>
+        <label>When the agent exits <select name="on_exit"><option value="kill">kill the sandbox</option><option value="pause">keep it paused</option></select></label>
         <label class="wide">Env (KEY=VALUE per line) <textarea name="env" rows="2"></textarea></label>
+        <label class="wide">Forward from here (SANDBOX_VAR=LOCAL_VAR per line) <textarea name="env_from" rows="2" placeholder="ANTHROPIC_API_KEY=ANTHROPIC_API_KEY"></textarea><small class="muted">Blank = ANTHROPIC_API_KEY and CLAUDE_CODE_OAUTH_TOKEN. lofiwave's own token never goes in.</small></label>
       </div>
     </details>
     <div id="target-feedback" class="wide form-error" role="alert" hidden></div>

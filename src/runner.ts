@@ -14,7 +14,7 @@ import { openTerminalForTmux, macTabOf, typeIntoMacTab } from "./terminal";
 import { actor } from "./auth";
 import { ttyViewers } from "./tty";
 import { chatSettingsPath } from "./chat/settings";
-import { getTarget, targetConfig, startCloudRunJob, followCloudRun, cancelCloudRun, jobName, TargetError, TranscriptCatcher, e2bConfig, type CloudRunHandle, type E2BConfig } from "./targets";
+import { getTarget, TargetError, e2bConfig, type E2BConfig } from "./targets";
 import { runE2B, sandboxEnv, e2bTerms, type E2BHandle } from "./e2b";
 import { keyBytes } from "./vtscreen";
 import { admissionBlocker } from "./capacity";
@@ -197,14 +197,12 @@ export function buildCommand(type: ProcessTypeRow, opts: { cwd: string; prompt?:
 export async function startRun(opts: StartOptions): Promise<RunRow> {
   const type = getType(opts.typeName);
   const target = opts.target ? targetOf(opts.target) : null;
-  const e2b = target?.kind === "e2b" ? asApiErr(() => e2bConfig(target)) : null;
+  const e2b = target ? asApiErr(() => e2bConfig(target)) : null;
   if (target && opts.resumeSession) throw new ApiError(400, `runs on target "${target.name}" can't resume a session`);
-  if (target && opts.interactive && !e2b) throw new ApiError(400, `runs on target "${target.name}" are headless: they can't be interactive`);
   if (opts.inputDir && !e2b) throw new ApiError(400, "input_dir is for runs on an e2b target");
   if (opts.inputDir && (!existsSync(opts.inputDir) || !statSync(opts.inputDir).isDirectory())) throw new ApiError(400, `input_dir does not exist: ${opts.inputDir}`);
-  // On a target, the process runs in the target's folder (a container's workdir, or the repo it clones).
-  const tc = target ? targetConfig(target) : null;
-  const cwd = e2b ? e2b.workdir : tc ? (tc.repo ? tc.workdir || "/workspace" : tc.workdir || "/") : opts.cwd?.trim();
+  // On a target, the process runs in the target's folder (the sandbox's workdir, where its repo is cloned).
+  const cwd = e2b ? e2b.workdir : opts.cwd?.trim();
   if (!cwd) throw new ApiError(400, "cwd is required");
   if (!target && (!existsSync(cwd) || !statSync(cwd).isDirectory())) throw new ApiError(400, `cwd does not exist: ${cwd}`);
   const interactive = Boolean(opts.interactive) || Boolean(opts.resumeSession);
@@ -216,11 +214,11 @@ export async function startRun(opts: StartOptions): Promise<RunRow> {
     if (drop) { args = [...args.slice(0, template_len).filter((a) => a !== "--remote-control"), ...args.slice(template_len)]; template_len -= drop; }
   }
   // A claude run on a target gets a session id picked here, so its transcript can come back as a session of this run
-  // (the container prints it into the logs at the end; see TRANSCRIPT_MARK). It goes in with the template, so a restart
-  // picks a new one rather than carrying this one as an extra arg.
+  // (copied out of the sandbox at the end). It goes in with the template, so a restart picks a new one rather than
+  // carrying this one as an extra arg.
   const picksSession = args.some((a) => ["--session-id", "--resume", "-r", "--continue", "-c"].includes(a) || a.startsWith("--session-id="));
-  const cloudSession = target && basename(command) === "claude" && !picksSession ? randomUUID() : "";
-  if (cloudSession) { args = [...args.slice(0, template_len), "--session-id", cloudSession, ...args.slice(template_len)]; template_len += 2; }
+  const targetSession = target && basename(command) === "claude" && !picksSession ? randomUUID() : "";
+  if (targetSession) { args = [...args.slice(0, template_len), "--session-id", targetSession, ...args.slice(template_len)]; template_len += 2; }
   // Too many agents (or too little memory) and one more could take the machine down: refuse; the caller may queue.
   const blocked = type.kind === "agent" && !target ? admissionBlocker() : null;
   if (blocked) throw new ApiError(429, `machine is full: ${blocked}. Try again later, or pass "queue": true to start it when there is room.`);
@@ -245,7 +243,7 @@ export async function startRun(opts: StartOptions): Promise<RunRow> {
     // The folder on this machine its transcript is filed under, so "Resume here" opens it there.
     const local = opts.cwd?.trim();
     if (local && existsSync(local) && statSync(local).isDirectory()) meta.local_cwd = local;
-    if (cloudSession) meta.claude_session = cloudSession;
+    if (targetSession) meta.claude_session = targetSession;
   }
   const isCodex = basename(command) === "codex" && !target;
   const isClaude = basename(command) === "claude";
@@ -319,7 +317,7 @@ export async function startRun(opts: StartOptions): Promise<RunRow> {
     let h: E2BHandle;
     try {
       h = runE2B({
-        runId: id, c: e2b, command, args, env, interactive, sessionId: cloudSession || undefined,
+        runId: id, c: e2b, command, args, env, interactive, sessionId: targetSession || undefined,
         inputDir: opts.inputDir, outDir: join(config.dataDir, "runs", String(id), "out"),
         forbiddenValues: [config.authToken], write,
         onMeta: (patch) => { meta.e2b = { ...meta.e2b, ...patch }; db.prepare("UPDATE runs SET meta = ? WHERE id = ?").run(JSON.stringify(meta), id); },
@@ -335,33 +333,6 @@ export async function startRun(opts: StartOptions): Promise<RunRow> {
       else if (r.message) entry.lostWhy = r.message;
       return r.code;
     });
-  } else if (target) {
-    // Nothing runs here: the job starts on the target (that takes a while, so in the background) and we follow it.
-    // Only the run's own env goes along: not this machine's environment, and never the console's token.
-    entry = { pid: 0, done };
-    const job = jobName(opts.workflow ? `wf-${opts.workflow.id}` : `${type.name}-adhoc`);
-    let handle: CloudRunHandle | null = null;
-    const write = (s: string) => { sink.write(s.endsWith("\n") ? s : s + "\n"); sink.flush(); };
-    let cancelled = false;
-    entry.cancel = async () => { cancelled = true; if (handle) await cancelCloudRun(target, handle); };
-    exited = (async () => {
-      try {
-        handle = await startCloudRunJob(target, { job, command, args, env, timeoutSec, runId: id, sessionId: cloudSession || undefined }, write);
-        meta.cloud_run = handle;
-        db.prepare("UPDATE runs SET meta = ? WHERE id = ?").run(JSON.stringify(meta), id);
-        if (cancelled) await cancelCloudRun(target, handle).catch(() => {});
-        const catcher = cloudSession ? new TranscriptCatcher(cloudSession) : undefined;
-        const r = await followCloudRun(target, handle, write, { catcher });
-        if (r.message) write(`# cloud run: ${r.message}`);
-        if (catcher) saveCloudTranscript(id, meta, catcher, write);
-        return r.code;
-      } catch (e: any) {
-        if (cancelled && !handle) return null;
-        entry.error = e?.message ?? String(e);
-        write(`# cloud run: ${entry.error}`);
-        return null;
-      }
-    })();
   } else if (interactive) {
     // A detached tmux session owns the pty; we track the pane's process and poll its exit status.
     const sess = meta.tmux as string;
@@ -550,7 +521,7 @@ async function finishRun(r: {
   activities.delete(id);
   messagedAt.delete(id);
   db.prepare("UPDATE runs SET status = ?, ended_at = ?, exit_code = ?, output = ?, error = ? WHERE id = ?")
-    .run(status, now(), code, readTail(logPath, config.outputTailBytes), entry.error ?? (code === null && !entry.killedBy ? (entry.lostWhy ? entry.lostWhy : r.onTarget ? "the execution ended without a result (cancelled outside lofiwave?)" : "tmux session disappeared") : ""), id);
+    .run(status, now(), code, readTail(logPath, config.outputTailBytes), entry.error ?? (code === null && !entry.killedBy ? (entry.lostWhy ? entry.lostWhy : r.onTarget ? "the sandbox run ended without a result" : "tmux session disappeared") : ""), id);
   markDone();
 }
 
@@ -1063,8 +1034,7 @@ export function reconcileRuns() {
     // Still starting: opening its terminal window (osascript) can take seconds, longer if the app is slow to answer.
     if (live.has(r.id) || starting.has(r.id)) continue;
     const meta = JSON.parse(r.meta || "{}");
-    if (meta.target && meta.target_kind === "e2b") { reattachE2B(r); continue; }
-    if (meta.target) { reattachRemote(r); continue; }
+    if (meta.target) { reattachE2B(r); continue; }
     // An interactive run whose tmux session outlived the old server: follow it again. If its program exited meanwhile,
     // the pane (remain-on-exit) still holds the exit status.
     if (meta.tmux && r.pid) {
@@ -1091,19 +1061,10 @@ function settleUnfollowed(r: RunRow, meta: Record<string, any>, ownSession: bool
 }
 
 /**
- * File the transcript a cloud run handed back where claude looks for it on this machine (under the run's local folder,
- * else the home folder), and record it as the run's session: the run then has Transcript and "Resume here" like a local one.
+ * File a transcript that came back from a target where claude looks for it on this machine (under the run's local
+ * folder, else the home folder), and record it as the run's session: the run then has Transcript and "Resume here"
+ * like a local one.
  */
-function saveCloudTranscript(runId: number, meta: Record<string, any>, catcher: TranscriptCatcher, write: (s: string) => void) {
-  if (!catcher.started) { write("# lofiwave: no transcript came back from the container (it was stopped before claude wrote one, or the image lacks sh/base64/fold/awk)"); return; }
-  try {
-    saveTranscript(runId, meta, catcher.sessionId, catcher.result(), "cloud-run", write);
-  } catch (e: any) {
-    write(`# lofiwave: couldn't bring the transcript back: ${e?.message ?? e}`);
-  }
-}
-
-/** File a transcript that came back from a target, and record it as the run's session. */
 function saveTranscript(runId: number, meta: Record<string, any>, sessionId: string, data: Buffer, source: string, write: (s: string) => void) {
   try {
     const cwd = meta.local_cwd || process.env.HOME || "/";
@@ -1161,41 +1122,6 @@ function reattachE2B(r: RunRow) {
 /** A target's ApiError: the same status and message. */
 function targetOf(name: string) {
   try { return getTarget(name); } catch (e) { if (e instanceof TargetError) throw new ApiError(e.status, e.message); throw e; }
-}
-
-/**
- * A run on a target that was still going when the console restarted: it kept running there, so follow it again.
- * One that never got as far as starting an execution is lost.
- */
-function reattachRemote(r: RunRow) {
-  const meta = JSON.parse(r.meta || "{}");
-  const handle: CloudRunHandle | undefined = meta.cloud_run;
-  let target: ReturnType<typeof getTarget> | null = null;
-  try { target = getTarget(meta.target); } catch { /* deleted since */ }
-  if (!handle || !target) {
-    db.prepare("UPDATE runs SET status = 'lost', ended_at = ?, error = ?, output = ? WHERE id = ?")
-      .run(now(), handle ? `target "${meta.target}" no longer exists` : "the console restarted before the job started", readTail(r.log_path, config.outputTailBytes), r.id);
-    return;
-  }
-  let markDone!: () => void;
-  const done = new Promise<void>((res) => (markDone = res));
-  const entry: LiveEntry = { pid: 0, done, cancel: () => cancelCloudRun(target!, handle) };
-  live.set(r.id, entry);
-  const write = (s: string) => { if (r.log_path) appendFileSync(r.log_path, s.endsWith("\n") ? s : s + "\n"); };
-  (async () => {
-    // Lines up to the log's last write are already in the file; a little overlap beats losing what Cloud Logging ingested late.
-    const lastWrite = r.log_path && existsSync(r.log_path) ? statSync(r.log_path).mtimeMs : r.started_at;
-    write(`# lofiwave: console restarted; following execution ${handle.execution} again`);
-    const catcher = meta.claude_session ? new TranscriptCatcher(meta.claude_session) : undefined;
-    const res = await followCloudRun(target!, handle, write, { resumeSince: new Date(lastWrite - 30_000).toISOString(), catcher }).catch((e) => ({ code: null, message: String(e?.message ?? e) }));
-    if (res.message) write(`# cloud run: ${res.message}`);
-    if (catcher) saveCloudTranscript(r.id, meta, catcher, write);
-    const status = entry.killedBy ? "killed" : res.code === 0 ? "success" : res.code === null ? "lost" : "failed";
-    write(`\n# lofiwave: exited with code ${res.code ?? "unknown"} (${status})`);
-    live.delete(r.id);
-    db.prepare("UPDATE runs SET status = ?, ended_at = ?, exit_code = ?, output = ? WHERE id = ?").run(status, now(), res.code, readTail(r.log_path, config.outputTailBytes), r.id);
-    markDone();
-  })();
 }
 
 export function isLive(id: number) { return live.has(id); }

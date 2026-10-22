@@ -107,7 +107,7 @@ CREATE INDEX IF NOT EXISTS checkpoints_run_idx ON checkpoints(run_id, prompt_id)
 CREATE TABLE IF NOT EXISTS targets (
   id         INTEGER PRIMARY KEY,
   name       TEXT NOT NULL UNIQUE,
-  kind       TEXT NOT NULL,                -- cloud-run
+  kind       TEXT NOT NULL,                -- e2b
   config     TEXT NOT NULL DEFAULT '{}',
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL

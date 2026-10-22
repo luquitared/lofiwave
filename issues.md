@@ -21,7 +21,7 @@ stream of the agent's PTY stayed silent after a resume, so the terminal went bla
 - [ ] tmux is installed with apt at the start of each run (stock `claude` template), which adds seconds. A
       lofiwave template with tmux in it would skip that.
 - [ ] The *New session* dialog can pick a target (*Runs on*) but not set the run's env or `input_dir`; the API can.
-- [ ] Neither target mounts volumes; data goes in through `repo` and `input_dir` and out through `out/`.
+- [ ] No volumes: data goes in through `repo` and `input_dir` and out through `out/`.
 
 ### #5 Runs as jobs: follow-ups
 *Opened 2026-10-17 · left over from groups, files, results and admission control (README → Swarms)*
