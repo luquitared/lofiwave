@@ -3,7 +3,7 @@ import { join, dirname, basename } from "node:path";
 import { readdirSync, existsSync, statSync } from "node:fs";
 import { hostname, homedir } from "node:os";
 import { config } from "./config";
-import { db, now, hydrate, type ProcessTypeRow, type WorkflowRow, type RunRow, type SessionRow, type ApiKeyRow, type TargetRow } from "./db";
+import { db, now, hydrate, type ProcessTypeRow, type WorkflowRow, type RunRow, type SessionRow, type ApiKeyRow, type TargetRow, type SwarmRow } from "./db";
 import { getTarget, parseTargetConfig, checkTarget, TargetError, TARGET_KINDS } from "./targets";
 import { listOsProcesses, cwdOf, killTree, type OsProcess } from "./procs";
 import { ApiError, startRun, killRun, restartRun, getRun, getType, readLogFrom, isLive, buildCommand, screenOf, historyOf, sendKeys, sendMessage, activityOf, waitForRun, tmuxPath, recordSession, resumeSession, resumeAgentSession, enableRemoteControl } from "./runner";
@@ -11,6 +11,7 @@ import { describeSession, sessionForPid, locateSession, transcriptMessages, code
 import { startScheduler, refreshNextRun, runWorkflow, computeNext } from "./scheduler";
 import { validateCron } from "./cron";
 import { renderDocs, apiIndex } from "./docs";
+import { checkName, prepareFolders, workerPrompt, readWorkerFiles, readReport, type WorkerSpec } from "./swarm";
 import { ttyFor, ttySocket, type TtyData } from "./tty";
 import { chatFor, chatSocket, chatEarlier, chatBlob, chatSubagent, chatCwd, type ChatData } from "./chat";
 import { chatFile, chatPaths } from "./chat/files";
@@ -406,22 +407,25 @@ function groupName(v: unknown): string | null {
   return g;
 }
 
-route("POST", "/api/processes", async (req) => {
-  const b = await body(req);
+/**
+ * Start (or queue) a run from a POST /api/processes body. `parentHeader`: the X-Lofiwave-Run header of the request.
+ * Swarm workers go through here too, with `extraMeta` (their worker name) on top.
+ */
+async function startFromBody(b: any, parentHeader: string | null = null, extraMeta: Record<string, any> = {}): Promise<RunRow> {
   const typeName = str(b.type, "type", { required: true });
   const cwd = str(b.cwd, "cwd") || getType(typeName).default_cwd;
   // The controller run that started this one: the body's parent_run, or the X-Lofiwave-Run header (its AGENT_CONSOLE_RUN_ID).
-  const parentRaw = b.parent_run ?? req.headers.get("x-lofiwave-run") ?? null;
+  const parentRaw = b.parent_run ?? parentHeader ?? null;
   const parent = parentRaw === null || parentRaw === "" ? null : getRunOr400(int(parentRaw, "parent_run", 0));
   // A worker joins its controller's group unless it names its own.
   const group = groupName(b.group) ?? (parent ? JSON.parse(parent.meta || "{}").group ?? null : null);
   if (b.files !== undefined && (typeof b.files !== "object" || b.files === null || Array.isArray(b.files))) throw new ApiError(400, "files must be an object of {path: content}");
   const files = Object.entries(b.files ?? {}).map(([path, v]) => ({ path, data: decodeContent(v, `files["${path}"]`) }));
   const mkdirCwd = bool(b.mkdir_cwd, false);
-  const meta: Record<string, any> = {};
+  const meta: Record<string, any> = { ...extraMeta };
   if (group) meta.group = group;
   if (parent) meta.parent_run = parent.id;
-  const run = await startJob({
+  return startJob({
     typeName,
     cwd,
     meta,
@@ -451,6 +455,10 @@ route("POST", "/api/processes", async (req) => {
       }
     },
   });
+}
+
+route("POST", "/api/processes", async (req) => {
+  const run = await startFromBody(await body(req), req.headers.get("x-lofiwave-run"));
   return json(runOut(run), run.status === "queued" ? 202 : 201);
 });
 
@@ -483,7 +491,12 @@ route("GET", "/api/console", async () => {
       return true;
     })
     .slice(0, 30);
-  return json({ live, headless, adoptable, ended });
+  // swarms: any with a worker still running, or started in the last day, for the rail's Swarms section.
+  const swarms = db.query<{ name: string }, [number]>(
+    `SELECT name FROM swarms WHERE created_at > ? OR name IN (SELECT json_extract(meta, '$.group') FROM runs WHERE status = 'running')
+     ORDER BY created_at DESC LIMIT 12`).all(now() - 86400_000)
+    .map(({ name }) => { const s = swarmStatus(name, ""); return { group: s.group, counts: s.counts, summary: s.summary, created_at: s.created_at }; });
+  return json({ live, headless, adoptable, ended, swarms });
 });
 
 route("POST", "/api/processes/preview", async (req) => {
@@ -866,6 +879,179 @@ route("GET", "/api/runs/:id/chat/changes/file", async (_r, p, url) => {
   const d = await turnFileDiff(getRun(Number(p.id)).id, str(url.searchParams.get("prompt") ?? undefined, "prompt", { required: true }), str(url.searchParams.get("path") ?? undefined, "path", { required: true }));
   if (!d) throw new ApiError(404, "no diff for that file in that turn");
   return json(d);
+});
+
+// ---- swarms (src/swarm.ts): a group of worker runs started together, each in its own folder
+function groupRuns(group: string): RunRow[] {
+  return db.query<RunRow, [string]>("SELECT * FROM runs WHERE json_extract(meta, '$.group') = ? ORDER BY started_at, id").all(group);
+}
+const workerName = (r: RunRow): string => JSON.parse(r.meta || "{}").swarm_worker || `run-${r.id}`;
+
+/** Everything a controller asks about a swarm, in one answer: per worker its run, activity, own status line, report. */
+function swarmStatus(group: string, base: string) {
+  const sw = db.query<SwarmRow, [string]>("SELECT * FROM swarms WHERE name = ?").get(group);
+  const runs = groupRuns(group);
+  if (!sw && !runs.length) throw new ApiError(404, `no swarm or group "${group}"`);
+  // A worker restarted or resumed has several runs: the newest counts; workers keep the order they were started in.
+  const latest = new Map<string, { run: RunRow; count: number }>();
+  for (const r of runs) latest.set(workerName(r), { run: r, count: (latest.get(workerName(r))?.count ?? 0) + 1 });
+  const g = encodeURIComponent(group);
+  const workers = [...latest].map(([name, { run: r, count }]) => {
+    const files = readWorkerFiles(r.cwd);
+    const sess = latestSessionOf(r.id);
+    return {
+      name, run_id: r.id, status: r.status, ...activityOf(r), dir: r.cwd, runs: count,
+      started_at: r.started_at, ended_at: r.ended_at, elapsed_ms: (r.ended_at ?? now()) - r.started_at,
+      ...files,
+      session: sess ? { session_id: sess.session_id, title: sess.title, model: sess.model, web_url: sess.web_url } : null,
+      links: {
+        terminal: `${base}/#sessions/${r.id}`,
+        run: `${base}/api/runs/${r.id}`,
+        screen: `${base}/api/runs/${r.id}/screen`,
+        report: files.report ? `${base}/api/swarms/${g}/workers/${encodeURIComponent(name)}/report` : null,
+        transcript: sess?.transcript_path ? `${base}/api/runs/${r.id}/sessions/${encodeURIComponent(sess.session_id)}/transcript` : null,
+      },
+    };
+  });
+  const n = (f: (w: (typeof workers)[number]) => boolean) => workers.filter(f).length;
+  const counts = {
+    workers: workers.length, running: n((w) => w.status === "running"),
+    working: n((w) => w.activity === "working"), idle: n((w) => w.activity === "idle"),
+    waiting_input: n((w) => w.activity === "waiting_input"), done: n((w) => w.activity === "done"),
+    reported: n((w) => w.report), blocked: n((w) => /^blocked\b/i.test(w.status_line)),
+  };
+  const parts = (["working", "idle", "waiting_input", "done"] as const).filter((k) => counts[k]).map((k) => `${counts[k]} ${k.replace("_", " ")}`);
+  const created_at = sw?.created_at ?? runs[0]?.started_at ?? now();
+  return {
+    group, dir: sw?.dir ?? null, brief: sw?.brief ?? "", type: sw?.type_name ?? runs[0]?.type_name ?? null, target: sw?.target || null,
+    parent_run: sw?.parent_run ?? null, created_by: sw?.created_by || null, created_at, elapsed_ms: now() - created_at,
+    summary: `${counts.workers} worker${counts.workers === 1 ? "" : "s"}: ${parts.join(", ") || "none"} · ${counts.reported}/${counts.workers} reports${counts.blocked ? ` · ${counts.blocked} blocked` : ""}`,
+    counts, workers, links: { ui: `${base}/#swarms/${g}`, status: `${base}/api/swarms/${g}` },
+  };
+}
+
+const picksPermissionMode = (args: string[]) =>
+  args.some((a) => a === "--dangerously-skip-permissions" || a === "--permission-mode" || a.startsWith("--permission-mode="));
+
+route("POST", "/api/swarms", async (req) => {
+  const b = await body(req);
+  const group = checkName(str(b.group, "group", { required: true }).trim(), "group");
+  let root = str(b.cwd_root, "cwd_root", { required: true }).trim();
+  if (root === "~" || root.startsWith("~/")) root = join(homedir(), root.slice(1));
+  if (!root.startsWith("/")) throw new ApiError(400, "cwd_root must be an absolute path");
+  const typeName = str(b.type, "type") || "claude";
+  const type = getType(typeName);
+  // Workers' folders are made here, so they run here: a run target would start them in a sandbox without them.
+  const target = str(b.target, "target").trim();
+  if (target && target !== "local") throw new ApiError(400, "swarms run on this machine for now: their folders are made here");
+  const brief = str(b.brief, "brief");
+  const parentRun = b.parent_run == null || b.parent_run === "" ? null : int(b.parent_run, "parent_run", 0) || null;
+  if (!Array.isArray(b.workers) || !b.workers.length) throw new ApiError(400, "workers must be a non-empty array of {name, prompt}");
+  if (b.workers.length > 50) throw new ApiError(400, "at most 50 workers per request");
+  const specs = b.workers.map((w: any, i: number) => {
+    if (!w || typeof w !== "object") throw new ApiError(400, `workers[${i}] must be an object`);
+    return {
+      name: checkName(str(w.name, `workers[${i}].name`, { required: true }).trim(), `workers[${i}].name`),
+      prompt: str(w.prompt, `workers[${i}].prompt`, { required: true }), files: strMap(w.files, `workers[${i}].files`),
+      extra_args: strArray(w.extra_args, `workers[${i}].extra_args`), env: strMap(w.env, `workers[${i}].env`),
+    };
+  }) as (WorkerSpec & { extra_args: string[]; env: Record<string, string> })[];
+  const names = specs.map((w) => w.name);
+  const dup = names.find((n, i) => names.indexOf(n) !== i);
+  if (dup) throw new ApiError(400, `worker name "${dup}" is used twice`);
+
+  const dir = join(root, group);
+  const existing = db.query<SwarmRow, [string]>("SELECT * FROM swarms WHERE name = ?").get(group);
+  if (existing && existing.dir !== dir) throw new ApiError(409, `swarm "${group}" already exists in ${existing.dir}`);
+  // Adding workers to an existing swarm is fine; starting a second copy of a running worker is not.
+  const running = new Set(groupRuns(group).filter((r) => r.status === "running").map(workerName));
+  const clash = names.find((n) => running.has(n));
+  if (clash) throw new ApiError(409, `worker "${clash}" of swarm "${group}" is still running; stop it first or pick another name`);
+
+  const swarmArgs = strArray(b.extra_args, "extra_args");
+  const swarmEnv = strMap(b.env, "env");
+  const isClaude = basename(type.command) === "claude";
+  const dirs = prepareFolders(dir, group, brief, specs);
+  const t = now();
+  if (existing) db.prepare("UPDATE swarms SET brief = CASE WHEN ? != '' THEN ? ELSE brief END, updated_at = ? WHERE id = ?").run(brief, brief, t, existing.id);
+  else db.prepare("INSERT INTO swarms (name, dir, brief, type_name, target, parent_run, created_by, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?)")
+    .run(group, dir, brief, typeName, target, parentRun, actor.getStore() ?? "", t, t);
+
+  const runs: any[] = [], errors: { name: string; error: string }[] = [];
+  for (const w of specs) {
+    const extra = [...swarmArgs, ...w.extra_args];
+    // Workers run unattended: claude needs a permission mode that lets it write its files, unless the request or the server chose one.
+    if (isClaude && !config.claudePermissionMode && !picksPermissionMode(extra)) extra.push("--permission-mode", "acceptEdits");
+    try {
+      const run = await startFromBody({
+        type: typeName, cwd: dirs[w.name], prompt: workerPrompt(group, w.name, dirs[w.name]), extra_args: extra,
+        env: { ...swarmEnv, ...w.env, LOFIWAVE_SWARM: group, LOFIWAVE_WORKER: w.name, LOFIWAVE_OUT_DIR: join(dirs[w.name], "out") },
+        timeout_sec: b.timeout_sec, stop_when_idle: b.stop_when_idle, terminal: str(b.terminal, "terminal") || "none",
+        group, parent_run: parentRun,
+      }, null, { swarm_worker: w.name });
+      runs.push({ name: w.name, ...runOut(run, { withOutput: false }) });
+    } catch (e: any) {
+      errors.push({ name: w.name, error: e?.message ?? String(e) });
+    }
+  }
+  const base = baseUrl(req), g = encodeURIComponent(group);
+  return json({ group, dir, runs, errors, links: { ui: `${base}/#swarms/${g}`, status: `${base}/api/swarms/${g}` } }, runs.length ? 201 : 400);
+});
+
+route("GET", "/api/swarms", (req) => json(db.query<SwarmRow, []>("SELECT * FROM swarms ORDER BY created_at DESC LIMIT 100").all().map((s) => {
+  const st = swarmStatus(s.name, baseUrl(req));
+  return { group: s.name, dir: s.dir, type: s.type_name, created_at: s.created_at, parent_run: s.parent_run, summary: st.summary, counts: st.counts, links: st.links };
+})));
+
+route("GET", "/api/swarms/:group", (req, p) => json(swarmStatus(p.group, baseUrl(req))));
+
+route("GET", "/api/swarms/:group/workers/:name/report", (_r, p) => {
+  const w = swarmStatus(p.group, "").workers.find((x) => x.name === p.name);
+  if (!w) throw new ApiError(404, `swarm "${p.group}" has no worker "${p.name}"`);
+  return new Response(readReport(w.dir), { headers: { "content-type": "text/markdown; charset=utf-8" } });
+});
+
+/** The swarm's runs a request is about: those of the named `workers`, or all of them. Unknown names are an error. */
+function swarmTargets(group: string, only: string[], which: "latest" | "running") {
+  const runs = groupRuns(group);
+  if (!runs.length && !db.query("SELECT 1 FROM swarms WHERE name = ?").get(group)) throw new ApiError(404, `no swarm or group "${group}"`);
+  const unknown = only.find((n) => !runs.some((r) => workerName(r) === n));
+  if (unknown) throw new ApiError(404, `swarm "${group}" has no worker "${unknown}"`);
+  const picked = runs.filter((r) => !only.length || only.includes(workerName(r)));
+  if (which === "running") return picked.filter((r) => r.status === "running");
+  const latest = new Map<string, RunRow>();
+  for (const r of picked) latest.set(workerName(r), r);
+  return [...latest.values()];
+}
+
+// Send the same message to every live worker (or to `workers`), as if typed into its terminal and sent with Enter.
+route("POST", "/api/swarms/:group/message", async (req, p) => {
+  const b = await body(req);
+  const text = str(b.text, "text", { required: true });
+  const sent: string[] = [], skipped: { name: string; reason: string }[] = [];
+  for (const run of swarmTargets(p.group, strArray(b.workers, "workers"), "latest")) {
+    const name = workerName(run);
+    if (run.status !== "running") { skipped.push({ name, reason: `not running (${run.status})` }); continue; }
+    if (!JSON.parse(run.meta || "{}").interactive) { skipped.push({ name, reason: "headless: nothing to type into" }); continue; }
+    // On a permission or question menu, typed text plus Enter would pick an option: answer those in the terminal.
+    if (activityOf(run).activity === "waiting_input" && !bool(b.include_waiting, false)) { skipped.push({ name, reason: "waiting on a prompt in its terminal; answer it there (or pass include_waiting: true)" }); continue; }
+    // sendMessage checks that the text landed in the agent's input before pressing Enter.
+    try { await sendMessage(run, text); sent.push(name); }
+    catch (e: any) { skipped.push({ name, reason: e?.message ?? String(e) }); }
+  }
+  return json({ sent, skipped });
+});
+
+// Stop every running run of the swarm (or of `workers`). Their folders and reports stay.
+route("POST", "/api/swarms/:group/stop", async (req, p, url) => {
+  const b = await body(req);
+  const force = bool(b.force ?? url.searchParams.get("force"), false);
+  const stopped: string[] = [], errors: { name: string; error: string }[] = [];
+  await Promise.all(swarmTargets(p.group, strArray(b.workers, "workers"), "running").map(async (run) => {
+    try { await killRun(run.id, force); stopped.push(workerName(run)); }
+    catch (e: any) { errors.push({ name: workerName(run), error: e?.message ?? String(e) }); }
+  }));
+  return json({ stopped, errors });
 });
 
 route("DELETE", "/api/runs/:id", async (_r, p) => {

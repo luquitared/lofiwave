@@ -84,6 +84,29 @@ curl "${api}/runs/12/wait?until=idle&timeout=600&after=<sent_at>" -H "authorizat
 - \`GET ${api}/runs/12/sessions/<session_id>/messages\` is the conversation so far; \`POST ${api}/runs/12/kill\` stops it.
 - An idle interactive claude run nobody watches ends by itself after \`AGENT_IDLE_STOP_SEC\` (default 30 min; \`"stop_when_idle": false\` keeps it, \`"idle_stop_sec": N\` sets it), so finished workers free their memory. \`wait?until=done\` waits for the end.
 
+## Quickstart: a swarm in one call (POST /swarms: workers, folders and status for you)
+
+Start every worker in one call. Each gets its own folder \`<cwd_root>/<group>/<name>/\` with the shared \`BRIEF.md\` and its own \`TASK.md\`, and reports through files: \`STATUS.md\` (first line = its current state), \`out/\` (deliverables) and \`out/REPORT.md\` (written when finished). If you are an agent the console started, pass your own \`$AGENT_CONSOLE_RUN_ID\` as \`parent_run\`.
+
+\`\`\`bash
+curl -X POST ${api}/swarms -H "authorization: Bearer $KEY" -H 'content-type: application/json' -d '{
+  "group": "tune-lr",
+  "cwd_root": "/absolute/path/experiments",
+  "brief": "Goal, data, budget, and how to score: put score: <number> on the first line of out/REPORT.md.",
+  "workers": [
+    {"name": "lr-1e3", "prompt": "Train with lr=1e-3 and report the held-out score."},
+    {"name": "lr-3e4", "prompt": "Train with lr=3e-4 and report the held-out score."}
+  ],
+  "timeout_sec": 3600
+}'
+\`\`\`
+
+- **How is it going?** \`GET ${api}/swarms/tune-lr\` answers in one call: \`summary\` ("2 workers: 1 working, 1 idle · 1/2 reports"), \`counts\`, and per worker \`activity\` (working / idle / waiting_input / done), \`status_line\` (its STATUS.md first line), \`report\` (true once out/REPORT.md exists), \`cost_line\`, \`elapsed_ms\` and \`links\`. Don't read the folders or the terminals to answer a status question; this has it.
+- **Results**: \`GET ${api}/swarms/tune-lr/workers/<name>/report\` is that worker's REPORT.md.
+- **Tell all of them something**: \`POST ${api}/swarms/tune-lr/message\` \`{"text": "..."}\` (add \`"workers": ["lr-1e3"]\` for some). **Stop them**: \`POST ${api}/swarms/tune-lr/stop\`.
+- \`timeout_sec\` is a hard cap per worker: the console stops it then, whatever it is doing. Put spending limits in the brief; workers keep COST.md.
+- The person can watch the same swarm at \`${base}/#swarms/tune-lr\`. Every endpoint, field and the full worker contract are under *Swarms* below.
+
 ## Quickstart: register an app so it can be monitored, started and stopped from the console
 
 An **app** is a process type: a command with optional args, a default working directory, and a regex that recognizes already-running instances. Once registered it appears on the console's *Apps* tab.
@@ -135,9 +158,10 @@ export function apiIndex(base: string) {
       processes: [`GET ${api}/processes?type=&kind=`, `POST ${api}/processes`, `POST ${api}/processes/preview`, `DELETE ${api}/processes/:pid?force=1`, `POST ${api}/processes/:pid/remote-control {replace?}`],
       keys: [`GET|POST ${api}/keys`, `DELETE ${api}/keys/:id`],
       workflows: [`GET|POST ${api}/workflows`, `GET|PUT|DELETE ${api}/workflows/:id`, `POST ${api}/workflows/:id/run {target?}`],
+      swarms: [`POST ${api}/swarms {group, cwd_root, brief?, workers: [{name, prompt, files?, extra_args?, env?}], type?, extra_args?, env?, timeout_sec?, parent_run?}`, `GET ${api}/swarms`, `GET ${api}/swarms/:group`, `GET ${api}/swarms/:group/workers/:name/report`, `POST ${api}/swarms/:group/message {text, workers?}`, `POST ${api}/swarms/:group/stop {workers?, force?}`, `GET ${api}/groups`],
       targets: [`GET|POST ${api}/targets {name, kind: e2b, config}`, `GET|PUT|DELETE ${api}/targets/:name`, `POST ${api}/targets/:name/check`, `POST ${api}/processes {target, input_dir?}`],
       runs: [`GET ${api}/runs?workflow_id=&status=&type=&group=&parent_run=&limit=&offset=`, `GET|DELETE ${api}/runs/:id`, `GET ${api}/runs/:id/wait?until=idle|done&timeout=&after=`, `GET ${api}/runs/:id/log?offset=|raw=1`, `POST ${api}/runs/:id/kill?force=1`, `POST ${api}/runs/:id/restart`],
-      swarms: [`POST ${api}/processes {group?, parent_run?, files?, mkdir_cwd?, queue?}`, `GET ${api}/groups`, `GET|PUT ${api}/runs/:id/files?path=&recursive=1|archive=1|extract=1`, `GET ${api}/runs/:id/results`, `GET ${api}/system (capacity)`],
+      jobs: [`POST ${api}/processes {group?, parent_run?, files?, mkdir_cwd?, queue?}`, `GET ${api}/groups`, `GET|PUT ${api}/runs/:id/files?path=&recursive=1|archive=1|extract=1`, `GET ${api}/runs/:id/results`, `GET ${api}/system (capacity)`],
       interactive: [`POST ${api}/processes {interactive: true, trust?, stop_when_idle?, idle_stop_sec?}`, `POST ${api}/runs/:id/message {text}`, `GET ${api}/runs/:id/screen?lines=200`, `GET ${api}/runs/:id/history?lines=5000`, `POST ${api}/runs/:id/keys {text, keys, enter}`],
       sessions: [`GET|POST ${api}/runs/:id/sessions`, `PUT ${api}/runs/:id/sessions/:session_id`, `POST ${api}/runs/:id/sessions/:session_id/resume`, `POST ${api}/sessions/resume {session_id, agent?, cwd?}`, `GET ${api}/sessions/:session_id?agent=`, `GET ${api}/runs/:id/sessions/:session_id/transcript`, `GET ${api}/runs/:id/sessions/:session_id/messages`],
       chat: [`GET ${api}/runs/:id/chat (WebSocket)`, `GET ${api}/runs/:id/chat?before=`, `GET ${api}/runs/:id/chat/blob?ref=&agent=`, `GET ${api}/runs/:id/chat/subagent/:agent_id`, `GET ${api}/runs/:id/chat/file?path=&raw=`, `POST ${api}/runs/:id/chat/paths {paths}`, `GET ${api}/sessions/:session_id/chat… (same, by session id)`, `POST ${api}/runs/:id/chat/send {text, files?, draft?}`, `POST ${api}/runs/:id/chat/interrupt`, `POST ${api}/runs/:id/uploads?name= (raw body)`, `GET ${api}/runs/:id/chat/commands`, `GET ${api}/runs/:id/chat/screen?lines=`, `GET ${api}/runs/:id/chat/requests`, `POST ${api}/runs/:id/chat/requests/:request_id {decision, suggestion?, answers?, mode?, message?}`, `POST ${api}/hooks/permission (Claude's PermissionRequest hook)`, `GET ${api}/runs/:id/chat/changes?prompt=`, `GET ${api}/runs/:id/chat/changes/file?prompt=&path=`, `POST ${api}/hooks/message | turn | statusline (Claude's MessageDisplay, UserPromptSubmit/Stop hooks and statusline)`],

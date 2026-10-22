@@ -173,7 +173,7 @@ const typeByName = (n) => types.find((t) => t.name === n);
 // ---------------------------------------------------------------- tabs
 // Main tabs: Sessions, Workflows, Connect, and Advanced, which holds the rest (processes, apps, runs, types).
 const ADVANCED = ["agents", "apps", "runs", "types"];
-const TITLES = { console: "Sessions", workflows: "Workflows", connect: "Connect", settings: "Settings", agents: "Advanced", apps: "Advanced", runs: "Advanced", types: "Advanced" };
+const TITLES = { console: "Sessions", swarm: "Swarms", workflows: "Workflows", connect: "Connect", settings: "Settings", agents: "Advanced", apps: "Advanced", runs: "Advanced", types: "Advanced" };
 $$("nav button").forEach((b) => b.addEventListener("click", () => switchTab(b.dataset.tab)));
 $$("#subnav button").forEach((b) => b.addEventListener("click", () => switchTab(b.dataset.sub)));
 function switchTab(name, push = true) {
@@ -187,7 +187,7 @@ function switchTab(name, push = true) {
   $("#page-title").textContent = TITLES[name];
   $("#subnav").hidden = !advanced;
   $$("#subnav button").forEach((b) => { const on = b.dataset.sub === name; b.classList.toggle("active", on); b.setAttribute("aria-selected", String(on)); });
-  const navOf = advanced ? "advanced" : name;
+  const navOf = advanced ? "advanced" : name === "swarm" ? "console" : name; // a swarm page is part of Sessions
   $$("nav button").forEach((b) => { b.classList.toggle("active", b.dataset.tab === navOf); b.setAttribute("aria-current", b.dataset.tab === navOf ? "page" : "false"); });
   $$(".tab").forEach((t) => t.classList.toggle("active", t.id === `tab-${name}`));
   // Which tab you're on is view state, not a location: only run/session deep links go in the URL, so
@@ -955,7 +955,8 @@ function railTabs() {
 
 function renderRail() {
   const { live, headless, adoptable, ended } = consoleData;
-  const sig = JSON.stringify([consoleView, live.map((r) => [r.id, runLabel(r)]), headless.map((r) => [r.id, runLabel(r)]), adoptable.map((p) => [p.pid, p.session?.session_id || "", p.session?.web_url || ""]), ended.map((r) => [r.id, runLabel(r)]), endedRun?.id]);
+  const swarms = consoleData.swarms || [];
+  const sig = JSON.stringify([consoleView, live.map((r) => [r.id, runLabel(r)]), headless.map((r) => [r.id, runLabel(r)]), adoptable.map((p) => [p.pid, p.session?.session_id || "", p.session?.web_url || ""]), ended.map((r) => [r.id, runLabel(r)]), endedRun?.id, swarms.map((s) => [s.group, s.summary])]);
   if (sig === railSig) return patchRail();
   railSig = sig;
   if (consoleView === "ended") return $("#session-rail").replaceChildren(railTabs(), ...endedRail());
@@ -975,6 +976,11 @@ function renderRail() {
         h("div", { class: "rail-sub dim rail-up" }, railUp(r)),
       );
     }),
+    swarms.length ? h("div", { class: "rail-head" }, h("span", {}, `${swarms.length} swarm${swarms.length === 1 ? "" : "s"}`), h("a", { class: "link", href: "#swarms", onclick: (e) => { e.preventDefault(); openSwarm(null); } }, "all")) : "",
+    ...swarms.map((s) => h("a", { class: "rail-item flat", href: `#swarms/${encodeURIComponent(s.group)}`, onclick: (e) => { e.preventDefault(); openSwarm(s.group); } },
+      h("div", { class: "rail-title" }, h("span", { class: `dot ${s.counts.working ? "working" : s.counts.waiting_input ? "waiting_input" : s.counts.running ? "idle" : ""}` }), `⁂ ${s.group}`),
+      h("div", { class: "rail-sub" }, s.summary),
+    )),
     headless.length ? h("div", { class: "rail-head" }, h("span", {}, `${headless.length} running · log only`)) : "",
     ...headless.map((r) => h("a", { class: "rail-item flat", href: `#runs/${r.id}`, onclick: (e) => { e.preventDefault(); openRun(r.id); } },
       h("div", { class: "rail-title" }, runLabel(r)),
@@ -1480,10 +1486,132 @@ function emptyPane() {
   );
 }
 
+// ---------------------------------------------------------------- swarms (#swarms/<group>: one row per worker)
+// A swarm is a group of worker runs started together (POST /api/swarms). Its page answers "how is it going?" at a
+// glance: what each worker is doing, its own one-line STATUS.md, whether its report is in; and messages or stops them all.
+let swarmGroup = null, swarmSig = "";
+function openSwarm(group) {
+  swarmGroup = group || null; swarmSig = "";
+  switchTab("swarm", false);
+  history.replaceState(null, "", location.pathname + (group ? `#swarms/${encodeURIComponent(group)}` : "#swarms"));
+}
+const ACTIVITY_LABEL = { working: "working", idle: "idle", waiting_input: "needs input", done: "ended" };
+const tokenQuery = () => (token ? `?token=${encodeURIComponent(token)}` : "");
+/** Open a worker's live terminal in Sessions (or its run record once it has ended). */
+function openWorker(w) {
+  if (w.status !== "running") return openRun(w.run_id);
+  selectConsoleRunId(w.run_id); setConsoleView("live", false); switchTab("console");
+}
+
+const loadSwarm = guard(async () => {
+  const view = $("#swarm-view");
+  if (!swarmGroup) return renderSwarmList(view, await get("/swarms"));
+  let s;
+  try { s = await get(`/swarms/${encodeURIComponent(swarmGroup)}`); }
+  catch (e) { swarmSig = ""; view.replaceChildren(h("div", { class: "card" }, h("h2", {}, `Swarm ${swarmGroup}`), h("p", { class: "muted" }, e.message), h("button", { class: "small", onclick: () => openSwarm(null) }, "All swarms"))); return; }
+  if (s.group !== swarmGroup) return;
+  // The head (with the message box) is built once per swarm, so a poll never drops a half-typed message; the rest is refreshed.
+  if (swarmSig !== s.group) { swarmSig = s.group; view.replaceChildren(...swarmSkeleton(s)); }
+  renderSwarmCounts(s);
+  renderSwarmRows(s);
+});
+
+function renderSwarmList(view, list) {
+  swarmSig = "";
+  view.replaceChildren(
+    h("div", { class: "toolbar" }, h("button", { class: "small", onclick: () => switchTab("console") }, "← Sessions"), h("span", { class: "muted" }, list.length ? `${list.length} swarm${list.length === 1 ? "" : "s"}` : "")),
+    h("table", { id: "swarm-list" },
+      h("thead", {}, h("tr", {}, h("th", {}, "Swarm"), h("th", {}, "Workers"), h("th", {}, "Started"), h("th", {}))),
+      h("tbody", {}, ...(list.length ? list.map((s) => h("tr", { class: "clickable", tabindex: "0", onclick: () => openSwarm(s.group), onkeydown: (e) => { if (e.key === "Enter") openSwarm(s.group); } },
+        h("td", { class: "full" }, h("b", {}, `⁂ ${s.group}`), h("div", { class: "muted wf-sub", title: s.dir }, `${s.type} · ${shortCwd(s.dir)}`)),
+        h("td", { "data-l": "workers" }, s.summary),
+        h("td", { "data-l": "started", title: fmtTime(s.created_at) }, fmtRel(s.created_at)),
+        h("td", { class: "row" }, h("button", { class: "small primary", onclick: (e) => { e.stopPropagation(); openSwarm(s.group); } }, "Open")),
+      )) : [h("tr", {}, h("td", { colspan: 4, class: "muted empty" }, "No swarms yet. An agent starts one with POST /api/swarms (see the Connect page)."))])),
+    ),
+  );
+}
+
+function swarmSkeleton(s) {
+  const g = encodeURIComponent(s.group);
+  const send = guard(async (e) => {
+    e.preventDefault();
+    const input = e.target.elements.text, text = input.value.trim();
+    if (!text) return;
+    const r = await post(`/swarms/${g}/message`, { text });
+    input.value = "";
+    toast(r.sent.length ? `sent to ${r.sent.join(", ")}${r.skipped.length ? ` · skipped ${r.skipped.map((x) => x.name).join(", ")}` : ""}` : "no live worker to send it to", r.sent.length > 0);
+    loadSwarm();
+  });
+  return [
+    h("div", { class: "card swarm-head" },
+      h("div", { class: "card-head" },
+        h("div", { class: "pane-id" },
+          h("h2", {}, h("button", { class: "small", title: "all swarms", "aria-label": "All swarms", onclick: () => openSwarm(null) }, "←"), ` ⁂ ${s.group}`),
+          h("div", { class: "pane-meta muted" }, `${s.type || "?"}${s.dir ? ` · ${shortCwd(s.dir)}` : ""} · started ${fmtTime(s.created_at)}`, s.created_by ? ` · by ${s.created_by.replace(/^key:/, "")}` : "", s.parent_run ? [" · controller ", h("a", { class: "link", href: `#runs/${s.parent_run}`, onclick: (e) => { e.preventDefault(); openSessionLink(s.parent_run); } }, `run #${s.parent_run}`)] : ""),
+        ),
+        h("div", { class: "row pane-actions" },
+          h("button", { class: "small danger", id: "swarm-stop", onclick: () => confirmDo(`Stop every running worker of ${s.group}? Their folders and reports stay.`, async () => { const r = await post(`/swarms/${g}/stop`); toast(`stopped ${r.stopped.length} worker${r.stopped.length === 1 ? "" : "s"}`, true); loadSwarm(); }) }, "Stop all"),
+        ),
+      ),
+      h("div", { id: "swarm-counts", class: "swarm-counts" }),
+      h("form", { class: "row keys swarm-bcast", onsubmit: send },
+        h("input", { name: "text", placeholder: "message every live worker… (Enter sends it)", autocomplete: "off", spellcheck: "false", "aria-label": "Message to every live worker" }),
+        h("button", { type: "submit", class: "small primary" }, "Send to all"),
+      ),
+      s.brief ? h("details", { class: "swarm-brief" }, h("summary", { class: "muted" }, "Brief"), h("pre", {}, s.brief)) : "",
+    ),
+    h("table", { id: "swarm-table" },
+      h("thead", {}, h("tr", {}, h("th", {}, "Worker"), h("th", {}, "Its status (STATUS.md)"), h("th", {}, "Activity"), h("th", {}, "Elapsed"), h("th", {}, "Report"), h("th", {}))),
+      h("tbody", {}),
+    ),
+  ];
+}
+
+function renderSwarmCounts(s) {
+  const c = s.counts, el = $("#swarm-counts");
+  if (!el) return;
+  const pill = (n, label, cls) => h("span", { class: `pill ${n ? cls : ""}` }, h("span", { class: `dot ${cls}` }), `${n} ${label}`);
+  el.replaceChildren(
+    pill(c.working, "working", "working"), pill(c.idle, "idle", "idle"), pill(c.waiting_input, "need input", "waiting_input"), pill(c.done, "ended", "done"),
+    h("span", { class: `pill ${c.reported === c.workers && c.workers ? "on" : ""}` }, `${c.reported}/${c.workers} reports`),
+    c.blocked ? h("span", { class: "pill blocked" }, `${c.blocked} blocked`) : "",
+    h("span", { class: "muted swarm-elapsed" }, `running for ${fmtDur(s.elapsed_ms / 1000)}`),
+  );
+  const stop = $("#swarm-stop"); if (stop) stop.disabled = !c.running;
+}
+
+function renderSwarmRows(s) {
+  const tbody = $("#swarm-table tbody");
+  if (!tbody) return;
+  const g = encodeURIComponent(s.group);
+  tbody.replaceChildren(...s.workers.map((w) => h("tr", {},
+    h("td", { class: "full" },
+      h("div", { class: "swarm-name" }, h("span", { class: `dot ${w.activity}`, title: ACTIVITY_LABEL[w.activity] }), h("b", {}, w.name)),
+      h("div", { class: "muted wf-sub", title: w.dir }, `run #${w.run_id}${w.runs > 1 ? ` · ${w.runs} runs` : ""}${w.status !== "running" ? ` · ${w.status}` : ""}`)),
+    h("td", { class: "full swarm-status", "data-l": "status", title: w.status_text || "" },
+      w.status_line ? h("span", { class: /^blocked\b/i.test(w.status_line) ? "bad" : "" }, w.status_line) : h("span", { class: "muted" }, "no STATUS.md yet"),
+      w.cost_line ? h("div", { class: "muted wf-sub", title: "COST.md" }, `cost: ${w.cost_line}`) : "",
+      w.status_updated_at ? h("div", { class: "muted wf-sub" }, `updated ${fmtRel(w.status_updated_at)}`) : ""),
+    h("td", { "data-l": "activity", title: `since ${fmtTime(w.activity_since)}` }, ACTIVITY_LABEL[w.activity] || w.activity, h("span", { class: "muted" }, ` · ${fmtDur((Date.now() - w.activity_since) / 1000)}`)),
+    h("td", { "data-l": "elapsed" }, fmtDur(w.elapsed_ms / 1000)),
+    h("td", { "data-l": "report" }, w.report
+      ? h("a", { class: "link", href: `/api/swarms/${g}/workers/${encodeURIComponent(w.name)}/report${tokenQuery()}`, target: "_blank", title: w.report_excerpt }, "REPORT.md ↗")
+      : h("span", { class: "muted" }, "–"),
+      w.out_files.length > (w.report ? 1 : 0) ? h("div", { class: "muted wf-sub", title: w.out_files.join("\n") }, `${w.out_files.length} in out/`) : ""),
+    h("td", { class: "row" },
+      w.status === "running" ? h("button", { class: "small primary", onclick: () => openWorker(w) }, "Open terminal") : h("button", { class: "small", onclick: () => openWorker(w) }, "Details"),
+      w.session?.session_id && w.links.transcript ? h("a", { href: `/api/runs/${w.run_id}/sessions/${encodeURIComponent(w.session.session_id)}/transcript${tokenQuery()}`, target: "_blank" }, h("button", { class: "small" }, "Transcript")) : "",
+    ),
+  )));
+  if (!s.workers.length) tbody.replaceChildren(h("tr", {}, h("td", { colspan: 6, class: "muted empty" }, "No workers.")));
+}
+
 // ---------------------------------------------------------------- refresh loop
 function refresh() {
   if (document.hidden) return;
   if (activeTab === "console") loadConsole();
+  else if (activeTab === "swarm") loadSwarm();
   else if (activeTab === "agents") loadAgents();
   else if (activeTab === "apps") loadTypes().then(loadApps);
   else if (activeTab === "workflows") loadWorkflows();
@@ -1501,7 +1629,9 @@ document.addEventListener("visibilitychange", () => !document.hidden && refresh(
   applyTheme(); // the page head already set the scheme; this syncs theme-color
   await Promise.all([loadSystem(), loadTypes(), loadWorkflows(), loadMe(), loadTargets()]);
   const m = location.hash.match(/^#(\w+)(?:\/(\w+))?/);
-  if (m && m[1] === "runs" && m[2]) openRun(Number(m[2]));
+  const sw = location.hash.match(/^#swarms(?:\/(.+))?$/);
+  if (sw) openSwarm(sw[1] ? decodeURIComponent(sw[1]) : null);
+  else if (m && m[1] === "runs" && m[2]) openRun(Number(m[2]));
   else if (m && (m[1] === "sessions" || m[1] === "console") && /^\d+$/.test(m[2] || "")) openSessionLink(Number(m[2]));
   else if (m && m[1] === "agents" && m[2] === "start") { switchTab("console", false); openStartDialog({ kind: "agent" }); }
   else if (m && m[1] === "processes") switchTab("agents", false);
@@ -1511,7 +1641,8 @@ document.addEventListener("visibilitychange", () => !document.hidden && refresh(
 $("#refresh-btn").onclick = () => { refresh(); loadSystem(); };
 window.addEventListener("hashchange", () => {
   const [tab, id] = location.hash.slice(1).split("/");
-  if (tab === "runs" && /^\d+$/.test(id || "")) openRun(Number(id));
+  if (tab === "swarms") openSwarm(id ? decodeURIComponent(id) : null);
+  else if (tab === "runs" && /^\d+$/.test(id || "")) openRun(Number(id));
   else if ((tab === "sessions" || tab === "console") && /^\d+$/.test(id || "")) openSessionLink(Number(id));
   else if ($(`#tab-${tab}`) || tab === "advanced") { if (selectedRun) closeRun(false); switchTab(tab, false); }
 });

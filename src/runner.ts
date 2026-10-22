@@ -116,6 +116,9 @@ function stopEntry(entry: LiveEntry, force: boolean): Promise<void> {
 /** Where a run is asked to leave its results (LOFIWAVE_OUT_DIR); GET /api/runs/:id/results lists it. */
 export const outDirOf = (cwd: string) => join(cwd, "out");
 
+/** The meta fields that say where a run belongs (its group, the run that started it, its swarm worker): a restart or resume keeps them. */
+export const lineageOf = (meta: Record<string, any>) => ({ group: meta.group, parent_run: meta.parent_run, swarm_worker: meta.swarm_worker });
+
 /** Record (or refresh) an agent session on a run. Keyed by (run, session id) so a resumed session can belong to several runs. */
 export function recordSession(runId: number, s: { session_id: string; agent?: string; cwd?: string; transcript_path?: string; model?: string; source?: string }) {
   db.prepare(
@@ -858,7 +861,7 @@ export async function restartRun(id: number): Promise<RunRow> {
     interactive: Boolean(meta.interactive), resumeSession: meta.resume_session, stopWhenIdle: meta.stop_when_idle ? true : undefined,
     idleStopSec: typeof meta.idle_stop_sec === "number" ? meta.idle_stop_sec : undefined, trust: meta.trust !== false,
     target: meta.target,
-    meta: { group: meta.group, parent_run: meta.parent_run },   // a restarted worker stays in its swarm
+    meta: lineageOf(meta),   // a restarted worker stays in its group (and swarm)
   });
 }
 
@@ -877,19 +880,19 @@ export async function resumeSession(runId: number, sessionId: string): Promise<R
   // The run's own type if it is that agent (keeps its env/extra config), else the built-in type for the agent.
   const own = getType(run.type_name);
   const typeName = basename(own.command) === s.agent ? own.name : s.agent;
-  return resumeAgentSession({ agent: s.agent, sessionId, cwd: s.cwd || run.cwd, typeName, env: JSON.parse(run.env || "{}") });
+  return resumeAgentSession({ agent: s.agent, sessionId, cwd: s.cwd || run.cwd, typeName, env: JSON.parse(run.env || "{}"), lineage: lineageOf(JSON.parse(run.meta || "{}")) });
 }
 
 /**
  * Reopen any agent session by id, whether or not the console started it (e.g. a claude session from a terminal, seen on the
  * Agents tab). If that session is still open elsewhere, claude forks a copy that continues the conversation under a new id.
  */
-export async function resumeAgentSession(o: { agent: string; sessionId: string; cwd?: string; typeName?: string; env?: Record<string, string>; terminal?: string }): Promise<RawRun> {
+export async function resumeAgentSession(o: { agent: string; sessionId: string; cwd?: string; typeName?: string; env?: Record<string, string>; terminal?: string; lineage?: Record<string, any> }): Promise<RawRun> {
   const typeName = o.typeName ?? o.agent;
   const type = getType(typeName);
   if (!JSON.parse(type.resume_args || "[]").length) throw new ApiError(400, `process type "${typeName}" has no resume_args template`);
   const cwd = o.cwd && existsSync(o.cwd) ? o.cwd : (type.default_cwd || process.env.HOME || "/");
-  const run = await startRun({ typeName, cwd, trigger: "resume", resumeSession: o.sessionId, env: o.env ?? {}, terminal: o.terminal });
+  const run = await startRun({ typeName, cwd, trigger: "resume", resumeSession: o.sessionId, env: o.env ?? {}, terminal: o.terminal, meta: o.lineage });
   // Until the agent reports back (claude's hook, codex's index), remember what we asked it to reopen. Codex's is
   // confirmed (or marked failed) once its index shows the thread in use: see findCodexRunSession.
   recordSession(run.id, { session_id: o.sessionId, agent: o.agent, cwd, source: o.agent === "codex" ? "resume requested" : "resume" });
