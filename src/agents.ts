@@ -4,22 +4,28 @@
  * - Claude Code keeps ~/.claude/sessions/<pid>.json for every running process (session id, the name it
  *   chose, cwd, idle/working status, the Remote Control bridge id) and one transcript per session under
  *   ~/.claude/projects/<cwd slug>/<session id>.jsonl (auto title, /rename title, model, bridge session).
- * - Codex writes ~/.codex/sessions/YYYY/MM/DD/rollout-<time>-<session id>.jsonl (first line: session_meta).
+ * - Codex writes ~/.codex/sessions/YYYY/MM/DD/rollout-<time>-<session id>.jsonl (first line: session_meta), and
+ *   indexes every thread in ~/.codex/state_<n>.sqlite (`threads`: cwd, who started it, title, name, times). Since
+ *   0.16x the TUI runs its threads in a shared `codex app-server` daemon, so no process of ours holds the rollout
+ *   open: the index is how a run finds its thread.
  *
  * Everything here is best-effort and cached; a missing file just means "unknown".
  */
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { Database } from "bun:sqlite";
+import { existsSync, readdirSync, readFileSync, statSync, writeFileSync, renameSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 
 const HOME = homedir();
 const CLAUDE_SESSIONS = join(HOME, ".claude", "sessions");
 const CLAUDE_PROJECTS = join(HOME, ".claude", "projects");
-const CODEX_SESSIONS = join(HOME, ".codex", "sessions");
+const CODEX_HOME = process.env.CODEX_HOME || join(HOME, ".codex");
+const CODEX_SESSIONS = join(CODEX_HOME, "sessions");
 
 export type ClaudeRegistryEntry = {
   pid: number; sessionId: string; cwd: string; name: string; nameSource?: string; kind?: string;
-  status?: string; bridgeSessionId?: string; tmux?: string; startedAt?: number;
+  /** idle | busy | waiting (on a permission prompt or a question; `waitingFor` says which), since `statusUpdatedAt`. */
+  status?: string; statusUpdatedAt?: number; waitingFor?: string; bridgeSessionId?: string; tmux?: string; startedAt?: number;
 };
 
 /** Enriched view of a session, whatever the agent. */
@@ -74,10 +80,48 @@ function pidAlive(pid: number): boolean {
 export const claudeWebUrl = (bridgeSessionId: string | undefined | null) =>
   bridgeSessionId ? `https://claude.ai/code/${bridgeSessionId.replace(/^cse_/, "session_")}` : "";
 
+// ---------------------------------------------------------------- claude: folder trust
+
+/** Claude Code's global config, where it remembers trusted folders (`projects[<path>].hasTrustDialogAccepted`). */
+const claudeConfigPath = () => join(process.env.CLAUDE_CONFIG_DIR || HOME, ".claude.json");
+
+/**
+ * Mark a folder trusted the way Claude Code's own trust dialog does, so a run started there doesn't stop at "Is this a
+ * project you created or one you trust?" (it asks even with --dangerously-skip-permissions). Claude takes trust from
+ * the folder or any parent, so / and the home directory are never trusted this way. "failed" (no config yet,
+ * unreadable) is not fatal: the runner also answers the dialog on screen.
+ */
+export function trustClaudeFolder(cwd: string): "already" | "trusted" | "skipped" | "failed" {
+  const dirs = [cwd];
+  try { const real = realpathSync(cwd); if (real !== cwd) dirs.push(real); } catch { /* the caller checked it exists */ }
+  if (dirs.some((d) => d === "/" || d === HOME)) return "skipped";
+  const file = claudeConfigPath();
+  try {
+    const cfg = JSON.parse(readFileSync(file, "utf8"));
+    const projects = (cfg.projects ??= {});
+    const trusted = (d: string): boolean => {
+      for (let p = d; ; p = dirname(p)) {
+        if (projects[p]?.hasTrustDialogAccepted) return true;
+        if (p === dirname(p)) return false;
+      }
+    };
+    if (dirs.every(trusted)) return "already";
+    // The same defaults claude gives a new project entry.
+    for (const d of dirs) projects[d] = { allowedTools: [], mcpContextUris: [], mcpServers: {}, enabledMcpjsonServers: [], disabledMcpjsonServers: [], ...projects[d], hasTrustDialogAccepted: true };
+    // Claude rewrites this file all the time: swap it in one step so it never reads half of ours.
+    const tmp = `${file}.lofiwave-${process.pid}`;
+    writeFileSync(tmp, JSON.stringify(cfg, null, 2), { mode: statSync(file).mode & 0o777 });
+    renameSync(tmp, file);
+    return "trusted";
+  } catch { return "failed"; }
+}
+
 // ---------------------------------------------------------------- claude: transcripts
 
 /** Claude Code's project folder for a cwd: every non-alphanumeric character becomes '-'. */
 export const claudeProjectSlug = (cwd: string) => cwd.replace(/[^A-Za-z0-9]/g, "-");
+/** Where claude keeps a session's transcript when it runs in `cwd` (and so where `claude --resume` there looks for it). */
+export const claudeTranscriptHome = (sessionId: string, cwd: string) => join(CLAUDE_PROJECTS, claudeProjectSlug(cwd), `${sessionId}.jsonl`);
 
 export function claudeTranscriptPath(sessionId: string, cwd: string): string {
   const direct = join(CLAUDE_PROJECTS, claudeProjectSlug(cwd), `${sessionId}.jsonl`);
@@ -159,7 +203,7 @@ export function codexRolloutMeta(path: string): CodexMeta | null {
       try {
         const c = JSON.parse(line)?.payload?.content;
         const s = Array.isArray(c) ? c.filter((x: any) => x?.type === "input_text").map((x: any) => x.text).join(" ") : "";
-        if (s && !s.startsWith("<")) meta.firstPrompt = s.slice(0, 120);
+        if (s && !isCodexContext(s)) meta.firstPrompt = s.slice(0, 120);
       } catch {}
     } else if (!meta.model) { const m = /"model":"([^"]+)"/.exec(line); if (m) meta.model = m[1]; }
   }
@@ -167,7 +211,85 @@ export function codexRolloutMeta(path: string): CodexMeta | null {
   return meta;
 }
 
-/** A codex TUI/exec started at `startedAt` in `cwd` writes its rollout within seconds: find it. */
+/** User messages Codex adds itself: the environment, AGENTS.md and other instructions. Not what the person typed. */
+const isCodexContext = (s: string) => /^\s*(<|# AGENTS\.md instructions)/.test(s);
+
+// ---------------------------------------------------------------- codex: the thread index
+
+export type CodexThread = {
+  id: string; rollout_path: string; cwd: string; source: string; originator: string | null; thread_source: string | null;
+  title: string; name: string | null; first_user_message: string; model: string | null; created_at_ms: number; updated_at_ms: number;
+};
+
+let codexDb: { db: Database | null; at: number } | null = null;
+/**
+ * The newest ~/.codex/state_<n>.sqlite, read-only. Not `immutable=1`: Codex keeps it in WAL mode, and an immutable
+ * open skips the WAL, which is where the newest threads are (checked on 0.162.1: a day of threads missing).
+ */
+function codexState(): Database | null {
+  if (codexDb && (codexDb.db || Date.now() - codexDb.at < 60_000)) return codexDb.db;
+  let db: Database | null = null;
+  try {
+    const name = safeList(CODEX_HOME).filter((f) => /^state_\d+\.sqlite$/.test(f)).sort((a, b) => Number(b.match(/\d+/)![0]) - Number(a.match(/\d+/)![0]))[0];
+    if (name) db = new Database(join(CODEX_HOME, name), { readonly: true });
+  } catch { db = null; }
+  codexDb = { db, at: Date.now() };
+  return db;
+}
+
+const THREAD_COLS = "id, rollout_path, cwd, source, originator, thread_source, title, name, first_user_message, model, created_at_ms, updated_at_ms";
+
+function codexQuery<T>(sql: string, ...params: any[]): T[] {
+  const db = codexState();
+  if (!db) return [];
+  try { return db.query(sql).all(...params) as T[]; }
+  catch { try { db.close(); } catch {} codexDb = { db: null, at: Date.now() }; return []; } // a schema we don't know: try again in a minute
+}
+
+/** Whether Codex's thread index can be read (an older Codex has none). */
+export const codexIndexReadable = () => Boolean(codexState());
+
+export function codexThread(id: string): CodexThread | null {
+  return codexQuery<CodexThread>(`SELECT ${THREAD_COLS} FROM threads WHERE id = ?`, id)[0] ?? null;
+}
+
+/** Same folder, allowing for macOS's /private prefix (/tmp and /var are symlinks into it). */
+const sameDir = (a: string, b: string) => a === b || a.replace(/^\/private(?=\/)/, "") === b.replace(/^\/private(?=\/)/, "");
+
+/** A subagent's thread, which belongs to its parent's session. */
+const isSubagent = (t: CodexThread) => t.thread_source === "subagent" || t.source.startsWith("{");
+
+/**
+ * The thread a codex we started at `startedAt` in `cwd` created: the TUI's (originator codex-tui; older versions
+ * left originator empty with source cli) or `codex exec`'s (source exec). Threads other runs already claimed are
+ * skipped; among the rest, one whose first message is our prompt wins, then the earliest. Null when the index has
+ * none yet (or can't be read).
+ */
+export function findCodexThread(o: { startedAt: number; cwd: string; kind: "tui" | "exec"; exclude?: Set<string>; prompt?: string }): CodexThread | null {
+  const rows = codexQuery<CodexThread>(`SELECT ${THREAD_COLS} FROM threads WHERE created_at_ms >= ? AND archived = 0 ORDER BY created_at_ms`, o.startedAt - 5000)
+    .filter((t) => !isSubagent(t) && !o.exclude?.has(t.id) && (!o.cwd || sameDir(t.cwd, o.cwd)))
+    .filter((t) => o.kind === "exec" ? t.source === "exec" : t.originator === "codex-tui" || (!t.originator && t.source === "cli"));
+  const want = (o.prompt ?? "").trim().slice(0, 80);
+  return (want && rows.find((t) => t.first_user_message.trim().startsWith(want))) || rows[0] || null;
+}
+
+/** Whether a codex resumed at `since` really reopened thread `id`: Codex bumps updated_at when the thread is used. */
+export function codexThreadTouched(id: string, since: number): CodexThread | null {
+  const t = codexThread(id);
+  return t && t.updated_at_ms >= since - 2000 ? t : null;
+}
+
+/**
+ * For a codex process lofiwave didn't start: the thread it's most likely on, from the index alone (the daemon holds
+ * the files, so the process can't be asked). The newest thread in its folder used since it started.
+ */
+export function codexThreadNear(cwd: string, startedAt: number, kind: "tui" | "exec"): CodexThread | null {
+  const rows = codexQuery<CodexThread>(`SELECT ${THREAD_COLS} FROM threads WHERE updated_at_ms >= ? AND archived = 0 ORDER BY updated_at_ms DESC LIMIT 50`, startedAt - 5000)
+    .filter((t) => !isSubagent(t) && sameDir(t.cwd, cwd) && (kind === "exec" ? t.source === "exec" : t.source !== "exec"));
+  return rows[0] ?? null;
+}
+
+/** Older Codex (no thread index): a codex TUI/exec started at `startedAt` in `cwd` writes its rollout within seconds: find it. */
 export function discoverCodexSession(startedAt: number, cwd: string): { session_id: string; path: string } | null {
   for (const dir of codexDayDirs().slice(0, 2)) {
     for (const f of safeList(dir).sort().reverse()) {
@@ -176,7 +298,7 @@ export function discoverCodexSession(startedAt: number, cwd: string): { session_
       const path = join(dir, f);
       if (statSync(path).mtimeMs < startedAt - 5000) continue;
       const meta = codexRolloutMeta(path);
-      if (meta && meta.startedAt >= startedAt - 5000 && (!cwd || meta.cwd === cwd || meta.cwd === cwd.replace(/^\/private/, "") || `/private${meta.cwd}` === cwd)) return { session_id: m[1], path };
+      if (meta && meta.startedAt >= startedAt - 5000 && (!cwd || sameDir(meta.cwd, cwd))) return { session_id: m[1], path };
     }
   }
   return null;
@@ -195,9 +317,12 @@ export function describeSession(agent: string, sessionId: string, hint: { cwd?: 
     if (m) { info.title = m.title || info.title; info.model ||= m.model; info.web_url ||= claudeWebUrl(m.bridgeSessionId); if (!info.title && !info.name) info.title = m.firstPrompt; }
     info.resume_cmd = `claude --resume ${sessionId}`;
   } else if (agent === "codex") {
+    // The index has Codex's own short name for the thread and its first message; the rollout is the fallback.
+    const t = codexThread(sessionId);
+    if (t) { info.name = t.name ?? ""; info.cwd ||= t.cwd; info.model ||= t.model ?? ""; info.transcript_path ||= t.rollout_path; if (!isCodexContext(t.first_user_message)) info.title = t.first_user_message.slice(0, 120); }
     if (!info.transcript_path) info.transcript_path = codexRolloutPath(sessionId);
     const m = codexRolloutMeta(info.transcript_path);
-    if (m) { info.cwd ||= m.cwd; info.model ||= m.model; info.title = m.firstPrompt; }
+    if (m) { info.cwd ||= m.cwd; info.model ||= m.model; info.title ||= m.firstPrompt; }
     info.resume_cmd = `codex resume ${sessionId}`;
   }
   return info;
@@ -213,7 +338,7 @@ export function locateSession(sessionId: string, agent?: string): SessionInfo | 
     if (path) return describeSession("claude", sessionId, { cwd: claudeTranscriptMeta(path)?.cwd ?? "", transcript_path: path });
   }
   if (!agent || agent === "codex") {
-    const path = codexRolloutPath(sessionId);
+    const path = codexThread(sessionId)?.rollout_path || codexRolloutPath(sessionId);
     if (path) return describeSession("codex", sessionId, { transcript_path: path });
   }
   return null;
@@ -259,11 +384,11 @@ export function transcriptMessages(path: string, limit = 500): ChatMessage[] {
         else if (part.type === "tool_use") push("tool", toolLine(part.name, part.input), at);
       }
     } else if (d.type === "response_item") {
-      // codex: the model's items; user messages that start with "<" are context it injects (environment, instructions).
+      // codex: the model's items; some user messages are context it injects (environment, AGENTS.md, instructions).
       const p = d.payload ?? {};
       if (p.type === "message" && (p.role === "user" || p.role === "assistant")) {
         const text = (p.content ?? []).map((x: any) => x.text ?? "").join("\n");
-        if (!(p.role === "user" && text.trimStart().startsWith("<"))) push(p.role, text, at);
+        if (!(p.role === "user" && isCodexContext(text))) push(p.role, text, at);
       } else if (p.type === "function_call" || p.type === "custom_tool_call" || p.type === "local_shell_call") {
         push("tool", toolLine(p.name ?? "shell", p.arguments ?? p.input ?? p.action), at);
       }

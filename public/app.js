@@ -163,7 +163,7 @@ function attachPathPicker(input) {
 $$("input[data-pathpicker]").forEach(attachPathPicker);
 
 // ---------------------------------------------------------------- state
-let types = [], workflows = [], selectedRun = null, logOffset = 0, activeTab = "console";
+let types = [], workflows = [], targets = [], selectedRun = null, logOffset = 0, activeTab = "console";
 // Console (session-first working view) state.
 let consoleData = { live: [], headless: [], adoptable: [], ended: [] }, consoleRun = null, railSig = "", paneSig = "";
 // The rail shows live sessions or recently ended ones; an ended one opens read-only, with a button to turn it back on.
@@ -180,8 +180,9 @@ function switchTab(name, push = true) {
   if (name === "advanced") name = ADVANCED.includes(localStorage.getItem("ac_advanced")) ? localStorage.getItem("ac_advanced") : "runs";
   if (!TITLES[name]) name = "console";
   if (name !== "runs" && selectedRun) closeRun(false);
-  if (name !== "console") { closeTerm(); syncFull(false); }
+  if (name !== "console") { closeTerm(); closeChat(); syncFull(false); drawerPicked(); }
   activeTab = name;
+  document.body.dataset.tab = name;
   const advanced = ADVANCED.includes(name);
   if (advanced) localStorage.setItem("ac_advanced", name);
   $("#page-title").textContent = TITLES[name];
@@ -212,7 +213,14 @@ const loadMe = guard(async () => {
   el.hidden = false;
 });
 /** " · by lucas" for a run someone started (blank for scheduled runs and older ones). */
-const byWho = (r) => (r.meta?.started_by ? ` · by ${r.meta.started_by.replace(/^key:/, "")}` : "");
+/** The swarm a run belongs to (runs started for one job share a `group`); clicking it lists the group's runs. */
+const groupTag = (r) => (r.group ? h("span", { class: "wf-tag group-tag", title: `group ${r.group}: show its runs`, onclick: (e) => { e.stopPropagation(); e.preventDefault(); showGroup(r.group); } }, `◇ ${r.group}`) : "");
+function showGroup(g) {
+  const rg = $("#runs-group");
+  if (![...rg.options].some((o) => o.value === g)) rg.append(h("option", { value: g }, g));
+  rg.value = g; switchTab("runs");
+}
+const byWho = (r) =>(r.meta?.started_by ? ` · by ${r.meta.started_by.replace(/^key:/, "")}` : "");
 
 // ---------------------------------------------------------------- system info
 let systemInfo = null;
@@ -221,10 +229,12 @@ const loadSystem = guard(async () => {
   systemInfo = s;
   const addrs = Object.values(s.addresses).flat();
   const ts = s.tailscale;
-  $("#sysinfo").replaceChildren(
-    h("div", {}, h("b", {}, s.hostname), ` · ${s.platform} · bun ${s.bun} · up ${fmtDur(s.uptime_ms / 1000)}`),
-    h("div", {}, ts && ts.ips?.length ? `tailscale: ${ts.dns_name || ""} ${ts.ips.filter((ip) => !ip.includes(":")).join(", ")}${ts.state === "Running" ? "" : ` (${ts.state})`}` : ts ? `tailscale: ${ts.state}` : "tailscale: not installed", addrs.length ? ` · lan: ${addrs.join(", ")}` : ""),
-  );
+  // One short line in the top bar; the addresses are in its tooltip.
+  const el = $("#sysinfo");
+  el.replaceChildren(h("b", {}, s.hostname), ` · up ${fmtDur(s.uptime_ms / 1000)}`);
+  el.title = [`${s.hostname} · ${s.platform} · bun ${s.bun}`,
+    ts && ts.ips?.length ? `tailscale: ${ts.dns_name || ""} ${ts.ips.filter((ip) => !ip.includes(":")).join(", ")}${ts.state === "Running" ? "" : ` (${ts.state})`}` : ts ? `tailscale: ${ts.state}` : "tailscale: not installed",
+    addrs.length ? `lan: ${addrs.join(", ")}` : ""].filter(Boolean).join("\n");
 });
 
 /** An app's UI link as seen from this browser: {host} becomes the host the console was opened on (works over Tailscale too). */
@@ -295,6 +305,7 @@ function renderProcRows(tbody, procs) {
         ? h("button", { class: "small primary", title: "this session already has a terminal here", onclick: () => { selectConsoleRunId(p.run_id); switchTab("console"); loadConsole(); } }, "Open terminal")
         : p.session?.session_id && !p.child ? h("button", { class: "small", title: `${p.session.resume_cmd} — in a tmux session managed here`, onclick: () => takeOver(p) }, "Take over here") : "",
       !p.child ? remoteControlBtn(p.pid, p.session, p.drivable || Boolean(p.session?.tmux)) : "",
+      !p.child && !p.drivable ? chatBtn(p.session) : "",
       p.run_id && !p.child ? h("button", { class: "small", onclick: () => guard(async () => { const r = await post(`/runs/${p.run_id}/restart`); toast(`restarted as run #${r.id}`, true); refresh(); })() }, "Restart") : "",
       h("button", { class: "small danger", onclick: () => confirmDo(`Stop pid ${p.pid} (${p.type})?`, async () => { await del(`/processes/${p.pid}`); toast("SIGTERM sent", true); refresh(); }) }, "Stop"),
       h("button", { class: "small danger", title: "SIGKILL", onclick: () => confirmDo(`Force kill pid ${p.pid}?`, async () => { await del(`/processes/${p.pid}?force=1`); toast("SIGKILL sent", true); refresh(); }) }, "Kill"),
@@ -370,29 +381,38 @@ function openStartDialog({ kind, type } = {}) {
   $("#start-title").textContent = type ? `Start ${type}` : kind === "agent" ? "New session" : "Start a process";
   $(".more", sf).open = false;
   $("#start-feedback").hidden = true;
+  // Sessions can run in an E2B sandbox, with a live terminal there.
+  const sandboxes = targets;
+  sf.target.replaceChildren(h("option", { value: "" }, "This machine"), ...sandboxes.map((t) => h("option", { value: t.name }, `${t.name} (${targetKindLabel(t)})`)));
+  sf.target.value = "";
+  $("#start-target-label").hidden = !sandboxes.length || kind === "app";
   applyStartType();
   dlg.showModal();
   (sf.cwd.value ? sf.prompt : sf.cwd).focus();
   // Prefill the folder with the one most recently used, so a test start is a single click.
   if (!sf.cwd.value) get("/paths?limit=1").then(({ paths }) => { if (dlg.open && !sf.cwd.value && paths?.[0]) sf.cwd.value = paths[0].path; }).catch(() => {});
 }
-/** Agents always start interactive (when tmux is here); apps run headless. The server applies the same default. */
-const startsInteractive = (t) => t?.kind === "agent" && Boolean(systemInfo?.tmux);
+/** Agents always start interactive (when tmux is here, or in a sandbox); apps run headless. The server applies the same default. */
+const startsInteractive = (t) => t?.kind === "agent" && (Boolean(sf.target.value) || Boolean(systemInfo?.tmux));
 function applyStartType() {
   const t = typeByName(sf.type.value);
   const interactive = startsInteractive(t);
+  $("#start-target-hint").textContent = sf.target.value
+    ? "A live terminal in its own sandbox. The agent works in the sandbox's folder; the folder above is where its conversation is filed here, for Resume."
+    : "";
   const needsPrompt = t && (t.args.some((a) => a.includes("{prompt}")) || t.command.includes("{prompt}")) && !interactive;
   sf.prompt.required = Boolean(needsPrompt);
   $("#prompt-label").hidden = t && !needsPrompt && t.kind === "app";
   sf.prompt.placeholder = interactive ? "Optional first message" : "What should it do?";
   sf.cwd.value = t?.default_cwd || sf.cwd.value;
   sf.cwd.placeholder = t?.default_cwd ? t.default_cwd : "start typing to search";
-  sf.extra_args.placeholder = t?.name === "claude" ? "--permission-mode acceptEdits" : t?.name === "codex" ? "--full-auto" : "";
+  sf.extra_args.placeholder = t?.name === "claude" ? "--permission-mode acceptEdits" : t?.name === "codex" ? "--sandbox workspace-write" : "";
 }
 sf.type.onchange = applyStartType;
+sf.target.onchange = applyStartType;
 $("#start-cancel").onclick = () => dlg.close();
 function startFormBody() {
-  return { type: sf.type.value, cwd: sf.cwd.value.trim(), prompt: sf.prompt.value, extra_args: sf.extra_args.value, timeout_sec: Number(sf.timeout_sec.value || 0), interactive: startsInteractive(typeByName(sf.type.value)) };
+  return { type: sf.type.value, cwd: sf.cwd.value.trim(), prompt: sf.prompt.value, extra_args: sf.extra_args.value, timeout_sec: Number(sf.timeout_sec.value || 0), interactive: startsInteractive(typeByName(sf.type.value)), target: sf.target.value || undefined };
 }
 $("#preview-btn").onclick = guard(async () => {
   if (!sf.reportValidity()) return;
@@ -486,8 +506,8 @@ function openRunOrSession(r) {
 }
 const runWorkflowNow = (w) => guard(async () => {
   const r = await post(`/workflows/${w.id}/run`);
-  toast(`started ${w.name} (run #${r.id})`, true);
-  if (r.meta?.interactive) { selectConsoleRunId(r.id); switchTab("console"); } else loadWorkflows();
+  toast(`started ${w.name} (run #${r.id})${r.meta?.target ? ` on ${r.meta.target}` : ""}`, true);
+  if (r.meta?.interactive) { selectConsoleRunId(r.id); switchTab("console"); } else if (r.meta?.target) openRun(r.id); else loadWorkflows();
 })();
 
 const loadWorkflows = guard(async () => {
@@ -499,7 +519,7 @@ const loadWorkflows = guard(async () => {
   $("#wf-table tbody").replaceChildren(...workflows.map((w) => h("tr", {},
     h("td", { class: "full" },
       h("button", { class: "wf-name", onclick: () => editWorkflow(w) }, w.name),
-      h("div", { class: "muted wf-sub", title: w.prompt || "" }, `${w.type_name} · ${shortCwd(w.cwd)}`, w.prompt ? ` · ${w.prompt.split("\n")[0]}` : "")),
+      h("div", { class: "muted wf-sub", title: w.prompt || "" }, w.target ? h("span", { class: "pill" }, `☁ ${w.target}`) : "", w.target ? " " : "", `${w.type_name}${w.target ? "" : ` · ${shortCwd(w.cwd)}`}`, w.prompt ? ` · ${w.prompt.split("\n")[0]}` : "")),
     h("td", { "data-l": "schedule", title: w.schedule ? `${w.schedule}\nnext: ${fmtTime(w.next_run_at)}` : "" },
       w.schedule ? h("span", {}, presetLabel(w.schedule), h("div", { class: "muted wf-sub" }, w.enabled ? `next ${fmtRel(w.next_run_at)}` : "paused")) : h("span", { class: "muted" }, "Manual")),
     h("td", { "data-l": "last" }, w.last_run ? runLink(w.last_run, [badge(w.last_run.status), ` ${fmtRel(w.last_run.started_at)}`]) : h("span", { class: "muted" }, "never")),
@@ -534,10 +554,13 @@ function openWorkflowDialog(w) {
     wf.elements.namedItem("name").value = w.name; wf.type.value = w.type_name; wf.cwd.value = w.cwd; wf.prompt.value = w.prompt;
     wf.extra_args.value = quoteArgs(w.extra_args); wf.env.value = envText(w.env);
     wf.timeout_sec.value = w.timeout_sec; wf.enabled.checked = w.enabled; wf.allow_overlap.checked = w.allow_overlap;
+    fillTargetSelect(w.target);
     $(".more", wf).open = Boolean(w.extra_args.length || Object.keys(w.env || {}).length || w.timeout_sec || w.allow_overlap);
   } else {
     wf.type.value = typeByName("claude") ? "claude" : wf.type.options[0]?.value;
+    fillTargetSelect("");
   }
+  syncTarget();
   setSchedule(w?.schedule ?? "");
   // The delete button only makes sense on an existing workflow.
   $("#wf-delete")?.remove();
@@ -546,12 +569,28 @@ function openWorkflowDialog(w) {
   wf.elements.namedItem("name").focus();
 }
 const editWorkflow = (w) => openWorkflowDialog(w);
+function fillTargetSelect(cur) {
+  wf.target.replaceChildren(h("option", { value: "" }, "This machine"), ...targets.map((t) => h("option", { value: t.name }, `${t.name} (${targetKindLabel(t)})`)));
+  if (cur && !targets.some((t) => t.name === cur)) wf.target.append(h("option", { value: cur }, `${cur} (missing)`));
+  wf.target.value = cur || "";
+}
+/** On a target the agent works in the target's folder, and the folder here is where its conversation is filed to resume. */
+const targetKindLabel = (t) => `E2B sandbox, ${t.config.template}`;
+function syncTarget() {
+  const remote = Boolean(wf.target.value);
+  $("#wf-cwd-label").firstChild.textContent = remote ? "Folder here (to resume the conversation in) " : "Folder ";
+  wf.cwd.placeholder = remote ? "optional: the local checkout of the same repo" : "blank = the type's default folder";
+  $("#wf-hint").textContent = remote
+    ? "Each run gets its own E2B sandbox. With the target's idle_sec and idle_action \"stop\" it is a live session you can open and type into; otherwise it runs headless. Claude's conversation and the sandbox's out/ folder come back at the end."
+    : "Each run opens as a live session you can watch and type into. Claude runs close once the agent is done and idle.";
+}
+wf.target.onchange = syncTarget;
 $("#wf-new-btn").onclick = () => openWorkflowDialog(null);
 $("#wf-cancel").onclick = () => wdlg.close();
 async function saveWorkflow() {
   if (!wf.reportValidity()) return null;
   $("#wf-feedback").hidden = true;
-  const body = { name: wf.elements.namedItem("name").value.trim(), type: wf.type.value, cwd: wf.cwd.value.trim(), prompt: wf.prompt.value, extra_args: wf.extra_args.value, env: parseEnv(wf.env.value), schedule: wf.schedule.value.trim(), timeout_sec: Number(wf.timeout_sec.value || 0), enabled: wf.enabled.checked, allow_overlap: wf.allow_overlap.checked };
+  const body = { name: wf.elements.namedItem("name").value.trim(), type: wf.type.value, cwd: wf.cwd.value.trim(), prompt: wf.prompt.value, target: wf.target.value, extra_args: wf.extra_args.value, env: parseEnv(wf.env.value), schedule: wf.schedule.value.trim(), timeout_sec: Number(wf.timeout_sec.value || 0), enabled: wf.enabled.checked, allow_overlap: wf.allow_overlap.checked };
   const id = wf.elements.namedItem("id").value;
   try { return id ? await put(`/workflows/${id}`, body) : await post("/workflows", body); }
   catch (e) { $("#wf-feedback").textContent = e.message; $("#wf-feedback").hidden = false; return null; }
@@ -611,11 +650,72 @@ const themePref = () => { try { return localStorage.getItem("ac_theme") || "syst
 const systemLight = matchMedia("(prefers-color-scheme: light)");
 function applyTheme(pref = themePref()) {
   document.documentElement.dataset.theme = pref === "system" ? (systemLight.matches ? "wave-light" : "wave") : pref;
-  const meta = $('meta[name="theme-color"]'); if (meta) meta.content = getComputedStyle(document.documentElement).getPropertyValue("--sidebar").trim();
-  if (liveTerm) { liveTerm.term.options.theme = termTheme(); if (liveTerm.hist) liveTerm.hist.term.options.theme = termTheme(); }
+  const meta = $('meta[name="theme-color"]'); if (meta) meta.content = getComputedStyle(document.documentElement).getPropertyValue("--bg").trim();
+  if (liveTerm) { liveTerm.term.options.theme = termTheme(); if (liveTerm.hist) liveTerm.hist.body.style.setProperty("--hist-bg", termTheme().background); }
 }
 systemLight.addEventListener("change", () => themePref() === "system" && applyTheme());
+// ---------------------------------------------------------------- run targets (Settings)
+const loadTargets = guard(async () => {
+  const r = await get("/targets");
+  targets = r.targets;
+  $("#target-table tbody").replaceChildren(...targets.map((t) => h("tr", {},
+    h("td", { class: "full" }, h("b", {}, t.name), h("div", { class: "muted wf-sub" }, "E2B sandbox")),
+    h("td", { "data-l": "when idle" }, t.config.idle_sec ? `${t.config.idle_sec}s → ${t.config.idle_action}` : h("span", { class: "muted" }, "never")),
+    h("td", { class: "mono trunc", "data-l": "template", title: t.config.template }, t.config.template, t.config.repo ? h("div", { class: "muted wf-sub", title: t.config.repo }, `+ ${t.config.repo}`) : ""),
+    h("td", { "data-l": "used by" }, t.workflows ? `${t.workflows} workflow${t.workflows === 1 ? "" : "s"}` : h("span", { class: "muted" }, "–")),
+    h("td", { class: "row" },
+      h("button", { class: "small", onclick: () => checkTarget(t.name) }, "Check"),
+      h("button", { class: "small", onclick: () => openTargetDialog(t) }, "Edit"),
+      h("button", { class: "small danger", onclick: () => confirmDo(`Delete target "${t.name}"?`, async () => { await del(`/targets/${encodeURIComponent(t.name)}`); toast("deleted", true); loadTargets(); }) }, "Delete"),
+    ),
+  )));
+  if (!targets.length) $("#target-table tbody").replaceChildren(h("tr", {}, h("td", { colspan: 5, class: "muted empty" }, r.e2b_key ? "No targets yet. Sessions and workflows run on this machine." : "No targets yet. E2B targets need E2B_API_KEY in lofiwave's environment.")));
+});
+const checkTarget = (name) => guard(async () => {
+  const c = await post(`/targets/${encodeURIComponent(name)}/check`);
+  toast(c.ok ? `${name}: ok (E2B key works, ${c.running} sandbox(es) running)` : `${name}: ${c.error}`, c.ok);
+})();
+const tdlg = $("#target-dialog"), tf = $("#target-form");
+const linesOf = (map) => Object.entries(map || {}).map(([k, v]) => `${k}=${v}`).join("\n");
+const TARGET_FIELDS = ["template", "repo", "permission_mode", "idle_sec", "idle_action", "workdir", "timeout_sec", "on_exit"];
+function openTargetDialog(t) {
+  tf.reset(); $("#target-feedback").hidden = true;
+  tf.orig.value = t?.name ?? "";
+  tf.elements.namedItem("name").value = t?.name ?? ""; tf.elements.namedItem("name").disabled = Boolean(t);
+  $("#target-title").textContent = t ? `Edit ${t.name}` : "New E2B target";
+  for (const k of TARGET_FIELDS) if (t) tf.elements.namedItem(k).value = t.config[k] ?? "";
+  if (t && !t.config.idle_sec) tf.idle_sec.value = "";
+  tf.env.value = linesOf(t?.config.env); tf.env_from.value = linesOf(t?.config.env_from);
+  $(".more", tf).open = false;
+  tdlg.showModal();
+  (t ? tf.template : tf.elements.namedItem("name")).focus();
+}
+async function saveTarget() {
+  if (!tf.reportValidity()) return null;
+  $("#target-feedback").hidden = true;
+  const config = {};
+  for (const k of TARGET_FIELDS) { const v = tf.elements.namedItem(k).value.trim(); if (v !== "" || k === "repo" || k === "permission_mode") config[k] = /_sec$/.test(k) ? Number(v) : v; }
+  if (!tf.idle_sec.value.trim()) config.idle_sec = 0;
+  config.env = parseEnv(tf.env.value);
+  if (tf.env_from.value.trim()) config.env_from = parseEnv(tf.env_from.value);
+  const orig = tf.orig.value;
+  try { return orig ? await put(`/targets/${encodeURIComponent(orig)}`, { config }) : await post("/targets", { name: tf.elements.namedItem("name").value.trim(), kind: "e2b", config }); }
+  catch (e) { $("#target-feedback").textContent = e.message; $("#target-feedback").hidden = false; return null; }
+}
+$("#target-new-btn").onclick = () => openTargetDialog(null);
+$("#target-cancel").onclick = () => tdlg.close();
+tf.addEventListener("submit", async (e) => { e.preventDefault(); const t = await saveTarget(); if (t) { toast("saved", true); tdlg.close(); loadTargets(); } });
+$("#target-check").onclick = async () => {
+  const t = await saveTarget();
+  if (!t) return;
+  tf.orig.value = t.name; tf.elements.namedItem("name").disabled = true; loadTargets();
+  const c = await post(`/targets/${encodeURIComponent(t.name)}/check`).catch((e) => ({ ok: false, error: e.message }));
+  if (c.ok) { toast(`${t.name}: ok (E2B key works, ${c.running} sandbox(es) running)`, true); tdlg.close(); }
+  else { $("#target-feedback").textContent = `Saved, but the check failed: ${c.error}`; $("#target-feedback").hidden = false; }
+};
+
 function renderSettings() {
+  loadTargets();
   const pref = themePref();
   $("#theme-picker").replaceChildren(...THEMES.map((t) => h("button", { class: "theme", role: "radio", "aria-checked": String(pref === t.id), onclick: () => { try { localStorage.setItem("ac_theme", t.id); } catch {} applyTheme(t.id); renderSettings(); } },
     h("span", { class: "theme-swatch", "aria-hidden": "true" }, ...t.swatch.map((c) => h("span", { style: `background:${c}` }))),
@@ -626,12 +726,16 @@ function renderSettings() {
 // ---------------------------------------------------------------- runs
 const loadRuns = guard(async () => {
   const q = new URLSearchParams({ limit: 100 });
-  for (const [k, id] of [["status", "#runs-status"], ["type", "#runs-type"], ["workflow_id", "#runs-workflow"]]) if ($(id).value) q.set(k, $(id).value);
-  const { runs, total } = await get(`/runs?${q}`);
+  for (const [k, id] of [["status", "#runs-status"], ["type", "#runs-type"], ["workflow_id", "#runs-workflow"], ["group", "#runs-group"]]) if ($(id).value) q.set(k, $(id).value);
+  const [{ runs, total }, groups] = await Promise.all([get(`/runs?${q}`), get("/groups")]);
+  const rg = $("#runs-group"); const cur = rg.value;
+  rg.replaceChildren(h("option", { value: "" }, "All groups"), ...groups.map((g) => h("option", { value: g.group }, `${g.group} (${g.total})`)));
+  if (cur && !groups.some((g) => g.group === cur)) rg.append(h("option", { value: cur }, cur));
+  rg.value = cur; rg.hidden = !groups.length && !cur;
   $("#runs-count").textContent = `${total} run${total === 1 ? "" : "s"}`;
   $("#runs-table tbody").replaceChildren(...runs.map((r) => h("tr", { class: `clickable ${selectedRun?.id === r.id ? "selected" : ""}`, tabindex: "0", "aria-label": `Open run ${r.id}, ${r.workflow_name || r.type_name}, ${r.status}`, onkeydown: (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openRun(r.id); } }, onclick: () => openRun(r.id) },
     h("td", { class: "mono" }, "#", r.id),
-    h("td", { class: "full" }, r.workflow_name ? h("b", {}, r.workflow_name) : h("span", { class: "muted" }, "ad-hoc"), h("div", { class: "muted", style: "font-size:12px" }, `${r.type_name} · ${shortCwd(r.cwd)}`)),
+    h("td", { class: "full" }, r.workflow_name ? h("b", {}, r.workflow_name) : h("span", { class: "muted" }, "ad-hoc"), h("div", { class: "muted", style: "font-size:12px" }, groupTag(r), `${r.type_name} · ${shortCwd(r.cwd)}`)),
     h("td", { "data-l": "trigger" }, r.trigger, r.meta?.started_by ? h("div", { class: "by", style: "font-size:12px" }, r.meta.started_by) : ""),
     h("td", { class: "status" }, badge(r.status)),
     h("td", { "data-l": "started", title: new Date(r.started_at).toLocaleString() }, fmtRel(r.started_at)),
@@ -640,7 +744,7 @@ const loadRuns = guard(async () => {
   )));
   if (!runs.length) $("#runs-table tbody").replaceChildren(h("tr", {}, h("td", { colspan: 7, class: "muted" }, "No runs match.")));
 });
-["#runs-status", "#runs-type", "#runs-workflow"].forEach((id) => ($(id).onchange = loadRuns));
+["#runs-status", "#runs-type", "#runs-workflow", "#runs-group"].forEach((id) => ($(id).onchange = loadRuns));
 
 async function openRun(id) {
   switchTab("runs", false);
@@ -669,10 +773,14 @@ const refreshRunDetail = guard(async (full = false) => {
         h("summary", { class: "muted" }, `${r.type_name} · ${shortCwd(r.cwd)} · ${r.trigger} · ${fmtRel(r.started_at)}${r.meta?.remote_url ? " · " : ""}`, r.meta?.remote_url ? h("a", { href: r.meta.remote_url, target: "_blank", onclick: (e) => e.stopPropagation() }, "open on web ↗") : ""),
       h("dl", {},
         h("dt", {}, "type"), h("dd", {}, r.type_name),
+        r.meta?.target ? h("dt", {}, "target") : "", r.meta?.target ? h("dd", {}, `${r.meta.target} (E2B)`, r.meta.e2b?.sandbox_id ? h("span", { class: "muted" }, `  sandbox ${r.meta.e2b.sandbox_id}${r.meta.e2b.paused ? " (paused while idle)" : ""}${r.meta.e2b.out_files ? ` · ${r.meta.e2b.out_files} file(s) from out/ in ${r.meta.e2b.out_dir}` : ""}`) : h("span", { class: "muted" }, "  (starting the sandbox…)")) : "",
         h("dt", {}, "cwd"), h("dd", {}, r.cwd),
         h("dt", {}, "command"), h("dd", {}, quoteArgs([r.command, ...r.args])),
         r.prompt ? h("dt", {}, "prompt") : "", r.prompt ? h("dd", { style: "white-space:pre-wrap" }, r.prompt) : "",
         h("dt", {}, "trigger"), h("dd", {}, r.trigger, r.meta?.started_by ? ` by ${r.meta.started_by}` : ""),
+        r.group || r.parent_run ? h("dt", {}, "group") : "",
+        r.group || r.parent_run ? h("dd", {}, groupTag(r), r.parent_run ? h("a", { class: "link", href: `#runs/${r.parent_run}`, onclick: (e) => { e.preventDefault(); openRun(r.parent_run); } }, `started by run #${r.parent_run}`) : "") : "",
+        r.out_dir ? h("dt", {}, "results") : "", r.out_dir ? h("dd", { class: "mono" }, r.out_dir, h("span", { class: "muted" }, "  (GET /api/runs/", String(r.id), "/results)")) : "",
         h("dt", {}, "pid"), h("dd", {}, r.pid ?? "–", r.meta?.orphan ? " (started by a previous console instance)" : ""),
         r.meta?.remote_url ? h("dt", {}, "remote") : "", r.meta?.remote_url ? h("dd", {}, h("a", { href: r.meta.remote_url, target: "_blank" }, r.meta.remote_url), h("span", { class: "muted" }, "  (same session in the Claude app)")) : "",
         r.meta?.tmux ? h("dt", {}, "terminal") : "", r.meta?.tmux ? h("dd", {}, `tmux attach -t ${r.meta.tmux}`, r.status === "running" ? h("span", { class: "muted" }, "  (live screen below)") : h("span", { class: "muted" }, "  (ended; screen saved in the log)")) : "",
@@ -755,7 +863,12 @@ function sessionsBlock(r) {
         ),
         h("span", { class: "row", style: "gap:6px;flex-wrap:wrap" },
           s.web_url ? h("a", { href: s.web_url, target: "_blank" }, h("button", { class: "small" }, "Open on web")) : "",
-          !live ? h("button", { class: "small primary", title: `${s.resume_cmd} — in a tmux session here, with the type's resume args (claude: --remote-control)`, onclick: () => guard(async () => { const n = await post(`/runs/${r.id}/sessions/${encodeURIComponent(s.session_id)}/resume`); toast(`resumed as run #${n.id}`, true); openRun(n.id); })() }, "Resume here") : "",
+          !live ? h("button", { class: "small primary", title: `${s.resume_cmd} — in a tmux session here, with the type's resume args (claude: --remote-control)`, onclick: () => {
+            const go = guard(async () => { const n = await post(`/runs/${r.id}/sessions/${encodeURIComponent(s.session_id)}/resume`); toast(`resumed as run #${n.id}`, true); openRun(n.id); });
+            // The conversation came back from the sandbox; the files it changed did not (only out/ does).
+            if (s.source === "e2b") confirmDo(`This conversation ran in a sandbox on ${r.meta?.target || "a target"}. It continues here in ${s.cwd}, but files the agent changed there are gone unless it pushed them or left them in out/: pull or check out its branch first.\n\nResume it?`, go);
+            else go();
+          } }, "Resume here") : "",
           h("button", { class: "small", title: s.resume_cmd, onclick: () => navigator.clipboard?.writeText(s.resume_cmd).then(() => toast("copied: " + s.resume_cmd, true)) }, "Copy resume"),
           s.transcript_path ? h("a", { href: `/api/runs/${r.id}/sessions/${encodeURIComponent(s.session_id)}/transcript${tokenQ}`, target: "_blank" }, h("button", { class: "small" }, "Transcript")) : "",
         ),
@@ -799,7 +912,11 @@ function openSessionLink(id) {
 
 const loadConsole = guard(async () => {
   consoleData = await get("/console");
+  consoleData.live = pinnedFirst(consoleData.live);
+  consoleData.ended = pinnedFirst(consoleData.ended);
   const { live, ended } = consoleData;
+  noteMeter(live);
+  $("#drawer-btn").classList.toggle("alert", live.some((r) => actOf(r) === "waiting_input"));
   if (linkedRun) {
     const id = linkedRun; linkedRun = null;
     if (live.some((r) => r.id === id)) setConsoleView("live", false);
@@ -815,8 +932,12 @@ const loadConsole = guard(async () => {
   renderRail();
   renderPane();
 });
+/** On the other pages only the session list needs the console's data: refresh it while the list is open. */
+const drawerShown = () => document.body.classList.contains("drawer-open");
 
 function selectConsoleRun(run) {
+  drawerPicked();
+  if (activeTab !== "console") { consoleRun = run; paneSig = ""; localStorage.setItem("ac_console_run", String(run.id)); return switchTab("console"); }
   if (run.id === consoleRun?.id) return;
   consoleRun = run; paneSig = "";
   localStorage.setItem("ac_console_run", String(run.id));
@@ -832,6 +953,8 @@ function setConsoleView(view, render = true) {
   if (render) { syncConsoleHash(); renderRail(); renderPane(); }
 }
 function selectEndedRun(run) {
+  drawerPicked();
+  if (activeTab !== "console") { endedRun = run; railSig = paneSig = ""; return switchTab("console"); }
   if (run.id === endedRun?.id) return;
   endedRun = run; railSig = "";
   syncConsoleHash(); renderRail(); renderPane();
@@ -842,30 +965,69 @@ function railTabs() {
   const tab = (view, label, n) => h("button", { role: "tab", class: consoleView === view ? "active" : "", "aria-selected": String(consoleView === view), onclick: () => setConsoleView(view) }, `${label} ${n}`);
   return h("div", { class: "subnav rail-tabs", role: "tablist", "aria-label": "Sessions" }, tab("live", "Live", consoleData.live.length), tab("ended", "Ended", consoleData.ended.length));
 }
+/** The drawer's top row: close, Live / Ended, and Resume. */
+const railBar = () => h("div", { class: "rail-bar" },
+  h("button", { class: "drawer-x", "aria-label": "Close the session list", onclick: () => setDrawer(false) }, "×"),
+  railTabs(),
+  h("button", { class: "small rail-resume", title: "Reopen a claude or codex session from its id", onclick: openResumeDialog }, "Resume"));
+
+// ---------------------------------------------------------------- the session drawer
+// The session list opens from the left with ☰. On a wide screen it docks beside the session and stays open while you
+// work (remembered per browser, open the first time); on a phone it slides over the session and closes when you pick
+// one, tap outside or press Esc.
+const docked = matchMedia("(min-width: 900px)");
+const dockedPref = () => { try { return localStorage.getItem("ac_drawer") !== "0"; } catch { return true; } };
+function setDrawer(open, remember = true) {
+  document.body.classList.toggle("drawer-open", open);
+  $("#drawer-btn").setAttribute("aria-expanded", String(open));
+  $("#drawer-backdrop").hidden = !open || docked.matches;
+  if (docked.matches) { if (remember) try { localStorage.setItem("ac_drawer", open ? "1" : "0"); } catch {} }
+  else if (open) ($("#session-rail .rail-item.active") || $("#session-rail .tile-new") || $("#session-rail button"))?.focus({ preventScroll: true });
+}
+/** After picking something in the list: a docked list stays, one over the session gets out of the way. */
+const drawerPicked = () => { if (!docked.matches) setDrawer(false); };
+$("#drawer-btn").onclick = () => { const open = !drawerShown(); setDrawer(open); if (open && activeTab !== "console") loadConsole(); };
+$("#drawer-backdrop").onclick = () => setDrawer(false);
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !docked.matches && document.body.classList.contains("drawer-open") && !$("dialog[open]")) { setDrawer(false); $("#drawer-btn").focus(); } });
+docked.addEventListener("change", () => setDrawer(docked.matches && dockedPref(), false));
+setDrawer(docked.matches && dockedPref(), false);
+
+/** Pinned runs first, in the order they were pinned; the rest keep the server's order (newest first). */
+const pinnedFirst = (runs) => [...runs.filter((r) => r.pinned_at).sort((a, b) => a.pinned_at - b.pinned_at), ...runs.filter((r) => !r.pinned_at)];
+const setPinned = (r, pinned) => guard(async () => {
+  await post(`/runs/${r.id}/pin`, { pinned });
+  railSig = "";
+  await loadConsole();
+})();
+/** A rail card with its pin toggle beside it (a button can't hold another button). */
+function pinnable(r, card) {
+  const on = Boolean(r.pinned_at);
+  return h("div", { class: `rail-slot ${on ? "pinned" : ""}` }, card,
+    h("button", { class: "rail-pin", title: on ? "Unpin" : "Pin to the top", "aria-label": `${on ? "Unpin" : "Pin"} ${runLabel(r)}`, "aria-pressed": String(on), onclick: () => setPinned(r, !on) }));
+}
+/** With anything pinned, the list reads "Pinned", then the rest under `rest`; with nothing pinned, no headings. */
+function pinGroups(runs, rest, item) {
+  const pinned = runs.filter((r) => r.pinned_at), others = runs.filter((r) => !r.pinned_at);
+  if (!pinned.length) return runs.map(item);
+  return [h("div", { class: "rail-head" }, h("span", {}, "Pinned")), ...pinned.map(item),
+    others.length ? h("div", { class: "rail-head" }, h("span", {}, rest)) : "", ...others.map(item)];
+}
 
 function renderRail() {
   const { live, headless, adoptable, ended } = consoleData;
-  const sig = JSON.stringify([consoleView, live.map((r) => [r.id, runLabel(r)]), headless.map((r) => [r.id, runLabel(r)]), adoptable.map((p) => [p.pid, p.session?.session_id || "", p.session?.web_url || ""]), ended.map((r) => [r.id, runLabel(r)]), endedRun?.id]);
+  const sig = JSON.stringify([consoleView, live.map((r) => [r.id, runLabel(r), r.pinned_at]), headless.map((r) => [r.id, runLabel(r)]), adoptable.map((p) => [p.pid, p.session?.session_id || "", p.session?.web_url || "", p.live_run]), ended.map((r) => [r.id, runLabel(r), r.pinned_at]), endedRun?.id]);
   if (sig === railSig) return patchRail();
   railSig = sig;
-  if (consoleView === "ended") return $("#session-rail").replaceChildren(railTabs(), ...endedRail());
-  $("#session-rail").replaceChildren(
-    railTabs(),
-    h("div", { class: "rail-head" },
-      h("span", {}, live.length ? `${live.length} live session${live.length === 1 ? "" : "s"}` : "No live sessions"),
-      h("span", { class: "row" },
-        h("button", { class: "small", title: "Reopen a claude or codex session from its id", onclick: openResumeDialog }, "Resume"),
-        h("button", { class: "small primary", onclick: () => openStartDialog({ kind: "agent" }) }, "+ New"),
-      ),
-    ),
-    ...live.map((r) => {
-      const s = sessOf(r);
-      return h("button", { class: `rail-item ${consoleRun?.id === r.id ? "active" : ""}`, "data-run": r.id, "aria-current": consoleRun?.id === r.id ? "true" : "false", onclick: () => selectConsoleRun(r) },
-        h("div", { class: "rail-title" }, h("span", { class: `dot ${s?.status || ""}`, title: s?.status || "" }), runLabel(r)),
-        h("div", { class: "rail-sub" }, r.workflow_name ? h("span", { class: "wf-tag" }, `⌁ ${r.workflow_name}`) : "", `${r.type_name} · ${shortCwd(r.cwd)}${byWho(r)}`),
-        h("div", { class: "rail-sub dim rail-up" }, railUp(r)),
-      );
-    }),
+  if (consoleView === "ended") return $("#session-rail").replaceChildren(railBar(), h("div", { class: "rail-strip" }, ...endedRail()));
+  $("#session-rail").replaceChildren(railBar(), h("div", { class: "rail-strip" },
+    ...pinGroups(live, "Live", (r) => pinnable(r, h("button", { class: `rail-item tile ${consoleRun?.id === r.id ? "active" : ""} ${actOf(r) === "waiting_input" ? "needs" : ""}`, "data-run": r.id, "aria-current": consoleRun?.id === r.id ? "true" : "false", onclick: () => selectConsoleRun(r) },
+      h("div", { class: `tile-act ${actOf(r)}` }, h("span", { class: `dot ${actOf(r)}` }), h("span", { class: "tile-act-text" }, tileAct(r))),
+      h("div", { class: "rail-title" }, runLabel(r)),
+      meter(r),
+      h("div", { class: "rail-sub" }, r.workflow_name ? h("span", { class: "wf-tag" }, `⌁ ${r.workflow_name}`) : "", groupTag(r), `${r.type_name} · ${shortCwd(r.cwd)}`),
+      h("div", { class: "rail-sub dim rail-up" }, railUp(r)),
+    ))),
+    h("button", { class: "tile-new", onclick: () => { drawerPicked(); openStartDialog({ kind: "agent" }); } }, h("span", { "aria-hidden": "true" }, "+"), "Start a session"),
     headless.length ? h("div", { class: "rail-head" }, h("span", {}, `${headless.length} running · log only`)) : "",
     ...headless.map((r) => h("a", { class: "rail-item flat", href: `#runs/${r.id}`, onclick: (e) => { e.preventDefault(); openRun(r.id); } },
       h("div", { class: "rail-title" }, runLabel(r)),
@@ -876,25 +1038,29 @@ function renderRail() {
       h("div", { class: "rail-title" }, h("span", { class: `dot ${p.session?.status || ""}`, title: p.session?.status || "" }), p.session?.title || p.session?.name || `${p.type} · pid ${p.pid}`),
       h("div", { class: "rail-sub" }, `${p.type} · ${shortCwd(p.cwd) || "?"}`),
       h("div", { class: "rail-sub dim" }, `pid ${p.pid} · ${originOf(p)}`, p.session?.web_url ? h("a", { href: p.session.web_url, target: "_blank", style: "margin-left:8px" }, "web ↗") : ""),
-      p.session?.session_id
+      p.live_run
         ? h("div", { class: "row", style: "gap:6px" },
-            h("button", { class: "small", title: "reopen this session in a tmux pane here, so it can be driven from the browser", onclick: () => takeOver(p) }, "Take over here"),
+            h("button", { class: "small primary", title: "this conversation is already open here; this process is a second copy of it", onclick: () => selectConsoleRunId(p.live_run) }, `Open run #${p.live_run}`),
+            h("button", { class: "small danger", onclick: () => confirmDo(`Stop pid ${p.pid}? The conversation stays open in run #${p.live_run}.`, async () => { await del(`/processes/${p.pid}`); toast("SIGTERM sent", true); loadConsole(); }) }, "Stop this copy"))
+      : p.session?.session_id
+        ? h("div", { class: "row", style: "gap:6px" },
+            h("button", { class: "small", title: "stop it and reopen the conversation in a tmux pane here, so it can be driven from the browser", onclick: () => takeOver(p) }, "Take over here"),
+            chatBtn(p.session),
             remoteControlBtn(p.pid, p.session, Boolean(p.session.tmux)))
         : h("div", { class: "rail-sub dim" }, "no session id — can't take over"),
     )),
-  );
+  ));
 }
 
 function endedRail() {
   const { ended } = consoleData;
-  return [
-    h("div", { class: "rail-head" }, h("span", {}, ended.length ? `${ended.length} recently ended` : "Nothing ended yet")),
-    ...ended.map((r) => h("button", { class: `rail-item ${endedRun?.id === r.id ? "active" : ""}`, "aria-current": endedRun?.id === r.id ? "true" : "false", onclick: () => selectEndedRun(r) },
-      h("div", { class: "rail-title" }, runLabel(r)),
-      h("div", { class: "rail-sub" }, r.workflow_name ? h("span", { class: "wf-tag" }, `⌁ ${r.workflow_name}`) : "", `${r.type_name} · ${shortCwd(r.cwd)}${byWho(r)}`),
-      h("div", { class: "rail-sub dim" }, endedWhen(r)),
-    )),
-  ];
+  if (!ended.length) return [h("div", { class: "rail-head" }, h("span", {}, "Nothing ended yet"))];
+  return pinGroups(ended, "Ended", (r) => pinnable(r, h("button", { class: `rail-item tile ${endedRun?.id === r.id ? "active" : ""}`, "aria-current": endedRun?.id === r.id ? "true" : "false", onclick: () => selectEndedRun(r) },
+    h("div", { class: "tile-act" }, h("span", { class: "dot" }), h("span", {}, r.status && r.status !== "success" ? r.status : "ended")),
+    h("div", { class: "rail-title" }, runLabel(r)),
+    h("div", { class: "rail-sub" }, r.workflow_name ? h("span", { class: "wf-tag" }, `⌁ ${r.workflow_name}`) : "", groupTag(r), `${r.type_name} · ${shortCwd(r.cwd)}${byWho(r)}`),
+    h("div", { class: "rail-sub dim" }, endedWhen(r)),
+  )));
 }
 const endedWhen = (r) => `ended ${r.ended_at ? fmtRel(r.ended_at) : "?"}` + (r.ended_at ? ` · ran ${fmtDur((r.ended_at - r.started_at) / 1000)}` : "") + (r.status && r.status !== "success" ? ` · ${r.status}` : "");
 
@@ -902,6 +1068,7 @@ const endedWhen = (r) => `ended ${r.ended_at ? fmtRel(r.ended_at) : "?"}` + (r.e
 const turnBackOn = (r) => guard(async () => {
   const s = sessOf(r);
   const n = s?.session_id ? await post(`/runs/${r.id}/sessions/${encodeURIComponent(s.session_id)}/resume`) : await post(`/runs/${r.id}/restart`);
+  if (r.pinned_at) { await post(`/runs/${n.id}/pin`, { pinned: true }); await post(`/runs/${r.id}/pin`, { pinned: false }); }
   toast(`back on as run #${n.id}`, true);
   selectConsoleRunId(n.id);
   setConsoleView("live", false);
@@ -956,32 +1123,80 @@ function originOf(p) {
   return parent ? `${parent} · no terminal here` : "no terminal here";
 }
 
-const railUp = (r) => `up ${fmtDur((Date.now() - r.started_at) / 1000)}` + (sessOf(r)?.model ? ` · ${sessOf(r).model.replace(/^claude-/, "")}` : "");
-/** Keep the live bits fresh (working/idle, uptime) without touching the DOM structure. */
+/** What a live run is doing (working / idle / waiting_input), from the run itself, else its session's own status. */
+const actOf = (r) => r.activity || sessOf(r)?.status || "";
+const ACT_LABEL = { working: "working", idle: "idle", waiting_input: "needs you" };
+/** The tile's status line: "working · 4m". */
+const tileAct = (r) => (ACT_LABEL[actOf(r)] || "running") + (ACT_LABEL[r.activity] && r.activity_since ? ` · ${fmtDur((Date.now() - r.activity_since) / 1000)}` : "");
+// Who started it goes here, not after the folder, where a long path would cut it off.
+const railUp = (r) => `up ${fmtDur((Date.now() - r.started_at) / 1000)}${byWho(r)}` + (sessOf(r)?.model ? ` · ${sessOf(r).model.replace(/^claude-/, "")}` : "");
+
+// ---------------------------------------------------------------- activity meter
+// Each tile shows the last six minutes as twelve 30-second bars: how much of each one the run spent working (or
+// waiting on you). Sampled on every refresh, in this browser only; before the page loaded, a run's current state
+// is filled back to when it began (activity_since), and anything older is blank.
+const METER_BUCKET = 30_000, METER_BARS = 12;
+const meterLog = new Map(); // run id → Map(bucket → { n, working, waiting })
+function noteMeter(runs) {
+  const now = Math.floor(Date.now() / METER_BUCKET);
+  for (const id of meterLog.keys()) if (!runs.some((r) => r.id === id)) meterLog.delete(id);
+  for (const r of runs) {
+    const act = actOf(r);
+    const sample = () => ({ n: 1, working: act === "working" ? 1 : 0, waiting: act === "waiting_input" ? 1 : 0 });
+    let log = meterLog.get(r.id);
+    if (!log) {
+      log = new Map(); meterLog.set(r.id, log);
+      if (r.activity_since) for (let k = Math.max(Math.floor(r.activity_since / METER_BUCKET), now - METER_BARS + 1); k < now; k++) log.set(k, sample());
+    }
+    const e = log.get(now);
+    if (!e) log.set(now, sample());
+    else { e.n++; if (act === "working") e.working++; else if (act === "waiting_input") e.waiting++; }
+    for (const k of log.keys()) if (k <= now - METER_BARS) log.delete(k);
+  }
+}
+function meterBars(r) {
+  const now = Math.floor(Date.now() / METER_BUCKET), log = meterLog.get(r.id);
+  return Array.from({ length: METER_BARS }, (_, i) => {
+    const e = log?.get(now - METER_BARS + 1 + i);
+    if (!e) return { cls: "none", pct: 10 };
+    const w = e.working / e.n, q = e.waiting / e.n;
+    return { cls: q > w ? "wait" : w > 0 ? "work" : "idle", pct: Math.round(Math.max(0.14, w + q * 0.6) * 100) };
+  });
+}
+const meter = (r) => h("span", { class: "meter", "aria-hidden": "true" }, ...meterBars(r).map((b) => h("i", { class: b.cls, style: `height:${b.pct}%` })));
+
+/** Keep the live bits fresh (working/idle, uptime, meter) without touching the DOM structure. */
 function patchRail() {
   for (const r of consoleData.live) {
     const el = $(`#session-rail [data-run="${r.id}"]`);
     if (!el) continue;
     const selected = consoleRun?.id === r.id;
     el.classList.toggle("active", selected);
+    el.classList.toggle("needs", actOf(r) === "waiting_input");
     el.setAttribute("aria-current", selected ? "true" : "false");
+    const act = $(".tile-act", el);
+    if (act) act.className = `tile-act ${actOf(r)}`;
     const dot = $(".dot", el);
-    if (dot) { dot.className = `dot ${sessOf(r)?.status || ""}`; dot.title = sessOf(r)?.status || ""; }
+    if (dot) dot.className = `dot ${actOf(r)}`;
+    const text = $(".tile-act-text", el);
+    if (text) text.textContent = tileAct(r);
     const up = $(".rail-up", el);
     if (up) up.textContent = railUp(r);
+    const bars = $$(".meter i", el);
+    meterBars(r).forEach((b, i) => { if (bars[i]) { bars[i].className = b.cls; bars[i].style.height = `${b.pct}%`; } });
   }
 }
 
 /**
- * Reopen a session in a tmux pane we can type into. When the session is still running (every process in
- * these lists is), claude keeps the same session id, so the new process shares the original's transcript —
- * two agents writing one history. Worth a word before doing it.
+ * Reopen a session in a tmux pane we can type into. The process in these lists is still running, and a resume keeps
+ * its session id, so the server stops it first (replace_pid): two agents on one transcript interleave their histories.
  */
 function takeOver(p) {
   const label = p.session?.title || p.session?.name || `pid ${p.pid}`;
-  if (!confirm(`Take over "${label}"?\n\nThat session is still running, so this starts a SECOND ${p.type} on the same conversation — both write the same transcript and their histories interleave. Stop the original first if you don't want that.`)) return;
+  if (!confirm(`Take over "${label}"?\n\nThis stops the ${p.type} running now (pid ${p.pid}) and reopens the same conversation here. Anything it is doing right now is interrupted.`)) return;
   return guard(async () => {
-    const r = await post("/sessions/resume", { agent: p.session.agent, session_id: p.session.session_id, cwd: p.session.cwd || p.cwd });
+    toast("stopping the original and reopening here…", true);
+    const r = await post("/sessions/resume", { agent: p.session.agent, session_id: p.session.session_id, cwd: p.session.cwd || p.cwd, replace_pid: p.pid });
     toast(`taking over as run #${r.id}`, true);
     selectConsoleRunId(r.id);
     await loadConsole();
@@ -989,20 +1204,27 @@ function takeOver(p) {
 }
 
 /**
- * Turn Remote Control on for a claude session that is already running. In a tmux pane the console types /remote-control
- * into it; anywhere else there is nothing to type into, so the only way is to stop it and reopen the conversation here.
+ * Turn Remote Control on for a claude session that is already running. In a tmux pane (or, on a Mac, an iTerm or
+ * Terminal.app tab) the console types /remote-control into it; anywhere else there is nothing to type into, so the only
+ * way is to stop it and reopen the conversation here. The server says which (409); we only ask before the reopen.
  */
 function remoteControlBtn(pid, s, inPane) {
   if (!pid || s?.agent !== "claude" || s.web_url) return "";
-  const title = inPane ? "type /remote-control into its terminal, so it shows up in the Claude app" : "stop it and reopen the conversation here with Remote Control on";
+  const title = inPane ? "type /remote-control into its terminal, so it shows up in the Claude app" : "type /remote-control into its terminal if the console can reach it, else offer to reopen it here with Remote Control on";
   return h("button", { class: "small", title, onclick: () => enableRemote(pid, s, inPane) }, "Remote Control");
 }
 function enableRemote(pid, s, inPane) {
   const label = s.title || s.name || `pid ${pid}`;
-  if (!inPane && !confirm(`"${label}" is not in a terminal the console can type into.\n\nStop it and reopen the same conversation here, with Remote Control on? Anything it is doing right now is interrupted.`)) return;
   return guard(async () => {
-    toast(inPane ? "turning on Remote Control…" : "reopening with Remote Control…", true);
-    const r = await post(`/processes/${pid}/remote-control`, inPane ? {} : { replace: true });
+    toast("turning on Remote Control…", true);
+    let r;
+    try { r = await post(`/processes/${pid}/remote-control`, {}); }
+    catch (e) {
+      if (inPane || !/replace: true/.test(e.message)) throw e;
+      if (!confirm(`"${label}" is not in a terminal the console can type into.\n\nStop it and reopen the same conversation here, with Remote Control on? Anything it is doing right now is interrupted.`)) return;
+      toast("reopening with Remote Control…", true);
+      r = await post(`/processes/${pid}/remote-control`, { replace: true });
+    }
     if (r.run) { toast(`reopened as run #${r.run.id}`, true); selectConsoleRunId(r.run.id); switchTab("console"); loadConsole(); return; }
     toast(r.web_url ? "Remote Control is on — the session is in the Claude app" : "sent /remote-control; the web link appears once it connects", true);
     refresh();
@@ -1010,6 +1232,7 @@ function enableRemote(pid, s, inPane) {
 }
 
 function renderPane() {
+  if (activeTab !== "console") return; // the list shows on every page; the session only on Sessions
   if (consoleView === "ended") {
     closeTerm(); syncFull(false);
     const sig = `ended:${endedRun?.id ?? ""}`;
@@ -1020,10 +1243,13 @@ function renderPane() {
     return;
   }
   const r = consoleRun;
-  if (!r || !termMode()) { closeTerm(); syncFull(false); }
-  // Rebuild only when the run or its session changes: a rebuild would drop whatever is half-typed in the keys field,
-  // and idle/working flips constantly. Everything volatile is patched in place below.
-  const sig = r ? JSON.stringify([r.id, r.status, r.meta?.remote_url || "", sessOf(r)?.session_id || "", sessOf(r)?.web_url || ""]) : `empty:${consoleData.live.length}:${consoleData.adoptable.length}`;
+  const mode = paneMode(r);
+  if (!r || r.id !== liveTerm?.runId) closeTerm();
+  else if (mode !== "terminal") parkTerm();
+  if (!r || mode !== "chat" || liveChat?.runId !== r.id) closeChat();
+  if (mode !== "terminal") syncFull(false);
+  // Rebuild only when the run or its session changes: idle/working flips constantly. Everything volatile is patched in place below.
+  const sig = r ? JSON.stringify([r.id, r.status, mode, r.meta?.remote_url || "", sessOf(r)?.session_id || "", sessOf(r)?.web_url || ""]) : `empty:${consoleData.live.length}:${consoleData.adoptable.length}`;
   if (sig !== paneSig) {
     paneSig = sig;
     $("#session-pane").replaceChildren(...(r ? paneFor(r) : [emptyPane()]));
@@ -1033,38 +1259,37 @@ function renderPane() {
   const dot = $("#pane-dot"); if (dot) { dot.className = `dot ${s?.status || ""}`; dot.title = s?.status || ""; }
   const label = $("#pane-label"); if (label && label.textContent !== runLabel(r)) label.textContent = runLabel(r);
   const up = $("#pane-up"); if (up) up.textContent = `up ${fmtDur((Date.now() - r.started_at) / 1000)}`;
-  syncFull(termMode());
-  if (termMode()) openTerm(r.id);
-  else pollScreenInto($("#console-screen"), r.id, $("#console-follow")?.checked !== false);
+  syncFull(mode === "terminal");
+  if (mode === "terminal") openTerm(r.id);
+  else openChat(r.id);
 }
 
 function paneFor(r) {
   const s = sessOf(r);
+  const mode = paneMode(r);
   return [
     h("div", { class: "pane-head" },
       h("div", { class: "pane-id" },
         h("h2", {}, h("span", { id: "pane-dot", class: `dot ${s?.status || ""}`, title: s?.status || "" }), h("span", { id: "pane-label" }, runLabel(r))),
+        s?.model ? h("span", { class: "chip mono" }, s.model.replace(/^claude-/, "")) : "",
+        s?.web_url ? h("a", { class: "chip ok", href: s.web_url, target: "_blank", title: "open this session on claude.ai" }, "Remote Control ↗") : "",
         h("div", { class: "pane-meta muted" },
           `${r.type_name} · ${shortCwd(r.cwd)}${byWho(r)} · `, h("span", { id: "pane-up" }, `up ${fmtDur((Date.now() - r.started_at) / 1000)}`),
-          s?.model ? ` · ${s.model}` : "",
           s?.session_id ? h("code", { class: "mono", title: s.session_id }, shortId(s.session_id)) : "",
         ),
       ),
       h("div", { class: "row pane-actions" },
-        s?.web_url ? h("a", { href: s.web_url, target: "_blank" }, h("button", { class: "small" }, "Open on web ↗")) : remoteControlBtn(r.pid, s, true),
+        viewSwitch(r, mode),
+        mode === "terminal" ? h("button", { class: "small", id: "select-btn", title: "turn the mouse into a plain text selector: drag to select, it's copied when you let go; click again to give the mouse back to tmux", onclick: () => toggleSelect() }, selectLabel()) : "",
+        mode === "terminal" ? h("button", { class: "small", id: "full-btn", title: "hide the top bar and session list, terminal edge to edge (Ctrl+Shift+F)", onclick: () => toggleFull() }, fullLabel()) : "",
+        s?.web_url ? "" : remoteControlBtn(r.pid, s, true),
         h("button", { class: "small", title: "the full run record: command, env, log, sessions", onclick: () => openRun(r.id) }, "Details"),
         h("button", { class: "small danger", onclick: () => confirmDo(`Stop "${runLabel(r)}" (run #${r.id})?`, async () => { await post(`/runs/${r.id}/kill`); toast("stopped", true); consoleRun = null; railSig = paneSig = ""; loadConsole(); }) }, "Stop"),
-        termMode() ? h("button", { class: "small", id: "select-btn", title: "turn the mouse into a plain text selector: drag to select, it's copied when you let go; click again to give the mouse back to tmux", onclick: () => toggleSelect() }, selectLabel()) : "",
-        termMode() ? h("button", { class: "small", id: "full-btn", title: "hide the sidebar and session list, terminal edge to edge (Ctrl+Shift+F)", onclick: () => toggleFull() }, fullLabel()) : "",
-        h("button", { class: "small", title: termMode() ? "switch to the simple view: a polled screen and a text box (good on a phone or a flaky link)" : "switch to a real terminal in the browser", onclick: () => { setTermMode(!termMode()); paneSig = ""; renderPane(); } }, termMode() ? "Simple view" : "Terminal view"),
-        termMode() ? "" : h("label", { class: "muted follow" }, h("input", { type: "checkbox", id: "console-follow", checked: true }), " follow"),
       ),
     ),
-    ...(termMode()
-      ? [h("div", { id: "console-term", class: "term" }, h("span", { class: "term-status" }, "connecting…"))]
-      : [h("pre", { id: "console-screen", class: "screen" }, "connecting to the terminal…"), keysForm(r.id, () => pollScreenInto($("#console-screen"), r.id, true))]),
-    termMode() ? h("div", { class: "term-hint muted" }, copyHint()) : "",
-    h("div", { class: "pane-foot muted mono" }, `tmux attach -t ${r.meta?.tmux || "?"}`),
+    mode === "terminal" ? h("div", { id: "console-term", class: "term" }, h("span", { class: "term-status" }, "connecting…")) : h("div", { id: "console-chat" }),
+    mode === "terminal" ? h("div", { class: "term-hint muted" }, copyHint()) : "",
+    h("div", { class: "pane-foot muted mono" }, r.meta?.e2b ? `E2B sandbox ${r.meta.e2b.sandbox_id || "(starting…)"}${r.meta.e2b.paused ? " · paused while idle; opening the terminal resumes it" : ""}` : `tmux attach -t ${r.meta?.tmux || "?"}`),
   ];
 }
 
@@ -1112,13 +1337,30 @@ function syncFull(hasTerm) {
 }
 
 // ---------------------------------------------------------------- live terminal (xterm.js ⟷ websocket ⟷ tmux attach)
-/** Terminal view by default where it works well; the simple view on phones (no keys for Esc/Tab/arrows) or if xterm didn't load. */
-function termMode() {
-  if (!window.Terminal || !window.FitAddon) return false;
+/**
+ * How the pane shows a run: "chat" (the session rendered from its transcript, Claude only) or "terminal" (xterm.js on
+ * the tmux pane). Saved per browser. Terminal by default, Chat on phones (no keys for Esc/Tab/arrows) where it can.
+ */
+function paneMode(r) {
   const saved = localStorage.getItem("ac_term_mode");
-  return saved ? saved === "terminal" : !matchMedia("(max-width: 700px)").matches;
+  if (saved === "chat" && chatable(r)) return "chat";
+  if (saved === "terminal") return "terminal";
+  return chatable(r) && matchMedia("(max-width: 700px)").matches ? "chat" : "terminal";
 }
-function setTermMode(on) { localStorage.setItem("ac_term_mode", on ? "terminal" : "simple"); }
+function setPaneMode(mode) { localStorage.setItem("ac_term_mode", mode); paneSig = ""; renderPane(); }
+/** The chat view reads Claude Code transcripts; other agents (Codex) and plain commands get the terminal only. */
+function chatable(r) {
+  if (!r) return false;
+  const s = sessOf(r);
+  if (s) return s.agent === "claude";
+  return /(^|\/)claude$/.test(typeByName(r.type_name)?.command || "");
+}
+function viewSwitch(r, mode) {
+  const views = [["chat", "Chat", "the session as messages, tool calls and diffs, read from its transcript; scrolls on its own"], ["terminal", "Terminal", "a real terminal in the browser"]]
+    .filter(([m]) => m !== "chat" || chatable(r));
+  return h("div", { class: "seg", role: "group", "aria-label": "View" },
+    ...views.map(([m, label, title]) => h("button", { class: `small${m === mode ? " on" : ""}`, title, "aria-pressed": String(m === mode), onclick: () => m !== mode && setPaneMode(m) }, label)));
+}
 
 /**
  * A mouse report for pointer movement with no button held. tmux treats any input as activity and sizes the shared
@@ -1237,7 +1479,7 @@ async function openHistory(t, lines) {
   t.histReq = null; // a snapshot is shown once; the next one is fetched fresh
   if (t.closed || liveTerm !== t || t.hist) return;
   // Nothing to snapshot: the app draws full-screen and keeps its own history, so the wheel goes to it (shared, as before).
-  if (own_scroll) { t.ownScroll = true; toast("this session scrolls itself — the wheel now goes to it, and other viewers see it scroll too", true); return; }
+  if (own_scroll) { t.ownScroll = true; return; }
   const lineH = t.term.element ? t.term.element.clientHeight / t.term.rows : 16;
   const fg = t.term.options.theme?.foreground || "#ffffff";
   const body = h("pre", { class: "term-history-body", tabindex: "0" });
@@ -1275,10 +1517,11 @@ function closeHistory(t) {
 /**
  * Capture-phase wheel handler on the terminal box. The wheel never reaches tmux: on the live terminal, scrolling up
  * opens the private history. In the history the browser does the scrolling; we only watch for scrolling down at the
- * bottom, which closes it.
+ * bottom, which closes it. A session that scrolls itself (a full-screen app with no tmux history) gets the wheel as
+ * mouse reports, as many as the movement is worth: xterm would send at most one per wheel event, which crawls.
  */
 function onTermWheel(t, e) {
-  if (t.ownScroll) return; // let xterm pass the wheel to tmux and on to the app
+  if (t.ownScroll && !t.mouseModes?.size) return; // nothing is listening for the mouse: leave it to xterm
   const px = t.term.element ? t.term.element.clientHeight / t.term.rows : 16; // one line, in pixels
   const dy = e.deltaMode === 1 ? e.deltaY * px : e.deltaMode === 2 ? e.deltaY * t.term.element.clientHeight : e.deltaY;
   if (t.hist) {
@@ -1290,11 +1533,33 @@ function onTermWheel(t, e) {
     return;
   }
   e.preventDefault(); e.stopPropagation();
-  t.wheelAcc = dy > 0 ? 0 : (t.wheelAcc || 0) + dy / px;
+  t.wheelAcc = !t.ownScroll && dy > 0 ? 0 : (t.wheelAcc || 0) + dy / px;
   const lines = Math.trunc(t.wheelAcc);
   if (!lines) return;
   t.wheelAcc -= lines;
+  if (t.ownScroll) return sendWheel(t, e, lines);
   openHistory(t, -lines);
+}
+
+/**
+ * Wheel reports (button 64 up, 65 down) at the pointer, in the encoding tmux asked for (SGR, else X10). They go out one
+ * at a time, 12 ms apart: a burst in one write reaches the app as a single wheel step. Turning the other way, or a
+ * long fling, never queues more than 60.
+ */
+function sendWheel(t, e, lines) {
+  const box = t.term.element.getBoundingClientRect();
+  t.wheelAt = [Math.min(t.term.cols, Math.max(1, Math.floor((e.clientX - box.left) / (box.width / t.term.cols)) + 1)),
+    Math.min(t.term.rows, Math.max(1, Math.floor((e.clientY - box.top) / (box.height / t.term.rows)) + 1))];
+  t.wheelQueue = Math.sign(t.wheelQueue || 0) === -Math.sign(lines) ? lines : Math.max(-60, Math.min(60, (t.wheelQueue || 0) + lines));
+  if (t.wheelTimer) return;
+  const step = () => {
+    if (!t.wheelQueue || t.closed || t.ws?.readyState !== 1) { t.wheelQueue = 0; t.wheelTimer = null; return; }
+    const b = t.wheelQueue < 0 ? 64 : 65, [col, row] = t.wheelAt;
+    t.ws.send(JSON.stringify({ t: "i", d: t.mouseModes.has(1006) ? `\x1b[<${b};${col};${row}M` : `\x1b[M${String.fromCharCode(32 + b, 32 + col, 32 + row)}` }));
+    t.wheelQueue -= Math.sign(t.wheelQueue);
+    t.wheelTimer = setTimeout(step, 12);
+  };
+  step();
 }
 
 let liveTerm = null; // { runId, el, term, fit, ws, ro, retry, closed, hist }
@@ -1302,15 +1567,38 @@ function closeTerm() {
   if (!liveTerm) return;
   const t = liveTerm; liveTerm = null;
   closeHistory(t);
-  t.closed = true; clearTimeout(t.retry); t.ro?.disconnect();
+  t.closed = true; clearTimeout(t.retry); clearTimeout(t.parkTimer); t.ro?.disconnect();
+  t.el.remove();
+  paneSig = ""; // the pane lost its terminal: rebuild it next time
   try { t.ws?.close(); } catch {}
   t.term.dispose();
 }
+/**
+ * Switching to another view keeps the terminal attached, out of sight, for a minute, so flipping back is instant.
+ * A parked terminal sends nothing: no resizes (with window-size latest a hidden tab would resize the pane for
+ * everyone), and no input.
+ */
+function parkTerm() {
+  const t = liveTerm;
+  if (!t || t.parked) return;
+  t.parked = true;
+  $("#term-park").append(t.el);
+  t.parkTimer = setTimeout(() => { if (liveTerm === t && t.parked) closeTerm(); }, 60_000);
+}
+
 /** Attach the pane's #console-term to run `runId` (no-op if it already is). Reconnects while the run is live. */
 function openTerm(runId) {
   const el = $("#console-term");
   if (!el) return closeTerm();
   if (liveTerm && liveTerm.runId === runId && liveTerm.el === el) return;
+  if (liveTerm?.parked && liveTerm.runId === runId) {
+    const t = liveTerm;
+    clearTimeout(t.parkTimer); t.parked = false;
+    el.replaceWith(t.el);
+    try { t.fit.fit(); } catch {}
+    t.term.focus();
+    return;
+  }
   closeTerm();
   const term = new Terminal(termOptions({ cursorBlink: true, scrollback: 5000 }));
   const fit = new FitAddon.FitAddon();
@@ -1344,8 +1632,8 @@ function openTerm(runId) {
     const sel = t.hist ? String(getSelection() || "") : term.hasSelection() && term.getSelection();
     if (sel) navigator.clipboard?.writeText(sel).then(() => toast(`copied ${sel.length} chars`, true), () => {});
   });
-  term.onResize(({ cols, rows }) => send({ t: "r", cols, rows }));
-  t.ro = new ResizeObserver(() => { try { fit.fit(); } catch {} });
+  term.onResize(({ cols, rows }) => { if (!t.parked) send({ t: "r", cols, rows }); });
+  t.ro = new ResizeObserver(() => { if (t.parked) return; try { fit.fit(); } catch {} });
   t.ro.observe(el);
   const connect = () => {
     if (t.closed) return;
@@ -1372,9 +1660,38 @@ function openTerm(runId) {
 document.addEventListener("visibilitychange", () => {
   const t = liveTerm;
   if (!t) return;
-  if (document.hidden) { clearTimeout(t.retry); const ws = t.ws; t.ws = null; try { ws?.close(); } catch {} }
+  if (document.hidden && t.parked) closeTerm();
+  else if (document.hidden) { clearTimeout(t.retry); const ws = t.ws; t.ws = null; try { ws?.close(); } catch {} }
   else if (!t.ws || t.ws.readyState > 1) t.connect();
 });
+
+// ---------------------------------------------------------------- chat view (public/chat.js)
+let liveChat = null; // { runId, view }
+function openChat(runId) {
+  if (!liveChat || liveChat.runId !== runId) {
+    closeChat();
+    liveChat = { runId, view: new ChatView(`/runs/${runId}`, { onTerminal: () => setPaneMode("terminal") }) };
+  }
+  // A rebuilt pane has a fresh placeholder: move the live view into it.
+  const el = $("#console-chat"), root = liveChat.view.root;
+  if (el && el !== root) { el.replaceWith(root); root.id = "console-chat"; }
+}
+// The pane loses its chat with it, so it is rebuilt next time (else a new view has no placeholder to move into).
+function closeChat() { if (liveChat) { liveChat.view.close(); liveChat.view.root.remove(); liveChat = null; paneSig = ""; } }
+
+/** A session lofiwave didn't start (Agents tab, the rail's "started outside"): its chat, read-only, in a dialog. */
+let dialogChat = null;
+function openSessionChat(s) {
+  const dlg = $("#chat-dialog");
+  dialogChat?.close();
+  dialogChat = new ChatView(`/sessions/${encodeURIComponent(s.session_id)}`);
+  $("#chat-dialog-title").textContent = s.title || s.name || `session ${shortId(s.session_id)}`;
+  $("#chat-dialog-meta").textContent = `${s.agent} · ${shortCwd(s.cwd)} · ${s.session_id}`;
+  $("#chat-dialog-body").replaceChildren(dialogChat.root);
+  dlg.onclose = () => { dialogChat?.close(); dialogChat = null; };
+  if (!dlg.open) dlg.showModal();
+}
+const chatBtn = (s) => (s?.agent === "claude" && s.session_id ? h("button", { class: "small", title: "read this session's conversation (read-only)", onclick: () => openSessionChat(s) }, "View chat") : "");
 
 function emptyPane() {
   const n = consoleData.adoptable.length;
@@ -1388,8 +1705,9 @@ function emptyPane() {
 // ---------------------------------------------------------------- refresh loop
 function refresh() {
   if (document.hidden) return;
-  if (activeTab === "console") loadConsole();
-  else if (activeTab === "agents") loadAgents();
+  if (activeTab === "console" || drawerShown()) loadConsole();
+  if (activeTab === "console") return;
+  if (activeTab === "agents") loadAgents();
   else if (activeTab === "apps") loadTypes().then(loadApps);
   else if (activeTab === "workflows") loadWorkflows();
   else if (activeTab === "connect") loadConnect();
@@ -1404,7 +1722,7 @@ document.addEventListener("visibilitychange", () => !document.hidden && refresh(
 
 (async () => {
   applyTheme(); // the page head already set the scheme; this syncs theme-color
-  await Promise.all([loadSystem(), loadTypes(), loadWorkflows(), loadMe()]);
+  await Promise.all([loadSystem(), loadTypes(), loadWorkflows(), loadMe(), loadTargets()]);
   const m = location.hash.match(/^#(\w+)(?:\/(\w+))?/);
   if (m && m[1] === "runs" && m[2]) openRun(Number(m[2]));
   else if (m && (m[1] === "sessions" || m[1] === "console") && /^\d+$/.test(m[2] || "")) openSessionLink(Number(m[2]));
@@ -1414,6 +1732,7 @@ document.addEventListener("visibilitychange", () => !document.hidden && refresh(
 })();
 
 $("#refresh-btn").onclick = () => { refresh(); loadSystem(); };
+$("#new-session-btn").onclick = () => openStartDialog({ kind: "agent" });
 window.addEventListener("hashchange", () => {
   const [tab, id] = location.hash.slice(1).split("/");
   if (tab === "runs" && /^\d+$/.test(id || "")) openRun(Number(id));

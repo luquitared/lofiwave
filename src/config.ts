@@ -1,6 +1,7 @@
 import { join, resolve } from "node:path";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
+import { totalmem, homedir, tmpdir } from "node:os";
 
 const ROOT = resolve(import.meta.dir, "..");
 const dataDir = resolve(process.env.DATA_DIR ?? join(ROOT, "data"));
@@ -50,6 +51,12 @@ export const config = {
    */
   claudePermissionMode: process.env.CLAUDE_PERMISSION_MODE?.trim() || "",
   /**
+   * Sandbox every codex run starts in (headless, interactive, restart and resume): passed as `--sandbox <mode>` unless
+   * the run's args already pick one. `read-only`, `workspace-write` or `danger-full-access`. Without it, Codex uses its
+   * config, and `codex exec` defaults to read-only: a headless run can then change nothing.
+   */
+  codexSandboxMode: parseSandbox(process.env.CODEX_SANDBOX_MODE ?? ""),
+  /**
    * Claude Code renderer for interactive runs (`--settings {"tui":…}`). "default" keeps claude off the alternate
    * screen, so tmux keeps its history and each viewer scrolls it locally; "fullscreen" sends every wheel tick to
    * claude, shared by all viewers. "keep" leaves the user's own setting alone.
@@ -61,9 +68,31 @@ export const config = {
    * watching its terminal in the browser. Anything typed into it makes it busy again and restarts the wait.
    */
   idleStopSec: Number(process.env.IDLE_STOP_SEC ?? 120),
+  /**
+   * Every other interactive claude run (started from the UI or the API, resumed, or picked up again after a restart)
+   * ends once it has been idle this long with nobody watching it, so finished agents don't sit holding memory for
+   * days. 0 turns it off; a run can opt out with `stop_when_idle: false` or set its own `idle_stop_sec`.
+   */
+  agentIdleStopSec: Number(process.env.AGENT_IDLE_STOP_SEC ?? 1800),
   /** How much of the end of a run's log is copied into runs.output when it finishes. */
   outputTailBytes: Number(process.env.OUTPUT_TAIL_BYTES ?? 64 * 1024),
+  /**
+   * Admission control, so a swarm can't OOM the machine (and the console with it): at most this many agent runs at
+   * once (0 = no cap), and none started while less than `minFreeMemMb` of memory is available (0 = no check).
+   * The default cap leaves 1 GB for the system and allows ~600 MB per agent, between 1 and 16.
+   */
+  maxAgentRuns: Number(process.env.MAX_AGENT_RUNS ?? Math.max(1, Math.min(16, Math.floor((totalmem() / 2 ** 20 - 1024) / 600)))),
+  minFreeMemMb: Number(process.env.MIN_FREE_MEM_MB ?? 500),
+  /** `mkdir_cwd` on POST /api/processes may only create folders under these (colon-separated; default: home and temp dirs). */
+  cwdRoots: (process.env.CWD_ROOTS ?? `${homedir()}:${tmpdir()}`).split(":").map((p) => p.trim()).filter(Boolean).map((p) => resolve(p)),
 };
+
+function parseSandbox(v: string): string {
+  const mode = v.trim();
+  if (!mode || ["read-only", "workspace-write", "danger-full-access"].includes(mode)) return mode;
+  console.warn(`CODEX_SANDBOX_MODE: "${mode}" isn't read-only, workspace-write or danger-full-access; ignored`);
+  return "";
+}
 
 function parseGitAuthors(spec: string): Map<string, { name: string; email: string }> {
   const out = new Map<string, { name: string; email: string }>();

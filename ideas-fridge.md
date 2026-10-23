@@ -162,3 +162,13 @@ Ideas:
 - Per-viewer auth tokens (see §2) are worth doing on their own, before any of the terminal work.
 - `tailscale serve` would put the console on HTTPS 443 instead of plain HTTP on 7770.
 
+## 7. A Cloud Run target, for runs that must stay in your own cloud
+
+PR #12 built a `cloud-run` run target: each run a Google Cloud Run Job, driven with the machine's `gcloud` login,
+output copied from Cloud Logging, credentials from Secret Manager, the claude transcript handed back through the
+logs in checksummed chunks. It was dropped before landing (2026-10-21) in favour of E2B only: it is headless (no
+terminal, nobody answers prompts, no files back), and two kinds without feature parity cost every feature twice.
+
+Revive it if someone needs agents whose code and data never leave their own GCP project and IAM, or unattended jobs
+longer than E2B's plan allows. The code is on the closed PR's branch, `cloud-run-target`.
+

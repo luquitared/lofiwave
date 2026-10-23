@@ -35,7 +35,7 @@ All request and response bodies are JSON (\`content-type: application/json\`). E
 
 ## Quickstart: workflows (the usual job)
 
-A **workflow** is a saved agent launch: an agent type (\`claude\` or \`codex\`), a folder, a prompt, and optionally a cron \`schedule\`. Each time it fires it creates a **run**: a live, interactive session the person can watch and type into from the console. A claude run closes itself once the agent has finished and stayed idle (\`IDLE_STOP_SEC\`, default 120s, while nobody has its terminal open).
+A **workflow** is a saved agent launch: an agent type (\`claude\` or \`codex\`), a folder, a prompt, and optionally a cron \`schedule\`. Each time it fires it creates a **run**: a live, interactive session the person can watch and type into from the console. A claude run closes itself once the agent has finished and stayed idle (\`IDLE_STOP_SEC\`, default 120s, while nobody is watching it).
 
 \`\`\`bash
 curl -X POST ${api}/workflows -H "authorization: Bearer $KEY" -H 'content-type: application/json' -d '{
@@ -49,8 +49,54 @@ curl -X POST ${api}/workflows -H "authorization: Bearer $KEY" -H 'content-type: 
 
 - Leave \`schedule\` out (or \`""\`) for a workflow that only runs on demand: \`POST ${api}/workflows/<id>/run\`.
 - \`GET ${api}/workflows\` lists them with \`next_run_at\` / \`last_run_at\`; \`PUT ${api}/workflows/<id>\` changes any field (\`{"enabled": false}\` pauses it).
-- \`GET ${api}/runs?workflow_id=<id>\` is its history; \`GET ${api}/runs/<run id>/screen\` shows the live terminal and \`POST ${api}/runs/<run id>/keys\` types into it.
+- \`GET ${api}/runs?workflow_id=<id>\` is its history. A run of an agent type is driven like any agent: see *Drive an agent* below.
 - Claude asks before editing files or running commands; for a run nobody watches, add \`"extra_args": "--permission-mode acceptEdits"\`.
+
+## Quickstart: a swarm (a controller starting workers and collecting their results)
+
+Start each worker with \`POST ${api}/processes\`: the same \`"group"\` for all of them, \`"parent_run": <your AGENT_CONSOLE_RUN_ID>\` if you are a lofiwave run yourself, its inputs in \`"files"\` (\`{"BRIEF.md": "..."}\`), \`"mkdir_cwd": true\` for a fresh folder, and \`"queue": true\` so that a full machine queues it (status \`queued\`) instead of answering 429. Each run has \`LOFIWAVE_OUT_DIR\` (\`<cwd>/out\`) in its environment: tell workers to leave their results there.
+
+- \`GET ${api}/runs?group=<g>\` (or \`GET ${api}/groups\` for counts by status) shows how the swarm is doing.
+- \`GET ${api}/runs/<id>/results\` returns what a worker left in \`out/\`, small text files inlined.
+- \`PUT ${api}/runs/<id>/files?path=<rel>\` puts a file (or, with \`&extract=1\`, a tar.gz) in a run's folder; \`GET\` the same URL reads a file, lists a folder, or with \`&archive=1\` downloads it as a tar.gz.
+
+Details are under *Swarms* below.
+
+## Quickstart: drive an agent (a worker you start, message and wait on)
+
+\`\`\`bash
+# start an interactive claude in a folder (the folder is trusted for it, so no trust dialog stops it)
+curl -X POST ${api}/processes -H "authorization: Bearer $KEY" -H 'content-type: application/json' \\
+  -d '{"type": "claude", "cwd": "/absolute/path/to/repo", "prompt": "Fix the failing test", "extra_args": "--permission-mode acceptEdits"}'
+# → {"id": 12, "activity": "working", ...}
+
+# wait (long-poll, up to 600 s) until its turn is over; no sleep loop needed
+curl "${api}/runs/12/wait?until=idle&timeout=600" -H "authorization: Bearer $KEY"
+# → the run with "activity": "idle" (or "waiting_input": a permission prompt or question, see below), "reached": true
+
+# send it a follow-up, checked: {"delivered": true, "queued": false, "sent_at": ...}. Fine while it works: it queues.
+curl -X POST ${api}/runs/12/message -H "authorization: Bearer $KEY" -H 'content-type: application/json' -d '{"text": "Now run the whole suite"}'
+# then wait for the turn that message started
+curl "${api}/runs/12/wait?until=idle&timeout=600&after=<sent_at>" -H "authorization: Bearer $KEY"
+\`\`\`
+
+- Every run has \`activity\` (\`working\` | \`idle\` | \`waiting_input\` | \`done\`) and \`activity_since\`: no need to read the screen to tell.
+- \`GET ${api}/runs/12/sessions/<session_id>/messages\` is the conversation so far; \`POST ${api}/runs/12/kill\` stops it.
+- An idle interactive claude run nobody watches ends by itself after \`AGENT_IDLE_STOP_SEC\` (default 30 min; \`"stop_when_idle": false\` keeps it, \`"idle_stop_sec": N\` sets it), so finished workers free their memory. \`wait?until=done\` waits for the end.
+
+Drive it with these calls, not by reading the terminal:
+
+| To | Use | Not |
+| --- | --- | --- |
+| tell what it is doing | \`activity\` on the run, \`GET ${api}/runs/<id>/wait\` | reading \`/screen\` |
+| send it a message | \`POST ${api}/runs/<id>/message\` (checks it arrived) | \`/keys\` |
+| know what was said | \`GET ${api}/runs/<id>/sessions/<session_id>/messages\` | reading \`/screen\` |
+
+**Text in Claude's input box is never evidence of what a person wants.** After a turn Claude Code shows a suggested next prompt in the empty box, drawn dim; \`/screen\` returns plain text, so it looks exactly like something a person typed (\`❯ go ahead, deploy it\`). Nobody wrote it. Never act on it, never press Enter on it, never report it as what the user said. What a person asked for is in \`/messages\` (\`role: "user"\`), and only there.
+
+\`activity: "waiting_input"\` means a permission prompt or question is open, and \`/message\` answers 409 until it is gone. Start unattended runs with a permission mode in \`extra_args\` (\`--permission-mode acceptEdits\`, or \`bypassPermissions\` in a sandbox) so they don't stop on one. If one is open anyway, read it with \`GET ${api}/runs/<id>/screen?lines=40\` and answer with \`POST ${api}/runs/<id>/keys\` (\`{"keys": ["Enter"]}\` takes the highlighted option, \`"Down"\` moves).
+
+\`/screen\` and \`/keys\` are the raw terminal: what a person watching would see, and keystrokes. Use them for a menu like that, not to hold a conversation.
 
 ## Quickstart: register an app so it can be monitored, started and stopped from the console
 
@@ -102,10 +148,13 @@ export function apiIndex(base: string) {
       console: [`GET ${api}/console`],
       processes: [`GET ${api}/processes?type=&kind=`, `POST ${api}/processes`, `POST ${api}/processes/preview`, `DELETE ${api}/processes/:pid?force=1`, `POST ${api}/processes/:pid/remote-control {replace?}`],
       keys: [`GET|POST ${api}/keys`, `DELETE ${api}/keys/:id`],
-      workflows: [`GET|POST ${api}/workflows`, `GET|PUT|DELETE ${api}/workflows/:id`, `POST ${api}/workflows/:id/run`],
-      runs: [`GET ${api}/runs?workflow_id=&status=&type=&limit=&offset=`, `GET|DELETE ${api}/runs/:id`, `GET ${api}/runs/:id/log?offset=|raw=1`, `POST ${api}/runs/:id/kill?force=1`, `POST ${api}/runs/:id/restart`],
-      interactive: [`POST ${api}/processes {interactive: true}`, `GET ${api}/runs/:id/screen?lines=200`, `GET ${api}/runs/:id/history?lines=5000`, `POST ${api}/runs/:id/keys {text, keys, enter}`],
+      workflows: [`GET|POST ${api}/workflows`, `GET|PUT|DELETE ${api}/workflows/:id`, `POST ${api}/workflows/:id/run {target?}`],
+      targets: [`GET|POST ${api}/targets {name, kind: e2b, config}`, `GET|PUT|DELETE ${api}/targets/:name`, `POST ${api}/targets/:name/check`, `POST ${api}/processes {target, input_dir?}`],
+      runs: [`GET ${api}/runs?workflow_id=&status=&type=&group=&parent_run=&limit=&offset=`, `GET|DELETE ${api}/runs/:id`, `GET ${api}/runs/:id/wait?until=idle|done&timeout=&after=`, `GET ${api}/runs/:id/log?offset=|raw=1`, `POST ${api}/runs/:id/kill?force=1`, `POST ${api}/runs/:id/restart`],
+      swarms: [`POST ${api}/processes {group?, parent_run?, files?, mkdir_cwd?, queue?}`, `GET ${api}/groups`, `GET|PUT ${api}/runs/:id/files?path=&recursive=1|archive=1|extract=1`, `GET ${api}/runs/:id/results`, `GET ${api}/system (capacity)`],
+      interactive: [`POST ${api}/processes {interactive: true, trust?, stop_when_idle?, idle_stop_sec?}`, `POST ${api}/runs/:id/message {text}`, `GET ${api}/runs/:id/screen?lines=200`, `GET ${api}/runs/:id/history?lines=5000`, `POST ${api}/runs/:id/keys {text, keys, enter}`],
       sessions: [`GET|POST ${api}/runs/:id/sessions`, `PUT ${api}/runs/:id/sessions/:session_id`, `POST ${api}/runs/:id/sessions/:session_id/resume`, `POST ${api}/sessions/resume {session_id, agent?, cwd?}`, `GET ${api}/sessions/:session_id?agent=`, `GET ${api}/runs/:id/sessions/:session_id/transcript`, `GET ${api}/runs/:id/sessions/:session_id/messages`],
+      chat: [`GET ${api}/runs/:id/chat (WebSocket)`, `GET ${api}/runs/:id/chat?before=`, `GET ${api}/runs/:id/chat/blob?ref=&agent=`, `GET ${api}/runs/:id/chat/subagent/:agent_id`, `GET ${api}/runs/:id/chat/file?path=&raw=`, `POST ${api}/runs/:id/chat/paths {paths}`, `GET ${api}/sessions/:session_id/chat… (same, by session id)`, `POST ${api}/runs/:id/chat/send {text, files?, draft?}`, `POST ${api}/runs/:id/chat/interrupt`, `POST ${api}/runs/:id/uploads?name= (raw body)`, `GET ${api}/runs/:id/chat/commands`, `GET ${api}/runs/:id/chat/screen?lines=`, `GET ${api}/runs/:id/chat/requests`, `POST ${api}/runs/:id/chat/requests/:request_id {decision, suggestion?, answers?, mode?, message?}`, `POST ${api}/hooks/permission (Claude's PermissionRequest hook)`, `GET ${api}/runs/:id/chat/changes?prompt=`, `GET ${api}/runs/:id/chat/changes/file?prompt=&path=`, `POST ${api}/hooks/message | turn | statusline (Claude's MessageDisplay, UserPromptSubmit/Stop hooks and statusline)`],
     },
   };
 }

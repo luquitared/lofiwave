@@ -18,34 +18,43 @@
   document.documentElement.dataset.theme = pref === "system" ? (light ? "wave-light" : "wave") : pref;
 })();
 </script>
+<link rel="preload" href="/vendor/fonts/instrument-sans-latin.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="stylesheet" href="/vendor/xterm.css">
 <link rel="stylesheet" href="/style.css">
 </head>
-<body class="console">
+<body class="console" data-tab="console">
 <a class="skip-link" href="#main">Skip to content</a>
-<header class="sidebar">
-  <a class="brand" href="#console" aria-label="lofiwave home"><img class="brand-mark" src="/logo.png" alt="" width="32" height="32"><span>lofiwave</span></a>
+<header class="topbar">
+  <button id="drawer-btn" class="drawer-btn" aria-label="Sessions" aria-controls="session-rail" aria-expanded="false"><svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true"><path d="M3 5h12M3 9h12M3 13h8" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"></path></svg></button>
+  <a class="brand" href="#console" aria-label="lofiwave home"><img class="brand-mark" src="/logo.png" alt="" width="30" height="30"><span>lofiwave</span></a>
   <nav aria-label="Main navigation">
-    <button data-tab="console" class="active"><span aria-hidden="true">▶</span>Sessions</button>
-    <button data-tab="workflows"><span aria-hidden="true">⌁</span>Workflows</button>
-    <button data-tab="connect"><span aria-hidden="true">⚿</span>Connect</button>
-    <button data-tab="advanced"><span aria-hidden="true">☷</span>Advanced</button>
-    <button data-tab="settings"><span aria-hidden="true">⚙</span>Settings</button>
+    <button data-tab="console" class="active">Sessions</button>
+    <button data-tab="workflows">Workflows</button>
+    <button data-tab="connect">Connect</button>
+    <button data-tab="advanced">Advanced</button>
+    <button data-tab="settings">Settings</button>
   </nav>
-  <div class="sidebar-bottom"><div id="sysinfo" class="sysinfo"></div></div>
+  <div class="topbar-right">
+    <span id="sysinfo" class="sysinfo"></span>
+    <span id="people" class="people" hidden></span>
+    <span class="connection" id="connection-status">Connecting…</span>
+    <button id="refresh-btn" class="small" aria-label="Refresh current view">↻</button>
+    <button id="new-session-btn" class="primary" aria-label="New session"><span aria-hidden="true">+</span><span class="label"> New session</span></button>
+  </div>
 </header>
+<div class="app-body">
+<aside class="rail" id="session-rail" aria-label="Sessions"></aside>
+<div id="drawer-backdrop" class="drawer-backdrop" hidden></div>
 <main id="main">
   <div class="page-top">
     <h1 id="page-title">Sessions</h1>
     <div class="subnav" id="subnav" role="tablist" aria-label="Advanced" hidden>
       <button data-sub="agents">Processes</button><button data-sub="apps">Apps</button><button data-sub="runs">Runs</button><button data-sub="types">Types</button>
     </div>
-    <span class="page-top-right"><span id="people" class="people" hidden></span><span class="connection" id="connection-status">Connecting…</span><button id="refresh-btn" class="small" aria-label="Refresh current view">↻</button></span>
   </div>
 
   <section id="tab-console" class="tab active">
     <div class="console-view">
-      <aside class="rail" id="session-rail" aria-label="Live sessions"></aside>
       <div class="pane" id="session-pane" role="region" aria-label="Session terminal" aria-live="off"></div>
     </div>
   </section>
@@ -109,6 +118,14 @@
 
   <section id="tab-settings" class="tab">
     <div class="card">
+      <div class="card-head"><h2>Run targets</h2><button class="primary small" id="target-new-btn">+ New target</button></div>
+      <p class="muted">Where sessions and workflows can run besides this machine. An E2B target gives each run its own sandbox VM, with a live terminal you can open from Sessions. Needs <code>E2B_API_KEY</code> in lofiwave's environment.</p>
+      <table id="target-table">
+        <thead><tr><th>Name</th><th>When idle</th><th>Template</th><th>Used by</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div class="card">
       <h2>Appearance</h2>
       <p class="muted">Saved in this browser.</p>
       <div class="themes" id="theme-picker" role="radiogroup" aria-label="Color scheme"></div>
@@ -117,9 +134,10 @@
 
   <section id="tab-runs" class="tab">
     <div class="toolbar">
-      <select id="runs-status" aria-label="Filter by status"><option value="">All statuses</option><option>running</option><option>success</option><option>failed</option><option>killed</option><option>timeout</option><option>lost</option><option>error</option></select>
+      <select id="runs-status" aria-label="Filter by status"><option value="">All statuses</option><option>queued</option><option>running</option><option>success</option><option>failed</option><option>killed</option><option>timeout</option><option>lost</option><option>error</option></select>
       <select id="runs-type" aria-label="Filter by type"><option value="">All types</option></select>
       <select id="runs-workflow" aria-label="Filter by workflow"><option value="">All workflows</option></select>
+      <select id="runs-group" aria-label="Filter by group"><option value="">All groups</option></select>
       <span id="runs-count" class="muted"></span>
     </div>
     <div class="split">
@@ -159,12 +177,14 @@
     </table>
   </section>
 </main>
+</div>
 
 <dialog id="start-dialog" aria-labelledby="start-title">
   <form id="start-form" class="grid" method="dialog">
     <h3 class="wide" id="start-title">New session</h3>
     <label>Agent <select name="type"></select></label>
     <label>Folder <span class="pp"><input name="cwd" placeholder="start typing to search" autocomplete="off" data-pathpicker></span></label>
+    <label class="wide" id="start-target-label">Runs on <select name="target"></select><small class="muted" id="start-target-hint"></small></label>
     <label class="wide" id="prompt-label">Prompt <textarea name="prompt" rows="4" placeholder="Optional first message"></textarea></label>
     <details class="wide more"><summary class="muted">More options</summary>
       <div class="grid">
@@ -187,7 +207,8 @@
     <input type="hidden" name="id">
     <label>Name <input name="name" required autocomplete="off"></label>
     <label>Agent <select name="type"></select></label>
-    <label class="wide">Folder <span class="pp"><input name="cwd" autocomplete="off" data-pathpicker placeholder="blank = the type's default folder"></span></label>
+    <label class="wide">Runs on <select name="target"></select></label>
+    <label class="wide" id="wf-cwd-label">Folder <span class="pp"><input name="cwd" autocomplete="off" data-pathpicker placeholder="blank = the type's default folder"></span></label>
     <label class="wide">Prompt <textarea name="prompt" rows="4"></textarea></label>
     <label>Schedule <select name="preset">
       <option value="">Manual only</option>
@@ -207,12 +228,39 @@
         <label class="wide row"><input type="checkbox" name="allow_overlap"> Allow overlapping runs</label>
       </div>
     </details>
-    <p class="wide muted hint">Each run opens as a live session you can watch and type into. Claude runs close once the agent is done and idle.</p>
+    <p class="wide muted hint" id="wf-hint">Each run opens as a live session you can watch and type into. Claude runs close once the agent is done and idle.</p>
     <div id="wf-feedback" class="wide form-error" role="alert" hidden></div>
     <div class="wide row">
       <button type="submit" class="primary">Save</button>
       <button type="button" id="wf-save-run">Save &amp; run now</button>
       <button type="button" id="wf-cancel" style="margin-left:auto">Cancel</button>
+    </div>
+  </form>
+</dialog>
+<dialog id="target-dialog" aria-labelledby="target-title">
+  <form id="target-form" class="grid" method="dialog">
+    <h3 class="wide" id="target-title">New E2B target</h3>
+    <input type="hidden" name="orig">
+    <label>Name <input name="name" required autocomplete="off" pattern="[A-Za-z0-9][A-Za-z0-9_.\-]{0,40}" placeholder="sandbox"></label>
+    <label>Template <input name="template" autocomplete="off" placeholder="claude"><small class="muted">An E2B template with the agent installed; <code>claude</code> is E2B's stock one.</small></label>
+    <label class="wide">Git repo <input name="repo" autocomplete="off" placeholder="https://github.com/you/repo.git (optional)"><small class="muted">Cloned into the sandbox before each run; the agent works inside it.</small></label>
+    <label>Permission mode <select name="permission_mode"><option value="">lofiwave's default</option><option value="acceptEdits">acceptEdits</option><option value="bypassPermissions">bypassPermissions</option><option value="plan">plan</option><option value="default">default (asks)</option></select></label>
+    <label>When idle for (s) <input name="idle_sec" type="number" min="0" step="60" placeholder="0 = never"></label>
+    <label>…then <select name="idle_action"><option value="pause">pause the sandbox (resumes when opened)</option><option value="stop">end the run</option></select></label>
+    <details class="wide more"><summary class="muted">More options</summary>
+      <div class="grid">
+        <label>Working dir in the sandbox <input name="workdir" autocomplete="off" placeholder="/home/user/work"></label>
+        <label>Sandbox lifetime (s) <input name="timeout_sec" type="number" min="300" max="86400" placeholder="3600"><small class="muted">Renewed while the run is active; E2B caps it by plan.</small></label>
+        <label>When the agent exits <select name="on_exit"><option value="kill">kill the sandbox</option><option value="pause">keep it paused</option></select></label>
+        <label class="wide">Env (KEY=VALUE per line) <textarea name="env" rows="2"></textarea></label>
+        <label class="wide">Forward from here (SANDBOX_VAR=LOCAL_VAR per line) <textarea name="env_from" rows="2" placeholder="ANTHROPIC_API_KEY=ANTHROPIC_API_KEY"></textarea><small class="muted">Blank = ANTHROPIC_API_KEY and CLAUDE_CODE_OAUTH_TOKEN. lofiwave's own token never goes in.</small></label>
+      </div>
+    </details>
+    <div id="target-feedback" class="wide form-error" role="alert" hidden></div>
+    <div class="wide row">
+      <button type="submit" class="primary">Save</button>
+      <button type="button" id="target-check">Save &amp; check</button>
+      <button type="button" id="target-cancel" style="margin-left:auto">Cancel</button>
     </div>
   </form>
 </dialog>
@@ -241,10 +289,22 @@
     <div class="wide row"><button type="submit" class="primary">Sign in</button></div>
   </form>
 </dialog>
+<dialog id="chat-dialog" class="chat-dialog" aria-labelledby="chat-dialog-title">
+  <div class="chat-dialog-head">
+    <div><h3 id="chat-dialog-title"></h3><div id="chat-dialog-meta" class="muted mono"></div></div>
+    <form method="dialog"><button class="small">Close</button></form>
+  </div>
+  <div id="chat-dialog-body"></div>
+</dialog>
 <div id="toast" role="status" aria-live="polite" hidden></div>
+<div id="term-park" hidden></div>
 <script src="/vendor/xterm.js"></script>
 <script src="/vendor/addon-fit.js"></script>
 <script src="/vendor/addon-webgl.js"></script>
+<script src="/vendor/marked.min.js"></script>
+<script src="/vendor/purify.min.js"></script>
+<script src="/vendor/highlight.min.js"></script>
+<script src="/chat.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>

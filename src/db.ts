@@ -48,7 +48,7 @@ CREATE TABLE IF NOT EXISTS runs (
   prompt        TEXT NOT NULL DEFAULT '',
   env           TEXT NOT NULL DEFAULT '{}',
   trigger       TEXT NOT NULL,              -- manual | schedule | restart | api
-  status        TEXT NOT NULL,              -- running | success | failed | killed | timeout | lost | error
+  status        TEXT NOT NULL,              -- queued | running | success | failed | killed | timeout | lost | error
   pid           INTEGER,
   started_at    INTEGER NOT NULL,
   ended_at      INTEGER,
@@ -89,6 +89,29 @@ CREATE TABLE IF NOT EXISTS api_keys (
   created_at   INTEGER NOT NULL,
   last_used_at INTEGER
 );
+
+-- Snapshots of a run's git work tree when a prompt is submitted (start) and when Claude stops (end), kept under
+-- refs/lofiwave/run-<run>/<id>: the chat view diffs them to show what each turn changed (src/chat/checkpoints.ts).
+CREATE TABLE IF NOT EXISTS checkpoints (
+  id          INTEGER PRIMARY KEY,
+  run_id      INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+  session_id  TEXT NOT NULL DEFAULT '',
+  prompt_id   TEXT NOT NULL,
+  kind        TEXT NOT NULL,              -- start | end
+  root        TEXT NOT NULL,              -- the repo's top folder
+  commit_sha  TEXT NOT NULL,
+  at          INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS checkpoints_run_idx ON checkpoints(run_id, prompt_id);
+-- Where runs can execute besides this machine (see src/targets.ts). config is JSON, shaped by kind.
+CREATE TABLE IF NOT EXISTS targets (
+  id         INTEGER PRIMARY KEY,
+  name       TEXT NOT NULL UNIQUE,
+  kind       TEXT NOT NULL,                -- e2b
+  config     TEXT NOT NULL DEFAULT '{}',
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
 `);
 
 // ---- migrations for columns added after the first release
@@ -109,6 +132,11 @@ if (!typeCols.has("resume_args")) {
   db.exec(`UPDATE process_types SET resume_args = '["--resume","{session}","--remote-control"]' WHERE name = 'claude' AND builtin = 1`);
   db.exec(`UPDATE process_types SET resume_args = '["resume","{session}"]' WHERE name = 'codex' AND builtin = 1`);
 }
+const workflowCols = new Set(db.query<{ name: string }, []>("PRAGMA table_info(workflows)").all().map((c) => c.name));
+if (!workflowCols.has("target")) db.exec("ALTER TABLE workflows ADD COLUMN target TEXT NOT NULL DEFAULT ''"); // a targets.name; '' = this machine
+const runCols = new Set(db.query<{ name: string }, []>("PRAGMA table_info(runs)").all().map((c) => c.name));
+// Pinned to the top of the Sessions rail. A column, not meta: a live run rewrites its meta from memory.
+if (!runCols.has("pinned_at")) db.exec("ALTER TABLE runs ADD COLUMN pinned_at INTEGER");
 // sessions.session_id started out UNIQUE; a resumed session legitimately belongs to several runs.
 const sessionsUniqueOnIdOnly = db.query<{ name: string; unique: number }, []>("PRAGMA index_list(sessions)").all()
   .some((i) => i.unique === 1 && db.query<{ name: string }, [string]>(`PRAGMA index_info(${i.name})`).all(i.name).map((c) => c.name).join(",") === "session_id");
@@ -127,6 +155,8 @@ if (sessionsUniqueOnIdOnly) {
   `);
 }
 db.exec("UPDATE process_types SET kind = 'agent' WHERE builtin = 1 AND kind = 'app'");
+// Runs started together for one job (a swarm) share meta.group; GET /api/runs?group= and /api/groups read it.
+db.exec("CREATE INDEX IF NOT EXISTS runs_group_idx ON runs(json_extract(meta, '$.group'))");
 
 export const now = () => Date.now();
 
@@ -136,7 +166,7 @@ export type ProcessTypeRow = {
 };
 export type WorkflowRow = {
   id: number; name: string; type_name: string; cwd: string; prompt: string; extra_args: string; env: string;
-  schedule: string; enabled: number; timeout_sec: number; allow_overlap: number;
+  schedule: string; enabled: number; timeout_sec: number; allow_overlap: number; target: string;
   next_run_at: number | null; last_run_at: number | null; created_at: number; updated_at: number;
 };
 export type SessionRow = {
@@ -147,9 +177,10 @@ export type RunRow = {
   id: number; workflow_id: number | null; workflow_name: string | null; type_name: string; cwd: string;
   command: string; args: string; prompt: string; env: string; trigger: string; status: string; pid: number | null;
   started_at: number; ended_at: number | null; exit_code: number | null; log_path: string | null;
-  output: string; error: string; meta: string;
+  output: string; error: string; meta: string; pinned_at: number | null;
 };
 
+export type TargetRow = { id: number; name: string; kind: string; config: string; created_at: number; updated_at: number };
 export type ApiKeyRow = { id: number; name: string; prefix: string; hash: string; created_by: string; created_at: number; last_used_at: number | null };
 
 export const ACTIVE_STATUSES = ["running"];
@@ -157,7 +188,7 @@ export const ACTIVE_STATUSES = ["running"];
 /** Parse the JSON columns of a row so API consumers get real arrays/objects. */
 export function hydrate<T extends Record<string, any>>(row: T): T {
   const out: any = { ...row };
-  for (const k of ["args", "interactive_args", "resume_args", "extra_args", "env", "meta"]) {
+  for (const k of ["args", "interactive_args", "resume_args", "extra_args", "env", "meta", "config"]) {
     if (typeof out[k] === "string") {
       try { out[k] = JSON.parse(out[k]); } catch { /* leave as-is */ }
     }
@@ -167,6 +198,10 @@ export function hydrate<T extends Record<string, any>>(row: T): T {
   }
   return out;
 }
+
+const CODEX_DESCRIPTION = "OpenAI Codex CLI. Prompt is passed to `codex exec` (headless) or as the first message (interactive). Headless runs are read-only unless you add e.g. --sandbox workspace-write (or set CODEX_SANDBOX_MODE); --skip-git-repo-check outside a git repo.";
+/** codex itself, not the app-server daemon the TUI and the Desktop app start, nor its other helpers. */
+const CODEX_DETECT = "(^|/|\\s)codex(?!\\s+(app-server|exec-server|mcp-server|remote-control)\\b)(\\s|$)";
 
 const BUILTIN_TYPES = [
   {
@@ -181,15 +216,19 @@ const BUILTIN_TYPES = [
   },
   {
     name: "codex",
-    description: "OpenAI Codex CLI (non-interactive). Add e.g. --full-auto or --skip-git-repo-check via extra args.",
+    description: CODEX_DESCRIPTION,
     command: "codex",
     args: ["exec", "{prompt}"],
     interactive_args: ["{prompt}"],
     resume_args: ["resume", "{session}"],
     env: {},
-    detect: "(^|/|\\s)codex(\\s|$)",
+    detect: CODEX_DETECT,
   },
 ];
+
+// Built-in codex rows from before 0.16x: --full-auto is gone from Codex, and the old detect caught its app-server daemon.
+db.prepare("UPDATE process_types SET description = ? WHERE name = 'codex' AND builtin = 1 AND description LIKE 'OpenAI Codex CLI (non-interactive)%'").run(CODEX_DESCRIPTION);
+db.prepare("UPDATE process_types SET detect = ? WHERE name = 'codex' AND builtin = 1 AND detect = ?").run(CODEX_DETECT, "(^|/|\\s)codex(\\s|$)");
 
 export function seedBuiltinTypes() {
   const insert = db.prepare(
