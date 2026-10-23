@@ -56,6 +56,12 @@ export const config = {
    * config, and `codex exec` defaults to read-only: a headless run can then change nothing.
    */
   codexSandboxMode: parseSandbox(process.env.CODEX_SANDBOX_MODE ?? ""),
+  /**
+   * Claude Code renderer for interactive runs (`--settings {"tui":…}`). "default" keeps claude off the alternate
+   * screen, so tmux keeps its history and each viewer scrolls it locally; "fullscreen" sends every wheel tick to
+   * claude, shared by all viewers. "keep" leaves the user's own setting alone.
+   */
+  claudeTui: process.env.CLAUDE_TUI?.trim() || "default",
   schedulerIntervalMs: Number(process.env.SCHEDULER_INTERVAL_MS ?? 15_000),
   /**
    * A workflow's interactive claude run ends once the agent has finished and stayed idle this long, with nobody

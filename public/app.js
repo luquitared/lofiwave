@@ -651,7 +651,7 @@ const systemLight = matchMedia("(prefers-color-scheme: light)");
 function applyTheme(pref = themePref()) {
   document.documentElement.dataset.theme = pref === "system" ? (systemLight.matches ? "wave-light" : "wave") : pref;
   const meta = $('meta[name="theme-color"]'); if (meta) meta.content = getComputedStyle(document.documentElement).getPropertyValue("--bg").trim();
-  if (liveTerm) { liveTerm.term.options.theme = termTheme(); if (liveTerm.hist) liveTerm.hist.term.options.theme = termTheme(); }
+  if (liveTerm) { liveTerm.term.options.theme = termTheme(); if (liveTerm.hist) liveTerm.hist.body.style.setProperty("--hist-bg", termTheme().background); }
 }
 systemLight.addEventListener("change", () => themePref() === "system" && applyTheme());
 // ---------------------------------------------------------------- run targets (Settings)
@@ -1374,6 +1374,18 @@ function isBareMotion(d) {
 }
 
 const termTheme = () => ({ background: getComputedStyle(document.documentElement).getPropertyValue("--term-bg").trim() || "#110e14" });
+/**
+ * Draw with WebGL where the browser has it: the default DOM renderer rebuilds rows of spans on every redraw, which
+ * is what makes a full-screen TUI feel sluggish. If the GPU context is lost, xterm falls back to the DOM renderer.
+ */
+function useWebgl(term) {
+  if (!window.WebglAddon) return;
+  try {
+    const gl = new WebglAddon.WebglAddon();
+    gl.onContextLoss(() => gl.dispose());
+    term.loadAddon(gl);
+  } catch {}
+}
 const termOptions = (extra) => ({ fontFamily: getComputedStyle(document.body).getPropertyValue("--mono") || "monospace", fontSize: 13, macOptionClickForcesSelection: true, altClickMovesCursor: false, theme: termTheme(), ...extra });
 
 // ---------------------------------------------------------------- private scrollback
@@ -1381,68 +1393,152 @@ const termOptions = (extra) => ({ fontFamily: getComputedStyle(document.body).ge
 // wheel never reaches tmux: scrolling up opens a read-only snapshot of the pane's history over the live terminal, in
 // this browser only. Scrolling past the bottom, Esc or clicking the bar returns to the live view; typing returns too,
 // and the keys go to the session.
+//
+// The snapshot is plain text in a <pre> that the browser scrolls itself, not a second xterm: xterm redraws whole rows,
+// so its scrolling steps a line at a time, while a native scroller follows the trackpad pixel for pixel, with momentum.
+
+// xterm's default 16-colour palette, so the snapshot looks like the live terminal.
+const ANSI16 = ["#2e3436", "#cc0000", "#4e9a06", "#c4a000", "#3465a4", "#75507b", "#06989a", "#d3d7cf", "#555753", "#ef2929", "#8ae234", "#fce94f", "#729fcf", "#ad7fa8", "#34e2e2", "#eeeeec"];
+function ansi256(n) {
+  if (n < 16) return ANSI16[n];
+  if (n >= 232) { const v = 8 + 10 * (n - 232); return `rgb(${v},${v},${v})`; }
+  const lv = [0, 95, 135, 175, 215, 255], i = n - 16;
+  return `rgb(${lv[Math.floor(i / 36)]},${lv[Math.floor(i / 6) % 6]},${lv[i % 6]})`;
+}
+const escHtml = (s) => s.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]);
+/** tmux `capture-pane -e` output → HTML: SGR colours and styles become spans, any other escape is dropped. */
+function ansiToHtml(text) {
+  let st = {}, out = "";
+  const span = (chunk) => {
+    if (!chunk) return;
+    let fg = st.fg, bg = st.bg;
+    if (st.inverse) [fg, bg] = [bg || "var(--hist-bg)", fg || "var(--hist-fg)"];
+    const css = [fg && `color:${fg}`, bg && `background:${bg}`, st.bold && "font-weight:bold", st.dim && "opacity:.6", st.italic && "font-style:italic",
+      (st.underline || st.strike) && `text-decoration:${[st.underline && "underline", st.strike && "line-through"].filter(Boolean).join(" ")}`].filter(Boolean).join(";");
+    out += css ? `<span style="${css}">${escHtml(chunk)}</span>` : escHtml(chunk);
+  };
+  const re = /\x1b\[([0-9;:]*)m|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-9;?]*[A-Za-z]|\x1b[()][A-Za-z0-9]|\x1b./g;
+  let last = 0, m;
+  while ((m = re.exec(text))) {
+    span(text.slice(last, m.index)); last = re.lastIndex;
+    if (m[1] === undefined) continue;
+    const p = m[1].split(/[;:]/).map((x) => Number(x) || 0);
+    for (let i = 0; i < p.length; i++) {
+      const c = p[i];
+      if (c === 0) st = {};
+      else if (c === 1) st.bold = true; else if (c === 2) st.dim = true; else if (c === 3) st.italic = true;
+      else if (c === 4) st.underline = true; else if (c === 7) st.inverse = true; else if (c === 9) st.strike = true;
+      else if (c === 22) st.bold = st.dim = false; else if (c === 23) st.italic = false; else if (c === 24) st.underline = false;
+      else if (c === 27) st.inverse = false; else if (c === 29) st.strike = false;
+      else if (c >= 30 && c <= 37) st.fg = ANSI16[c - 30]; else if (c >= 90 && c <= 97) st.fg = ANSI16[c - 82];
+      else if (c >= 40 && c <= 47) st.bg = ANSI16[c - 40]; else if (c >= 100 && c <= 107) st.bg = ANSI16[c - 92];
+      else if (c === 39) st.fg = null; else if (c === 49) st.bg = null;
+      else if (c === 38 || c === 48) {
+        let col = null;
+        if (p[i + 1] === 5) { col = ansi256(p[i + 2] & 255); i += 2; }
+        else if (p[i + 1] === 2) { col = `rgb(${p[i + 2]},${p[i + 3]},${p[i + 4]})`; i += 4; }
+        st[c === 38 ? "fg" : "bg"] = col;
+      }
+    }
+  }
+  span(text.slice(last));
+  return out;
+}
+
+// The snapshot is fetched as soon as the pointer comes over the terminal, so the first wheel tick opens it at once.
+// It's only used while fresh; an older one is fetched again.
+const HIST_FRESH_MS = 4000;
+function fetchHistory(t) {
+  if (t.histReq && Date.now() - t.histReq.at < HIST_FRESH_MS) return t.histReq.p;
+  const p = api("GET", `/runs/${t.runId}/history`);
+  t.histReq = { at: Date.now(), p };
+  p.catch(() => { if (t.histReq?.p === p) t.histReq = null; });
+  return p;
+}
+
+/** Keys typed in the history view, as the bytes xterm would have sent; null for keys that only close it. */
+function keyBytes(e) {
+  if (e.ctrlKey && !e.altKey && e.key.length === 1) {
+    const c = e.key.toUpperCase().charCodeAt(0);
+    return c >= 64 && c <= 95 ? String.fromCharCode(c - 64) : null;
+  }
+  const named = { Enter: "\r", Backspace: "\x7f", Tab: "\t", ArrowUp: "\x1b[A", ArrowDown: "\x1b[B", ArrowRight: "\x1b[C", ArrowLeft: "\x1b[D" };
+  if (named[e.key]) return named[e.key];
+  return e.key.length === 1 ? (e.altKey ? "\x1b" : "") + e.key : null;
+}
+
 async function openHistory(t, lines) {
   if (t.hist) return;
   t.histLines = (t.histLoading ? t.histLines : 0) + lines; // keep counting while the snapshot loads
   if (t.histLoading) return;
   t.histLoading = true;
   let text, own_scroll;
-  try { ({ text, own_scroll } = await api("GET", `/runs/${t.runId}/history`)); }
+  try { ({ text, own_scroll } = await fetchHistory(t)); }
   catch (e) { toast(`couldn't load the history: ${e.message}`); return; }
   finally { t.histLoading = false; }
+  t.histReq = null; // a snapshot is shown once; the next one is fetched fresh
   if (t.closed || liveTerm !== t || t.hist) return;
   // Nothing to snapshot: the app draws full-screen and keeps its own history, so the wheel goes to it (shared, as before).
   if (own_scroll) { t.ownScroll = true; return; }
-  const body = h("div", { class: "term-history-body" });
+  const lineH = t.term.element ? t.term.element.clientHeight / t.term.rows : 16;
+  const fg = t.term.options.theme?.foreground || "#ffffff";
+  const body = h("pre", { class: "term-history-body", tabindex: "0" });
+  body.style.cssText = `font-family:${t.term.options.fontFamily};font-size:${t.term.options.fontSize}px;line-height:${lineH}px;--hist-fg:${fg};--hist-bg:${termTheme().background}`;
+  body.innerHTML = ansiToHtml(text);
   const box = h("div", { class: "term-history" },
     h("div", { class: "term-history-bar", title: "back to the live screen", onclick: () => closeHistory(t) }, "Scrolled back · only you see this · snapshot, the session keeps running · scroll down or Esc to return"),
     body);
   t.el.append(box);
-  const term = new Terminal(termOptions({ scrollback: 10000, cursorBlink: false, cursorInactiveStyle: "none" }));
-  const fit = new FitAddon.FitAddon();
-  term.loadAddon(fit);
-  term.open(body);
-  try { fit.fit(); } catch {}
-  t.hist = { box, term, fit };
-  term.attachCustomKeyEventHandler((e) => {
-    if (e.type !== "keydown") return true;
-    if (e.key === "Escape") { e.preventDefault(); closeHistory(t); return false; }
-    if (e.ctrlKey && e.shiftKey && (e.key === "F" || e.key === "f")) { e.preventDefault(); toggleFull(); return false; }
-    return true;
+  body.scrollTop = body.scrollHeight - body.clientHeight - t.histLines * lineH;
+  t.hist = { box, body, lineH, overscroll: 0 };
+  body.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") { e.preventDefault(); closeHistory(t); return; }
+    if (e.ctrlKey && e.shiftKey && (e.key === "F" || e.key === "f")) { e.preventDefault(); toggleFull(); return; }
+    if (e.metaKey || ["Shift", "Control", "Alt", "Meta", "CapsLock"].includes(e.key)) return; // ⌘C copies, modifiers alone do nothing
+    if (["PageUp", "PageDown", "Home", "End"].includes(e.key)) return; // these scroll the snapshot
+    e.preventDefault();
+    const d = keyBytes(e);
+    closeHistory(t);
+    if (d && t.ws?.readyState === 1) t.ws.send(JSON.stringify({ t: "i", d }));
   });
-  term.onData((d) => { closeHistory(t); if (t.ws?.readyState === 1) t.ws.send(JSON.stringify({ t: "i", d })); });
-  term.write("\x1b[?25l" + text.replace(/\n/g, "\r\n"), () => { term.scrollToBottom(); term.scrollLines(-t.histLines); });
-  term.focus();
+  body.addEventListener("paste", (e) => {
+    const d = e.clipboardData?.getData("text");
+    e.preventDefault(); closeHistory(t);
+    if (d && t.ws?.readyState === 1) t.ws.send(JSON.stringify({ t: "i", d }));
+  });
+  body.focus({ preventScroll: true });
 }
 function closeHistory(t) {
   if (!t.hist) return;
-  const { box, term } = t.hist; t.hist = null;
-  term.dispose(); box.remove();
+  const { box } = t.hist; t.hist = null;
+  box.remove();
   if (!t.closed) t.term.focus();
 }
-/** Lines the history view scrolls per line's worth of wheel movement. A session that scrolls itself gets one wheel step
- * per line instead: apps already move several lines a step. */
-const WHEEL_SPEED = 3;
 /**
  * Capture-phase wheel handler on the terminal box. The wheel never reaches tmux: on the live terminal, scrolling up
- * opens the private history; in the history we scroll by whole lines ourselves (xterm's own wheel handling crawls
- * on pixel deltas), and scrolling down past the bottom closes it. A session that scrolls itself (a full-screen app
- * with no tmux history) gets the wheel as mouse reports, as many as the movement is worth: xterm would send at most
- * one per wheel event, which crawls.
+ * opens the private history. In the history the browser does the scrolling; we only watch for scrolling down at the
+ * bottom, which closes it. A session that scrolls itself (a full-screen app with no tmux history) gets the wheel as
+ * mouse reports, as many as the movement is worth: xterm would send at most one per wheel event, which crawls.
  */
 function onTermWheel(t, e) {
   if (t.ownScroll && !t.mouseModes?.size) return; // nothing is listening for the mouse: leave it to xterm
-  e.preventDefault(); e.stopPropagation();
   const px = t.term.element ? t.term.element.clientHeight / t.term.rows : 16; // one line, in pixels
-  t.wheelAcc = (t.wheelAcc || 0) + (t.ownScroll ? 1 : WHEEL_SPEED) * (e.deltaMode === 1 ? e.deltaY : e.deltaMode === 2 ? e.deltaY * t.term.rows : e.deltaY / px);
+  const dy = e.deltaMode === 1 ? e.deltaY * px : e.deltaMode === 2 ? e.deltaY * t.term.element.clientHeight : e.deltaY;
+  if (t.hist) {
+    const b = t.hist.body;
+    const atBottom = b.scrollTop >= b.scrollHeight - b.clientHeight - 1;
+    if (dy < 0 || !atBottom) { t.hist.overscroll = 0; return; } // native scroll
+    e.preventDefault();
+    if ((t.hist.overscroll += dy) >= 2 * px) closeHistory(t);
+    return;
+  }
+  e.preventDefault(); e.stopPropagation();
+  t.wheelAcc = !t.ownScroll && dy > 0 ? 0 : (t.wheelAcc || 0) + dy / px;
   const lines = Math.trunc(t.wheelAcc);
   if (!lines) return;
   t.wheelAcc -= lines;
   if (t.ownScroll) return sendWheel(t, e, lines);
-  if (!t.hist) { if (lines < 0) openHistory(t, -lines); return; }
-  const b = t.hist.term.buffer.active;
-  if (lines > 0 && b.viewportY >= b.baseY) closeHistory(t);
-  else t.hist.term.scrollLines(lines);
+  openHistory(t, -lines);
 }
 
 /**
@@ -1508,6 +1604,7 @@ function openTerm(runId) {
   const fit = new FitAddon.FitAddon();
   term.loadAddon(fit);
   term.open(el);
+  useWebgl(term);
   const t = { runId, el, term, fit, ws: null, ro: null, retry: null, closed: false };
   liveTerm = t;
   const status = (msg) => { const s = $(".term-status", el); if (s) s.textContent = msg; };
@@ -1529,14 +1626,14 @@ function openTerm(runId) {
   term.parser.registerCsiHandler({ prefix: "?", final: "l" }, trackModes(false));
   if (selectMode) setMouseTracking(term, false);
   el.addEventListener("wheel", (e) => onTermWheel(t, e), { capture: true, passive: false });
+  el.addEventListener("pointerenter", () => { if (!t.ownScroll && !t.hist) fetchHistory(t).catch(() => {}); });
   // Copy on select: the forced (Option/Shift) selection, or one in the history view, goes to the clipboard on mouse-up.
   el.addEventListener("mouseup", () => {
-    const from = t.hist?.term ?? term;
-    const sel = from.hasSelection() && from.getSelection();
+    const sel = t.hist ? String(getSelection() || "") : term.hasSelection() && term.getSelection();
     if (sel) navigator.clipboard?.writeText(sel).then(() => toast(`copied ${sel.length} chars`, true), () => {});
   });
   term.onResize(({ cols, rows }) => { if (!t.parked) send({ t: "r", cols, rows }); });
-  t.ro = new ResizeObserver(() => { if (t.parked) return; try { fit.fit(); t.hist?.fit.fit(); } catch {} });
+  t.ro = new ResizeObserver(() => { if (t.parked) return; try { fit.fit(); } catch {} });
   t.ro.observe(el);
   const connect = () => {
     if (t.closed) return;

@@ -5,6 +5,7 @@
  *  - PermissionRequest → approvals answered from the chat view (./approvals.ts)
  *  - MessageDisplay → streaming text; UserPromptSubmit, Stop → per-turn git checkpoints (./live.ts)
  *  - statusLine → usage and context (scripts/claude-statusline.ts, which still runs the user's own statusline)
+ *  - tui → the renderer (CLAUDE_TUI)
  *
  * The run id and token reach the hooks as headers from the run's env (only variables listed in allowedEnvVars are
  * interpolated), so one file serves every run.
@@ -36,6 +37,8 @@ export function chatSettingsPath(): string {
       Stop: [{ hooks: [http("/api/hooks/turn", 10)] }],
     },
     statusLine: { type: "command", command: `${shq(process.execPath)} ${shq(join(config.root, "scripts", "claude-statusline.ts"))}`, padding: 0 },
+    // The renderer (CLAUDE_TUI): "default" keeps claude off the alternate screen, so tmux keeps the history.
+    ...(config.claudeTui !== "keep" ? { tui: config.claudeTui } : {}),
   };
   const path = join(config.dataDir, "claude-chat.json");
   writeFileSync(path, JSON.stringify(settings, null, 2) + "\n", { mode: 0o600 });

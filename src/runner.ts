@@ -190,7 +190,11 @@ export function buildCommand(type: ProcessTypeRow, opts: { cwd: string; prompt?:
   // and per-turn checkpoints in the chat view. They merge with the user's and the project's hooks. A run that brings
   // its own --settings is left alone, and so is a run on a target: the file is on this machine, not in the sandbox.
   const picksSettings = [...templ, ...extra].some((a) => a === "--settings" || a.startsWith("--settings="));
-  if ((opts.interactive || opts.resumeSession) && basename(command) === "claude" && !picksSettings && !opts.target) templ.push("--settings", chatSettingsPath());
+  // A run on a target still gets the renderer (CLAUDE_TUI), which the file would have carried.
+  if ((opts.interactive || opts.resumeSession) && basename(command) === "claude" && !picksSettings) {
+    if (!opts.target) templ.push("--settings", chatSettingsPath());
+    else if (config.claudeTui !== "keep") templ.push("--settings", JSON.stringify({ tui: config.claudeTui }));
+  }
   return { command, args: [...templ, ...extra], template_len: templ.length };
 }
 
