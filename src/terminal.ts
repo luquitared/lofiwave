@@ -30,6 +30,9 @@ async function macApp(name: string): Promise<boolean> {
 }
 
 /** macOS: iTerm first (the user's own terminal), then Terminal.app. */
+// An app with a modal dialog up never answers, and macOS only gives up on the Apple event after 2 minutes.
+const OPEN_TIMEOUT_MS = 10_000;
+
 async function openMac(shellCmd: string, want: string): Promise<TerminalResult> {
   const tryITerm = want === "auto" || want === "iterm" || want === "iterm2";
   const tryTerminal = want === "auto" || want === "terminal" || want === "terminal.app" || want === "apple terminal";
@@ -40,17 +43,17 @@ async function openMac(shellCmd: string, want: string): Promise<TerminalResult> 
   activate
   create window with default profile command "${appleQuote(shellCmd)}"
 end tell`;
-    const r = await run(["osascript", "-e", script]);
+    const r = await run(["osascript", "-e", script], OPEN_TIMEOUT_MS);
     if (r.code === 0) return { opened: true, app: "iTerm" };
     if (!tryTerminal) return { opened: false, app: "iTerm", error: r.err };
-    // iTerm is installed but refused (locked screen, no automation permission): fall through to Terminal.
+    // iTerm is installed but refused or hung (locked screen, no automation permission, a dialog up): fall through to Terminal.
   }
   if (tryTerminal) {
     const script = `tell application "Terminal"
   activate
   do script "${appleQuote(shellCmd)}"
 end tell`;
-    const r = await run(["osascript", "-e", script]);
+    const r = await run(["osascript", "-e", script], OPEN_TIMEOUT_MS);
     if (r.code === 0) return { opened: true, app: "Terminal" };
     return { opened: false, app: "Terminal", error: r.err };
   }

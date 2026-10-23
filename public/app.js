@@ -1015,7 +1015,7 @@ function pinGroups(runs, rest, item) {
 
 function renderRail() {
   const { live, headless, adoptable, ended } = consoleData;
-  const sig = JSON.stringify([consoleView, live.map((r) => [r.id, runLabel(r), r.pinned_at]), headless.map((r) => [r.id, runLabel(r)]), adoptable.map((p) => [p.pid, p.session?.session_id || "", p.session?.web_url || ""]), ended.map((r) => [r.id, runLabel(r), r.pinned_at]), endedRun?.id]);
+  const sig = JSON.stringify([consoleView, live.map((r) => [r.id, runLabel(r), r.pinned_at]), headless.map((r) => [r.id, runLabel(r)]), adoptable.map((p) => [p.pid, p.session?.session_id || "", p.session?.web_url || "", p.live_run]), ended.map((r) => [r.id, runLabel(r), r.pinned_at]), endedRun?.id]);
   if (sig === railSig) return patchRail();
   railSig = sig;
   if (consoleView === "ended") return $("#session-rail").replaceChildren(railBar(), h("div", { class: "rail-strip" }, ...endedRail()));
@@ -1038,9 +1038,13 @@ function renderRail() {
       h("div", { class: "rail-title" }, h("span", { class: `dot ${p.session?.status || ""}`, title: p.session?.status || "" }), p.session?.title || p.session?.name || `${p.type} · pid ${p.pid}`),
       h("div", { class: "rail-sub" }, `${p.type} · ${shortCwd(p.cwd) || "?"}`),
       h("div", { class: "rail-sub dim" }, `pid ${p.pid} · ${originOf(p)}`, p.session?.web_url ? h("a", { href: p.session.web_url, target: "_blank", style: "margin-left:8px" }, "web ↗") : ""),
-      p.session?.session_id
+      p.live_run
         ? h("div", { class: "row", style: "gap:6px" },
-            h("button", { class: "small", title: "reopen this session in a tmux pane here, so it can be driven from the browser", onclick: () => takeOver(p) }, "Take over here"),
+            h("button", { class: "small primary", title: "this conversation is already open here; this process is a second copy of it", onclick: () => selectConsoleRunId(p.live_run) }, `Open run #${p.live_run}`),
+            h("button", { class: "small danger", onclick: () => confirmDo(`Stop pid ${p.pid}? The conversation stays open in run #${p.live_run}.`, async () => { await del(`/processes/${p.pid}`); toast("SIGTERM sent", true); loadConsole(); }) }, "Stop this copy"))
+      : p.session?.session_id
+        ? h("div", { class: "row", style: "gap:6px" },
+            h("button", { class: "small", title: "stop it and reopen the conversation in a tmux pane here, so it can be driven from the browser", onclick: () => takeOver(p) }, "Take over here"),
             chatBtn(p.session),
             remoteControlBtn(p.pid, p.session, Boolean(p.session.tmux)))
         : h("div", { class: "rail-sub dim" }, "no session id — can't take over"),
@@ -1184,15 +1188,15 @@ function patchRail() {
 }
 
 /**
- * Reopen a session in a tmux pane we can type into. When the session is still running (every process in
- * these lists is), claude keeps the same session id, so the new process shares the original's transcript —
- * two agents writing one history. Worth a word before doing it.
+ * Reopen a session in a tmux pane we can type into. The process in these lists is still running, and a resume keeps
+ * its session id, so the server stops it first (replace_pid): two agents on one transcript interleave their histories.
  */
 function takeOver(p) {
   const label = p.session?.title || p.session?.name || `pid ${p.pid}`;
-  if (!confirm(`Take over "${label}"?\n\nThat session is still running, so this starts a SECOND ${p.type} on the same conversation — both write the same transcript and their histories interleave. Stop the original first if you don't want that.`)) return;
+  if (!confirm(`Take over "${label}"?\n\nThis stops the ${p.type} running now (pid ${p.pid}) and reopens the same conversation here. Anything it is doing right now is interrupted.`)) return;
   return guard(async () => {
-    const r = await post("/sessions/resume", { agent: p.session.agent, session_id: p.session.session_id, cwd: p.session.cwd || p.cwd });
+    toast("stopping the original and reopening here…", true);
+    const r = await post("/sessions/resume", { agent: p.session.agent, session_id: p.session.session_id, cwd: p.session.cwd || p.cwd, replace_pid: p.pid });
     toast(`taking over as run #${r.id}`, true);
     selectConsoleRunId(r.id);
     await loadConsole();

@@ -470,7 +470,10 @@ route("GET", "/api/console", async () => {
   const headless = running.filter((r) => !JSON.parse(r.meta || "{}").interactive).map(withSessions);
   const liveRunIds = new Set(live.map((r) => r.id));
   // adoptable: agent processes on this machine the console cannot drive (started in a terminal, or a headless run).
-  const adoptable = (await listConsoleProcesses(undefined, "agent")).filter((p) => !p.child && !(p.run_id && liveRunIds.has(p.run_id)));
+  // live_run: the conversation is already open in one of ours, so this process is a second copy, not one to take over.
+  const liveBySession = new Map(live.flatMap((r) => r.sessions.map((s) => [s.session_id, r.id] as const)));
+  const adoptable = (await listConsoleProcesses(undefined, "agent")).filter((p) => !p.child && !(p.run_id && liveRunIds.has(p.run_id)))
+    .map((p) => ({ ...p, live_run: (p.session?.session_id && liveBySession.get(p.session.session_id)) || null }));
   // ended: recent interactive runs that have stopped, newest first, one per conversation, leaving out any that is live again.
   const seen = new Set(live.flatMap((r) => r.sessions.map((s) => s.session_id)));
   const ended = db.query<RunRow, []>("SELECT * FROM runs WHERE status != 'running' AND json_extract(meta, '$.interactive') = 1 ORDER BY pinned_at IS NULL, started_at DESC LIMIT 100").all()
@@ -785,7 +788,9 @@ route("POST", "/api/sessions/resume", async (req) => {
     agent = found.agent;
   }
   cwd ||= found?.cwd ?? "";
-  return json(runOut(await resumeAgentSession({ agent, sessionId: session_id, cwd, terminal: str(b.terminal, "terminal") })), 201);
+  const replacePid = b.replace_pid === undefined ? undefined : Number(b.replace_pid);
+  if (replacePid !== undefined && (!Number.isInteger(replacePid) || replacePid <= 1 || replacePid === process.pid)) throw new ApiError(400, "invalid replace_pid");
+  return json(runOut(await resumeAgentSession({ agent, sessionId: session_id, cwd, terminal: str(b.terminal, "terminal"), replacePid })), 201);
 });
 // What a pasted session id points to (agent, folder, title), before resuming it. ?agent= narrows the search.
 route("GET", "/api/sessions/:sid", (_r, p, url) => {
