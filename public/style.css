@@ -300,12 +300,16 @@ body[data-tab="console"] #tab-console.active { flex:1; min-height:0; display:fle
 /* the pin sits in the item's top-right corner: faint until hovered, solid when pinned */
 .rail-slot { position:relative; flex:none; display:flex; }
 .rail-slot > .rail-item { flex:1; min-width:0; }
-.rail-slot > .rail-item .tile-act { padding-right:22px; }
-.rail-pin { position:absolute; top:8px; right:8px; min-height:0; padding:2px 4px; font-size:12px; line-height:1; background:transparent; border:0; opacity:0; filter:grayscale(1); }
-.rail-slot:hover .rail-pin, .rail-pin:focus-visible { opacity:.55; }
-.rail-pin:hover { opacity:1 !important; background:transparent; }
-.rail-slot.pinned .rail-pin { opacity:1; filter:none; }
-@media (hover:none) { .rail-pin { opacity:.4; } }
+.rail-slot > .rail-item .tile-act { padding-right:28px; }
+.rail-pin { position:absolute; top:6px; right:6px; width:28px; height:28px; min-height:0; padding:0; display:grid; place-items:center; color:var(--muted); background:transparent; border:0; border-radius:50%; opacity:0; }
+.rail-pin::before { content:""; width:15px; height:15px; background:currentColor; -webkit-mask:var(--pin-icon) center / contain no-repeat; mask:var(--pin-icon) center / contain no-repeat; }
+.rail-pin { --pin-icon:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M5.5 1.75h5M6.5 1.75v4L4 8.75h8L9.5 5.75v-4M8 8.75v5.5'/%3E%3C/svg%3E"); }
+.rail-slot.pinned .rail-pin { --pin-icon:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='black' stroke='black' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M5.5 1.75h5M6.5 1.75v4L4 8.75h8L9.5 5.75v-4z'/%3E%3Cpath d='M8 8.75v5.5' fill='none'/%3E%3C/svg%3E"); color:var(--accent); opacity:1; }
+.rail-slot:hover .rail-pin, .rail-pin:focus-visible { opacity:.7; }
+.rail-pin:hover { opacity:1 !important; color:var(--text); background:var(--hover); }
+.rail-slot.pinned .rail-pin:hover { color:var(--accent-hover); }
+@media (hover:none) { .rail-pin { opacity:.45; width:36px; height:36px; top:2px; right:2px; } }
+.rail-strip > .rail-head:first-child { margin-top:0; padding-top:2px; border-top:0; }
 .tile-act { display:flex; align-items:center; gap:7px; font-size:12px; color:var(--muted); }
 .tile-act .dot { margin:0; }
 .tile-act.working { color:var(--ok); }

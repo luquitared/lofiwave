@@ -1003,7 +1003,14 @@ const setPinned = (r, pinned) => guard(async () => {
 function pinnable(r, card) {
   const on = Boolean(r.pinned_at);
   return h("div", { class: `rail-slot ${on ? "pinned" : ""}` }, card,
-    h("button", { class: "rail-pin", title: on ? "Unpin" : "Pin to the top", "aria-label": `${on ? "Unpin" : "Pin"} ${runLabel(r)}`, "aria-pressed": String(on), onclick: () => setPinned(r, !on) }, "📌"));
+    h("button", { class: "rail-pin", title: on ? "Unpin" : "Pin to the top", "aria-label": `${on ? "Unpin" : "Pin"} ${runLabel(r)}`, "aria-pressed": String(on), onclick: () => setPinned(r, !on) }));
+}
+/** With anything pinned, the list reads "Pinned", then the rest under `rest`; with nothing pinned, no headings. */
+function pinGroups(runs, rest, item) {
+  const pinned = runs.filter((r) => r.pinned_at), others = runs.filter((r) => !r.pinned_at);
+  if (!pinned.length) return runs.map(item);
+  return [h("div", { class: "rail-head" }, h("span", {}, "Pinned")), ...pinned.map(item),
+    others.length ? h("div", { class: "rail-head" }, h("span", {}, rest)) : "", ...others.map(item)];
 }
 
 function renderRail() {
@@ -1013,7 +1020,7 @@ function renderRail() {
   railSig = sig;
   if (consoleView === "ended") return $("#session-rail").replaceChildren(railBar(), h("div", { class: "rail-strip" }, ...endedRail()));
   $("#session-rail").replaceChildren(railBar(), h("div", { class: "rail-strip" },
-    ...live.map((r) => pinnable(r, h("button", { class: `rail-item tile ${consoleRun?.id === r.id ? "active" : ""} ${actOf(r) === "waiting_input" ? "needs" : ""}`, "data-run": r.id, "aria-current": consoleRun?.id === r.id ? "true" : "false", onclick: () => selectConsoleRun(r) },
+    ...pinGroups(live, "Live", (r) => pinnable(r, h("button", { class: `rail-item tile ${consoleRun?.id === r.id ? "active" : ""} ${actOf(r) === "waiting_input" ? "needs" : ""}`, "data-run": r.id, "aria-current": consoleRun?.id === r.id ? "true" : "false", onclick: () => selectConsoleRun(r) },
       h("div", { class: `tile-act ${actOf(r)}` }, h("span", { class: `dot ${actOf(r)}` }), h("span", { class: "tile-act-text" }, tileAct(r))),
       h("div", { class: "rail-title" }, runLabel(r)),
       meter(r),
@@ -1044,7 +1051,7 @@ function renderRail() {
 function endedRail() {
   const { ended } = consoleData;
   if (!ended.length) return [h("div", { class: "rail-head" }, h("span", {}, "Nothing ended yet"))];
-  return ended.map((r) => pinnable(r, h("button", { class: `rail-item tile ${endedRun?.id === r.id ? "active" : ""}`, "aria-current": endedRun?.id === r.id ? "true" : "false", onclick: () => selectEndedRun(r) },
+  return pinGroups(ended, "Ended", (r) => pinnable(r, h("button", { class: `rail-item tile ${endedRun?.id === r.id ? "active" : ""}`, "aria-current": endedRun?.id === r.id ? "true" : "false", onclick: () => selectEndedRun(r) },
     h("div", { class: "tile-act" }, h("span", { class: "dot" }), h("span", {}, r.status && r.status !== "success" ? r.status : "ended")),
     h("div", { class: "rail-title" }, runLabel(r)),
     h("div", { class: "rail-sub" }, r.workflow_name ? h("span", { class: "wf-tag" }, `⌁ ${r.workflow_name}`) : "", groupTag(r), `${r.type_name} · ${shortCwd(r.cwd)}${byWho(r)}`),
