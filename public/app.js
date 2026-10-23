@@ -180,7 +180,7 @@ function switchTab(name, push = true) {
   if (name === "advanced") name = ADVANCED.includes(localStorage.getItem("ac_advanced")) ? localStorage.getItem("ac_advanced") : "runs";
   if (!TITLES[name]) name = "console";
   if (name !== "runs" && selectedRun) closeRun(false);
-  if (name !== "console") { closeTerm(); closeChat(); syncFull(false); }
+  if (name !== "console") { closeTerm(); closeChat(); syncFull(false); setDrawer(false); }
   activeTab = name;
   document.body.dataset.tab = name;
   const advanced = ADVANCED.includes(name);
@@ -916,6 +916,7 @@ const loadConsole = guard(async () => {
   consoleData.ended = pinnedFirst(consoleData.ended);
   const { live, ended } = consoleData;
   noteMeter(live);
+  $("#drawer-btn").classList.toggle("alert", live.some((r) => actOf(r) === "waiting_input"));
   if (linkedRun) {
     const id = linkedRun; linkedRun = null;
     if (live.some((r) => r.id === id)) setConsoleView("live", false);
@@ -933,6 +934,7 @@ const loadConsole = guard(async () => {
 });
 
 function selectConsoleRun(run) {
+  setDrawer(false);
   if (run.id === consoleRun?.id) return;
   consoleRun = run; paneSig = "";
   localStorage.setItem("ac_console_run", String(run.id));
@@ -948,6 +950,7 @@ function setConsoleView(view, render = true) {
   if (render) { syncConsoleHash(); renderRail(); renderPane(); }
 }
 function selectEndedRun(run) {
+  setDrawer(false);
   if (run.id === endedRun?.id) return;
   endedRun = run; railSig = "";
   syncConsoleHash(); renderRail(); renderPane();
@@ -958,9 +961,23 @@ function railTabs() {
   const tab = (view, label, n) => h("button", { role: "tab", class: consoleView === view ? "active" : "", "aria-selected": String(consoleView === view), onclick: () => setConsoleView(view) }, `${label} ${n}`);
   return h("div", { class: "subnav rail-tabs", role: "tablist", "aria-label": "Sessions" }, tab("live", "Live", consoleData.live.length), tab("ended", "Ended", consoleData.ended.length));
 }
-/** The row above the tiles: Live / Ended, and Resume. */
-const railBar = () => h("div", { class: "rail-bar" }, railTabs(),
-  h("button", { class: "small", title: "Reopen a claude or codex session from its id", onclick: openResumeDialog }, "Resume"));
+/** The drawer's top row: close, Live / Ended, and Resume. */
+const railBar = () => h("div", { class: "rail-bar" },
+  h("button", { class: "drawer-x", "aria-label": "Close the session list", onclick: () => setDrawer(false) }, "×"),
+  railTabs(),
+  h("button", { class: "small rail-resume", title: "Reopen a claude or codex session from its id", onclick: openResumeDialog }, "Resume"));
+
+// ---------------------------------------------------------------- the session drawer
+// The session list slides in from the left (☰ in the top bar) and closes when you pick one, tap outside or press Esc.
+function setDrawer(open) {
+  document.body.classList.toggle("drawer-open", open);
+  $("#drawer-btn").setAttribute("aria-expanded", String(open));
+  $("#drawer-backdrop").hidden = !open;
+  if (open) ($("#session-rail .rail-item.active") || $("#session-rail .tile-new") || $("#session-rail button"))?.focus({ preventScroll: true });
+}
+$("#drawer-btn").onclick = () => setDrawer(!document.body.classList.contains("drawer-open"));
+$("#drawer-backdrop").onclick = () => setDrawer(false);
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && document.body.classList.contains("drawer-open") && !$("dialog[open]")) { setDrawer(false); $("#drawer-btn").focus(); } });
 
 /** Pinned runs first, in the order they were pinned; the rest keep the server's order (newest first). */
 const pinnedFirst = (runs) => [...runs.filter((r) => r.pinned_at).sort((a, b) => a.pinned_at - b.pinned_at), ...runs.filter((r) => !r.pinned_at)];
@@ -990,7 +1007,7 @@ function renderRail() {
       h("div", { class: "rail-sub" }, r.workflow_name ? h("span", { class: "wf-tag" }, `⌁ ${r.workflow_name}`) : "", groupTag(r), `${r.type_name} · ${shortCwd(r.cwd)}${byWho(r)}`),
       h("div", { class: "rail-sub dim rail-up" }, railUp(r)),
     ))),
-    h("button", { class: "tile-new", onclick: () => openStartDialog({ kind: "agent" }) }, h("span", { "aria-hidden": "true" }, "+"), "Start a session"),
+    h("button", { class: "tile-new", onclick: () => { setDrawer(false); openStartDialog({ kind: "agent" }); } }, h("span", { "aria-hidden": "true" }, "+"), "Start a session"),
     headless.length ? h("div", { class: "rail-head" }, h("span", {}, `${headless.length} running · log only`)) : "",
     ...headless.map((r) => h("a", { class: "rail-item flat", href: `#runs/${r.id}`, onclick: (e) => { e.preventDefault(); openRun(r.id); } },
       h("div", { class: "rail-title" }, runLabel(r)),
@@ -1218,35 +1235,7 @@ function renderPane() {
   const up = $("#pane-up"); if (up) up.textContent = `up ${fmtDur((Date.now() - r.started_at) / 1000)}`;
   syncFull(mode === "terminal");
   if (mode === "terminal") openTerm(r.id);
-  else { openChat(r.id); pollPeek(r); }
-}
-
-// ---------------------------------------------------------------- terminal strip (under the chat)
-// The last lines of the real terminal, so you can see what the TUI is showing without leaving the chat. Polled with
-// the console while it is open; reading the screen counts as someone watching, like the terminal itself.
-const PEEK_LINES = 6;
-const peekOpen = () => { try { const v = localStorage.getItem("ac_peek"); return v ? v === "1" : !matchMedia("(max-width: 700px)").matches; } catch { return true; } };
-function peekFor(r) {
-  if (!r.meta?.tmux && !r.meta?.e2b) return "";
-  const open = peekOpen();
-  return h("section", { class: `peek ${open ? "open" : ""}`, "aria-label": "Terminal" },
-    h("div", { class: "peek-head" },
-      h("button", { class: "peek-toggle", "aria-expanded": String(open), onclick: () => { try { localStorage.setItem("ac_peek", open ? "0" : "1"); } catch {} paneSig = ""; renderPane(); } }, h("span", { class: "chev" }), "terminal"),
-      h("span", { class: "mono muted peek-where" }, r.meta?.e2b ? "E2B sandbox" : `tmux ${r.meta.tmux}`),
-    ),
-    open ? h("pre", { id: "peek-screen", class: "peek-screen" }) : "");
-}
-let peekBusy = false;
-async function pollPeek(r) {
-  const pre = $("#peek-screen");
-  if (!pre || peekBusy || document.hidden) return;
-  peekBusy = true;
-  try {
-    const { text } = await get(`/runs/${r.id}/screen?lines=${PEEK_LINES * 4}`);
-    const tail = text.split("\n").slice(-PEEK_LINES).join("\n");
-    if (pre.textContent !== tail) pre.textContent = tail;
-  } catch { /* the next refresh tries again */ }
-  finally { peekBusy = false; }
+  else openChat(r.id);
 }
 
 function paneFor(r) {
@@ -1273,7 +1262,7 @@ function paneFor(r) {
       ),
     ),
     mode === "terminal" ? h("div", { id: "console-term", class: "term" }, h("span", { class: "term-status" }, "connecting…")) : h("div", { id: "console-chat" }),
-    mode === "terminal" ? h("div", { class: "term-hint muted" }, copyHint()) : peekFor(r),
+    mode === "terminal" ? h("div", { class: "term-hint muted" }, copyHint()) : "",
     h("div", { class: "pane-foot muted mono" }, r.meta?.e2b ? `E2B sandbox ${r.meta.e2b.sandbox_id || "(starting…)"}${r.meta.e2b.paused ? " · paused while idle; opening the terminal resumes it" : ""}` : `tmux attach -t ${r.meta?.tmux || "?"}`),
   ];
 }

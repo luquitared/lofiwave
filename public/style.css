@@ -277,27 +277,28 @@ select { font-family:inherit; }
 }
 .form-error { padding:12px; border:1px solid var(--bad); border-radius:8px; color:var(--bad); background:var(--bad-bg); font-size:13px; overflow-wrap:anywhere; }
 
-/* ---------------------------------------------------------------- console: session strip + pane */
-/* Sessions fills the window: the strip of session tiles on top, the selected session below it. */
+/* ---------------------------------------------------------------- console: session list + pane */
+/* Sessions fills the window with the selected session; the session list is a drawer from the left (☰ in the top bar). */
 body[data-tab="console"] { height:100dvh; display:flex; flex-direction:column; overflow:hidden; }
 body[data-tab="console"] main { flex:1; min-height:0; width:100%; display:flex; flex-direction:column; padding-bottom:16px; }
 body[data-tab="console"] #tab-console.active { flex:1; min-height:0; display:flex; flex-direction:column; }
-.console-view { flex:1; min-height:0; display:flex; flex-direction:column; gap:18px; }
-.rail { flex:none; display:flex; flex-direction:column; gap:10px; min-width:0; }
-.rail-bar { display:flex; align-items:center; gap:10px; }
-.rail-bar > button { margin-left:auto; }
+.console-view { flex:1; min-height:0; display:flex; }
+.rail { min-width:0; min-height:0; display:flex; flex-direction:column; gap:12px; }
+.rail-bar { flex:none; display:flex; align-items:center; gap:8px; }
+.rail-bar > .rail-resume { margin-left:auto; }
 .rail-tabs { flex-shrink:0; }
-.rail-strip { display:flex; align-items:flex-start; gap:12px; overflow-x:auto; overscroll-behavior-x:contain; padding:2px 2px 6px; scrollbar-width:thin; }
-.rail-head { flex:0 0 auto; align-self:stretch; display:flex; align-items:center; max-width:120px; padding:0 2px 0 12px; border-left:1px solid var(--line); color:var(--muted); font-size:10px; letter-spacing:1px; text-transform:uppercase; line-height:1.5; }
-.rail-item { flex:0 0 236px; display:flex; flex-direction:column; gap:8px; min-height:136px; padding:14px; text-align:left; font:inherit; font-weight:400; color:var(--text); text-decoration:none; background:var(--panel); border:1.5px solid var(--line); border-radius:16px; }
+.drawer-x { display:grid; flex:none; width:36px; height:36px; min-height:36px; padding:0; place-items:center; font-size:20px; line-height:1; color:var(--muted); background:transparent; border:0; border-radius:50%; }
+.rail-strip { flex:1; min-height:0; display:flex; flex-direction:column; gap:8px; overflow-y:auto; overscroll-behavior:contain; padding:2px 4px 12px 2px; scrollbar-width:thin; }
+.rail-head { flex:none; margin-top:8px; padding:12px 2px 2px; border-top:1px solid var(--line); color:var(--muted); font-size:10px; letter-spacing:1px; text-transform:uppercase; line-height:1.5; }
+.rail-item { flex:none; display:flex; flex-direction:column; gap:6px; min-height:0; padding:12px 14px; text-align:left; font:inherit; font-weight:400; color:var(--text); text-decoration:none; background:var(--panel); border:1.5px solid var(--line); border-radius:14px; }
 .rail-item:hover { background:var(--hover); border-color:var(--hover-line); }
 .rail-item.active { background:var(--panel-2); border-color:var(--accent); }
 .rail-item.needs:not(.active) { border-color:var(--warn); }
-/* the pin sits in the tile's top-right corner: faint until hovered, solid when pinned */
-.rail-slot { position:relative; flex:0 0 236px; min-width:0; display:flex; }
+/* the pin sits in the item's top-right corner: faint until hovered, solid when pinned */
+.rail-slot { position:relative; flex:none; display:flex; }
 .rail-slot > .rail-item { flex:1; min-width:0; }
 .rail-slot > .rail-item .tile-act { padding-right:22px; }
-.rail-pin { position:absolute; top:9px; right:9px; min-height:0; padding:2px 4px; font-size:12px; line-height:1; background:transparent; border:0; opacity:0; filter:grayscale(1); }
+.rail-pin { position:absolute; top:8px; right:8px; min-height:0; padding:2px 4px; font-size:12px; line-height:1; background:transparent; border:0; opacity:0; filter:grayscale(1); }
 .rail-slot:hover .rail-pin, .rail-pin:focus-visible { opacity:.55; }
 .rail-pin:hover { opacity:1 !important; background:transparent; }
 .rail-slot.pinned .rail-pin { opacity:1; filter:none; }
@@ -306,25 +307,32 @@ body[data-tab="console"] #tab-console.active { flex:1; min-height:0; display:fle
 .tile-act .dot { margin:0; }
 .tile-act.working { color:var(--ok); }
 .tile-act.waiting_input { color:var(--warn); }
-.rail-title { font-size:15px; font-weight:600; line-height:1.3; letter-spacing:-.1px; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
+.rail-title { font-size:14.5px; font-weight:600; line-height:1.3; letter-spacing:-.1px; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
 .rail-sub { color:var(--muted); font-family:var(--mono); font-size:11px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .rail-item.flat .rail-sub { white-space:normal; overflow-wrap:anywhere; }
 .rail-sub.dim { color:var(--dim); }
 .rail-sub .wf-tag { font-family:var(--sans); }
 /* the last six minutes, one bar per 30 s: how much of it the session spent working */
-.meter { display:flex; align-items:flex-end; gap:3px; height:22px; margin-top:auto; }
-.meter i { flex:none; width:6px; border-radius:2px; background:var(--accent); transition:height .3s; }
+.meter { display:flex; align-items:flex-end; gap:3px; height:18px; }
+.meter i { flex:none; width:5px; border-radius:2px; background:var(--accent); transition:height .3s; }
 .meter i.idle { background:var(--toggle); }
 .meter i.wait { background:var(--warn); }
 .meter i.none { background:var(--line); }
-.tile-new { flex:0 0 170px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:4px; min-height:136px; color:var(--muted); background:transparent; border:1.5px dashed var(--toggle); border-radius:16px; }
-.tile-new span { font-size:22px; line-height:1; }
+.tile-new { flex:none; display:flex; align-items:center; justify-content:center; gap:8px; min-height:44px; padding:8px; color:var(--muted); background:transparent; border:1.5px dashed var(--toggle); border-radius:14px; }
+.tile-new span { font-size:18px; line-height:1; }
 .tile-new:hover { color:var(--text); background:var(--hover); }
 .rail-item.flat { background:transparent; }
 .rail-item.flat:hover { background:var(--panel-2); }
 .rail-item.flat .rail-title .dot { margin-right:6px; }
 .rail-item.flat button { width:100%; }
 .rail-item.flat .row { gap:6px; margin-top:2px; }.rail-item.flat .row button { flex:1 1 auto; width:auto; }
+/* the ☰ in the top bar that opens the list where it is a drawer; amber dot when a session needs you */
+.drawer-btn { position:relative; flex:none; display:grid; place-items:center; width:38px; height:38px; min-height:38px; padding:0; color:var(--text); background:var(--panel-2); border:0; border-radius:50%; }
+.drawer-btn.alert::after { content:""; position:absolute; top:5px; right:5px; width:9px; height:9px; border-radius:50%; background:var(--warn); box-shadow:0 0 0 2px var(--bg); }
+body:not([data-tab="console"]) .drawer-btn { display:none; }
+.drawer-backdrop { position:fixed; inset:0; z-index:29; background:var(--backdrop); }
+.rail { position:fixed; z-index:30; inset:0 auto 0 0; width:min(340px, 86vw); padding:14px 12px; padding-top:max(14px, env(safe-area-inset-top)); padding-bottom:max(12px, env(safe-area-inset-bottom)); background:var(--bg); border-right:1px solid var(--line); box-shadow:0 0 40px #0006; transform:translateX(-105%); visibility:hidden; transition:transform .22s ease, visibility 0s .22s; }
+body.drawer-open .rail { transform:none; visibility:visible; transition:transform .22s ease; }
 
 .pane { flex:1; min-height:0; display:flex; flex-direction:column; gap:12px; }
 .pane-head { flex:none; display:flex; align-items:center; justify-content:space-between; gap:10px 16px; flex-wrap:wrap; }
@@ -346,16 +354,6 @@ body.term-full .term-hint { margin-top:-4px; }
 .pane-empty h2 { font-size:22px; }
 .pane-empty p { margin:0; max-width:430px; font-size:13px; line-height:1.7; }
 
-/* the terminal strip under the chat: the last lines of the real terminal */
-.peek { flex:none; padding:4px 12px 8px; background:var(--term-bg); border:1px solid var(--line); border-radius:12px; font-family:var(--mono); font-size:12px; }
-.peek:not(.open) { padding-bottom:4px; }
-.peek-head { display:flex; align-items:center; gap:10px; }
-.peek-toggle { display:flex; align-items:center; gap:8px; min-height:30px; padding:2px 4px; font-family:var(--mono); font-size:12px; color:var(--text); background:transparent; border:0; }
-.peek-toggle:hover { background:transparent; color:var(--accent); }
-.peek-where { flex:1; min-width:0; font-size:11.5px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-.peek.open .chev::before { transform:rotate(45deg); }
-.peek-screen { height:calc(6 * 1.5em); margin:4px 0 0; overflow:hidden; white-space:pre; line-height:1.5; color:var(--text); }
-
 @media (max-width:900px) {
   body[data-tab="console"] main { padding-top:12px; }
   .console-view { gap:12px; }
@@ -364,29 +362,13 @@ body.term-full .term-hint { margin-top:-4px; }
   .pane form.keys { position:sticky; bottom:0; padding-block:8px; background:var(--panel); }
   .pane form.keys input { flex:1 1 100%; }
 }
-/* phones: the tiles shrink to chips you swipe through */
 @media (max-width:700px) {
-  .rail { gap:8px; }
-  .rail-strip { gap:8px; margin:0 -14px; padding:2px 14px 4px; scrollbar-width:none; }
-  .rail-strip::-webkit-scrollbar { display:none; }
-  .rail-slot, .rail-item.tile { flex:0 0 auto; max-width:220px; }
-  .rail-item.tile { flex-direction:row; align-items:center; gap:8px; min-height:0; padding:8px 14px; border-radius:999px; }
-  .rail-strip { align-items:center; }
-  .rail-item.tile .rail-title { font-size:13.5px; white-space:nowrap; text-overflow:ellipsis; display:block; }
-  .rail-item.tile .tile-act-text, .rail-item.tile .meter, .rail-item.tile .rail-sub { display:none; }
-  .rail-item.tile .tile-act { padding:0; }
-  .rail-slot .rail-pin { display:none; }
-  .tile-new { flex:0 0 auto; flex-direction:row; min-height:0; padding:8px 14px; border-radius:999px; white-space:nowrap; }
-  .tile-new span { font-size:16px; }
-  /* sessions started elsewhere stay on Advanced → Processes; the strip keeps to what you can open here */
-  .rail-head, .rail-item.flat { display:none; }
   .pane-head { gap:8px; }
   .pane-meta { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .pane-actions { flex-wrap:nowrap; overflow-x:auto; margin:0 -14px; padding:0 14px; scrollbar-width:none; }
   .pane-actions::-webkit-scrollbar { display:none; }
   .pane-actions > * { flex:none; }
   .pane-foot { display:none; }
-  .peek-screen { font-size:11px; }
 }
 
 /* people: who you are, who else is here */
@@ -738,7 +720,7 @@ dialog h3, .card h2 { font-family:var(--display); font-weight:700; letter-spacin
 
 /* ---------------------------------------------------------------- phones: give the conversation the screen */
 @media (max-width:700px) {
-  /* one row: logo, pages (swipe), connection, + */
+  /* one row: ☰, pages (swipe), connection, + */
   .console .topbar { flex-wrap:nowrap; gap:10px; padding:8px 12px; padding-top:max(8px, env(safe-area-inset-top)); }
   .brand > span { display:none; }
   .brand-mark { width:30px; height:30px; }
@@ -747,13 +729,8 @@ dialog h3, .card h2 { font-family:var(--display); font-weight:700; letter-spacin
   .topbar-right { gap:8px; flex:none; }
   #refresh-btn, #new-session-btn .label { display:none; }
   #new-session-btn { width:36px; min-height:36px; height:36px; padding:0; font-size:20px; line-height:1; border-radius:50%; }
-  /* Live / Ended and the session chips share one swipeable row */
-  .rail { flex-direction:row; align-items:center; gap:8px; overflow-x:auto; margin:0 -14px; padding:0 14px; scrollbar-width:none; }
-  .rail::-webkit-scrollbar { display:none; }
-  .rail-bar { flex:none; }
-  .rail-bar > button { display:none; }
-  .rail-tabs button { min-height:32px; padding:4px 11px; }
-  .rail-strip { flex:none; overflow:visible; margin:0; padding:0; }
+  .drawer-btn { width:36px; height:36px; min-height:36px; }
+  .brand { display:none; }
   /* the session: title and Remote Control on one line, then the actions */
   body[data-tab="console"] main { padding:10px 14px max(6px, env(safe-area-inset-bottom)); }
   .console-view { gap:10px; }
@@ -764,7 +741,6 @@ dialog h3, .card h2 { font-family:var(--display); font-weight:700; letter-spacin
   .pane-id .chip.mono, .pane-meta { display:none; }
   .pane-id .chip { flex:none; }
   .pane-actions button, .pane-actions .seg button { min-height:34px; }
-  .peek { display:none; }
   .chat-compose { padding-top:4px; }
   .chat-foot { padding-top:2px; }
 }
