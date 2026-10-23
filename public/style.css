@@ -190,6 +190,9 @@ a { color:var(--accent); }
 .sysinfo { overflow-wrap:anywhere; margin:16px 0 0; padding:16px 12px 0; border-top:1px solid var(--line); text-align:left; font-family:inherit; font-size:10px; line-height:1.8; }
 .console main { margin-left:184px; padding:0 28px 32px; max-width:1800px; }
 .page-top { display:flex; align-items:center; gap:18px; height:58px; margin-bottom:18px; border-bottom:1px solid var(--line); font-size:12px; }
+.setup-banner { display:flex; align-items:center; flex-wrap:wrap; gap:10px; margin:-6px 0 16px; padding:10px 14px; background:var(--sel); border:1px solid var(--sel-line); border-radius:8px; font-size:13px; }
+.setup-banner > span { flex:1; min-width:220px; }
+.setup-banner[hidden] { display:none; }
 .page-top-right { margin-left:auto; }
 #refresh-btn { min-height:30px; padding:4px 10px; color:var(--muted); background:transparent; }
 .connection { color:var(--muted); font-size:11px; white-space:nowrap; }.connection::before { content:""; display:inline-block; width:6px; height:6px; margin-right:7px; border-radius:50%; background:var(--warn); }.connection.online::before { background:var(--ok); box-shadow:0 0 0 4px color-mix(in srgb, var(--ok) 5%, transparent); }

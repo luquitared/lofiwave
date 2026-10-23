@@ -18,6 +18,7 @@ import { chatSend, chatInterrupt, chatScreen, chatCommands, chatUpload, deleteUp
 import { permissionHook, answerRequest, requestsFor } from "./chat/approvals";
 import { messageHook, statuslineHook, turnHook } from "./chat/live";
 import { turnChanges, turnFileDiff, dropCheckpoints } from "./chat/checkpoints";
+import { claudeSetup, startClaudeSetup } from "./setup";
 import { actor, identify, touch, online, passwordMatches, cleanName, makeSession, sessionCookie, loginBlocked, loginFailed, TOKEN_ACTOR, KEY_ACTOR_PREFIX, createApiKey } from "./auth";
 import { startJob, startQueue } from "./jobs";
 import { capacity } from "./capacity";
@@ -460,6 +461,13 @@ function getRunOr400(id: number): RunRow {
   return r;
 }
 
+// ---- setup (Claude Code installed and signed in?)
+route("GET", "/api/setup", async () => json({ claude: await claudeSetup() }));
+route("POST", "/api/setup/claude/:step", async (_r, p) => {
+  if (p.step !== "install" && p.step !== "login") throw new ApiError(404, `unknown setup step "${p.step}"`);
+  return json(runOut(await startClaudeSetup(p.step)), 201);
+});
+
 // ---- console (the session-first working view): everything live, in one call
 route("GET", "/api/console", async () => {
   const running = db.query<RunRow, []>("SELECT * FROM runs WHERE status = 'running' ORDER BY started_at DESC").all();
@@ -473,7 +481,7 @@ route("GET", "/api/console", async () => {
   const adoptable = (await listConsoleProcesses(undefined, "agent")).filter((p) => !p.child && !(p.run_id && liveRunIds.has(p.run_id)));
   // ended: recent interactive runs that have stopped, newest first, one per conversation, leaving out any that is live again.
   const seen = new Set(live.flatMap((r) => r.sessions.map((s) => s.session_id)));
-  const ended = db.query<RunRow, []>("SELECT * FROM runs WHERE status != 'running' AND json_extract(meta, '$.interactive') = 1 ORDER BY started_at DESC LIMIT 100").all()
+  const ended = db.query<RunRow, []>("SELECT * FROM runs WHERE status != 'running' AND json_extract(meta, '$.interactive') = 1 AND json_extract(meta, '$.setup') IS NULL ORDER BY started_at DESC LIMIT 100").all()
     .map(withSessions)
     .filter((r) => {
       const sid = r.sessions.at(-1)?.session_id;

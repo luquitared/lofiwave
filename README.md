@@ -39,6 +39,15 @@ generated an access token (kept in …/lofiwave/data/auth-token); open:
 
 Lost the link? The token is in `data/auth-token`; the UI asks for it when it needs it.
 
+### Mac app
+
+`macos/build.sh` builds `lofiwave.app` and a DMG (`build/macos/lofiwave-<version>-<arch>.dmg`, about 30 MB) that needs nothing else installed: it carries Bun, a tmux built from source (`macos/build-tmux.sh`) and lofiwave's own source. Drag it to Applications and open it: a menu bar item (a waveform) starts the server and opens the console in your browser, logged in. From the menu: open the console, restart the server, the server log, the data folder, and Start at Login.
+
+- Data (database, logs, token) goes in `~/Library/Application Support/lofiwave`. Configuration goes in a `.env` there, e.g. `PORT=7771` when another lofiwave already has 7770.
+- The server gets your login shell's `PATH`, so it finds the `claude`, `codex` and `git` your terminal finds. A tmux you installed yourself wins over the bundled one.
+- If Claude Code is missing, or isn't signed in, a banner offers to install it (its official installer) or sign in (`claude auth login`). Either one runs in a terminal in *Sessions*.
+- `ARCHS="arm64 x86_64" macos/build.sh` builds both architectures. Without a signing identity the app is ad-hoc signed: it runs on the Mac that built it, but a downloaded copy is blocked by Gatekeeper until `xattr -dr com.apple.quarantine /Applications/lofiwave.app`. Set `SIGN_IDENTITY` (a Developer ID Application certificate) to sign it with the hardened runtime, and `NOTARY_PROFILE` (from `xcrun notarytool store-credentials`) to notarize and staple the DMG too.
+
 ### Run it as a service
 
 ```bash
@@ -113,9 +122,10 @@ Environment variables, or `KEY=VALUE` lines in `.env`:
 
 ```
 lofiwave/
-├── src/       server.ts (HTTP + API), db.ts, runner.ts, targets.ts, e2b.ts, jobs.ts, capacity.ts, files.ts, connect.ts, vtscreen.ts, scheduler.ts, cron.ts, procs.ts, agents.ts, terminal.ts
+├── src/       server.ts (HTTP + API), setup.ts, db.ts, runner.ts, targets.ts, e2b.ts, jobs.ts, capacity.ts, files.ts, connect.ts, vtscreen.ts, scheduler.ts, cron.ts, procs.ts, agents.ts, terminal.ts
 ├── public/    the single-page UI
 ├── scripts/   start.sh, service installers, Claude Code session hook, Tailscale helpers
+├── macos/     the Mac app: build.sh (app + DMG), build-tmux.sh, the menu bar launcher (Lofiwave.swift)
 └── data/      database, logs, token (created on first start, git-ignored)
 ```
 
@@ -194,6 +204,8 @@ API keys are named and revocable; make them on the *Connect* page. Runs started 
 | | |
 |---|---|
 | `GET /api/health` | `{ok, uptime_ms}` |
+| `GET /api/setup` | `{claude: {installed, path, version, logged_in, auth_method?, email?, subscription?}}`: is Claude Code installed here and signed in (`logged_in` is null when this claude can't say) |
+| `POST /api/setup/claude/install` \| `/login` | start Claude Code's official installer, or `claude auth login`, as an interactive run (→ 201 with the run); the UI opens it in *Sessions* |
 | `GET /api/system` | hostname, platform, bun version, bind host/port, data dir, LAN addresses, tailscale `{state, ips, dns_name}` (null if not installed) |
 
 ### Paths

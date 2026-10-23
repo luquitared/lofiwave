@@ -234,6 +234,45 @@ const loadSystem = guard(async () => {
   );
 });
 
+// ---------------------------------------------------------------- setup (Claude Code installed and signed in?)
+// A banner offers to install Claude Code or sign it in; either one runs in a terminal in Sessions.
+let claudeSetup = null, setupRun = null; // setupRun: {id, step} while an install or sign-in run is going
+const setupDismissed = (state) => { try { return localStorage.getItem("ac_setup_dismissed") === state; } catch { return false; } };
+const loadSetup = guard(async () => {
+  const c = (await get("/setup")).claude;
+  if (claudeSetup && claudeSetup.logged_in === false && c.logged_in) toast(`Claude is signed in${c.email ? ` as ${c.email}` : ""}`, true);
+  claudeSetup = c;
+  const state = !c.installed ? "install" : c.logged_in === false ? "login" : "";
+  // The run is over once its step is done (or it ended without finishing it).
+  const screen = setupRun?.step === state ? await get(`/runs/${setupRun.id}/screen?lines=60`).catch(() => null) : null;
+  if (!screen?.alive) setupRun = null;
+  const el = $("#setup-banner");
+  el.hidden = !state || (!setupRun && setupDismissed(state));
+  if (el.hidden) return;
+  const start = (step) => guard(async () => {
+    const r = await post(`/setup/claude/${step}`);
+    setupRun = { id: r.id, step };
+    selectConsoleRunId(r.id);
+    switchTab("console");
+    loadSetup();
+  });
+  const notNow = h("button", { class: "small", onclick: () => { try { localStorage.setItem("ac_setup_dismissed", state); } catch {} el.hidden = true; } }, "Not now");
+  if (setupRun && state === "install") {
+    el.replaceChildren(h("span", {}, "Installing Claude Code… follow along in its terminal below."));
+  } else if (setupRun) {
+    // The sign-in link wraps across lines in the terminal: pick it off the screen so it is one click here.
+    const link = screen.text.match(/https:\/\/claude\.(?:com|ai)\/\S*oauth\/authorize\S+/)?.[0];
+    el.replaceChildren(h("span", {}, "Signing in… approve it in the browser, then paste the code it shows into the terminal below."),
+      link ? h("a", { class: "api-link", href: link, target: "_blank", rel: "noopener" }, "Open sign-in page ↗") : "");
+  } else if (state === "install") {
+    el.replaceChildren(h("span", {}, h("b", {}, "Claude Code isn't installed on this machine."), " lofiwave runs it for you; install it to start sessions."),
+      h("button", { class: "primary small", onclick: start("install") }, "Install Claude Code"), notNow);
+  } else {
+    el.replaceChildren(h("span", {}, h("b", {}, "Claude Code isn't signed in."), " Sign in with your Claude account to start sessions."),
+      h("button", { class: "primary small", onclick: start("login") }, "Sign in to Claude"), notNow);
+  }
+});
+
 /** An app's UI link as seen from this browser: {host} becomes the host the console was opened on (works over Tailscale too). */
 const appUrl = (t) => (t.url ? t.url.replace("{host}", location.hostname) : "");
 
@@ -888,7 +927,7 @@ const sessOf = (r) => (r.sessions || []).at(-1) || null;
 /** What to call a run in the UI: the agent's own session title, else its first prompt line, else the run. */
 function runLabel(r) {
   const s = sessOf(r);
-  return s?.title || s?.name || (r.prompt || "").split("\n")[0].slice(0, 70) || `${r.type_name} run #${r.id}`;
+  return r.meta?.label || s?.title || s?.name || (r.prompt || "").split("\n")[0].slice(0, 70) || `${r.type_name} run #${r.id}`;
 }
 function selectConsoleRunId(id) { localStorage.setItem("ac_console_run", String(id)); consoleRun = null; railSig = paneSig = ""; }
 /** The session a #sessions/<id> link asked for, until the console has loaded and either shown it or found it ended. */
@@ -1491,15 +1530,18 @@ function refresh() {
   else if (activeTab === "settings") renderSettings();
   else if (activeTab === "runs") { loadRuns(); if (selectedRun) refreshRunDetail(); }
   else if (activeTab === "types") loadTypes();
+  if (setupRun) loadSetup();
 }
 setInterval(refresh, 3000);
 setInterval(loadSystem, 30000);
+setInterval(() => !document.hidden && loadSetup(), 60000);
 setInterval(() => !document.hidden && loadMe(), 10000);
 document.addEventListener("visibilitychange", () => !document.hidden && refresh());
 
 (async () => {
   applyTheme(); // the page head already set the scheme; this syncs theme-color
   await Promise.all([loadSystem(), loadTypes(), loadWorkflows(), loadMe(), loadTargets()]);
+  loadSetup();
   const m = location.hash.match(/^#(\w+)(?:\/(\w+))?/);
   if (m && m[1] === "runs" && m[2]) openRun(Number(m[2]));
   else if (m && (m[1] === "sessions" || m[1] === "console") && /^\d+$/.test(m[2] || "")) openSessionLink(Number(m[2]));

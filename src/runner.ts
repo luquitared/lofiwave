@@ -106,6 +106,12 @@ export type StartOptions = {
   idleStopSec?: number;
   /** Claude runs: mark the folder trusted first, and answer the trust dialog if it shows anyway (default true). */
   trust?: boolean;
+  /** Run this instead of the type's template (setup steps such as `claude auth login`); the type is just its label. */
+  command?: { command: string; args: string[] };
+  /** What the UI calls the run, instead of its prompt. */
+  label?: string;
+  /** Marks a setup run (src/setup.ts): it is started again from the setup banner, not restarted. */
+  setup?: string;
 };
 
 /** Stop a live entry: on its target, or its local process tree. */
@@ -207,7 +213,9 @@ export async function startRun(opts: StartOptions): Promise<RunRow> {
   if (!target && (!existsSync(cwd) || !statSync(cwd).isDirectory())) throw new ApiError(400, `cwd does not exist: ${cwd}`);
   const interactive = Boolean(opts.interactive) || Boolean(opts.resumeSession);
   if (interactive && !e2b && !tmuxPath()) throw new ApiError(400, "interactive runs need tmux on PATH (brew install tmux / apt install tmux)");
-  let { command, args, template_len } = buildCommand(type, { ...opts, cwd, permissionMode: e2b?.permission_mode });
+  let { command, args, template_len } = opts.command
+    ? { ...opts.command, template_len: opts.command.args.length }
+    : buildCommand(type, { ...opts, cwd, permissionMode: e2b?.permission_mode });
   // Remote Control needs a claude.ai login: in a sandbox that only has an API key, leave it out.
   if (e2b && !sandboxEnv(e2b, { ...JSON.parse(type.env || "{}"), ...(opts.env ?? {}) }, [config.authToken]).CLAUDE_CODE_OAUTH_TOKEN) {
     const drop = args.slice(0, template_len).filter((a) => a === "--remote-control").length;
@@ -220,7 +228,7 @@ export async function startRun(opts: StartOptions): Promise<RunRow> {
   const targetSession = target && basename(command) === "claude" && !picksSession ? randomUUID() : "";
   if (targetSession) { args = [...args.slice(0, template_len), "--session-id", targetSession, ...args.slice(template_len)]; template_len += 2; }
   // Too many agents (or too little memory) and one more could take the machine down: refuse; the caller may queue.
-  const blocked = type.kind === "agent" && !target ? admissionBlocker() : null;
+  const blocked = type.kind === "agent" && !target && !opts.setup ? admissionBlocker() : null;
   if (blocked) throw new ApiError(429, `machine is full: ${blocked}. Try again later, or pass "queue": true to start it when there is room.`);
   const typeEnv: Record<string, string> = JSON.parse(type.env || "{}");
   // Results go in <cwd>/out/. Not made in the home folder or / (a session reopened there), where it would just be litter.
@@ -235,6 +243,8 @@ export async function startRun(opts: StartOptions): Promise<RunRow> {
   if (args.includes(chatSettingsPath())) { meta.approvals = true; meta.live = true; }
   if (opts.idleStopSec !== undefined) meta.idle_stop_sec = opts.idleStopSec;
   else if (opts.stopWhenIdle === false) meta.idle_stop_sec = 0;
+  if (opts.label) meta.label = opts.label;
+  if (opts.setup) meta.setup = opts.setup;
   // Who started it: the logged-in person (or "api" for the token), when it comes from a request; scheduled runs have none.
   const by = actor.getStore() ?? opts.meta?.started_by;
   if (by) meta.started_by = by;
@@ -849,6 +859,7 @@ export async function restartRun(id: number): Promise<RunRow> {
     : null;
   const type = getType(run.type_name);
   const meta = JSON.parse(run.meta || "{}");
+  if (meta.setup) throw new ApiError(400, "a setup run can't be restarted; start it again from the setup banner");
   const finalArgs: string[] = JSON.parse(run.args || "[]");
   const templateLen: number = meta.template_len ?? JSON.parse(type.args || "[]").length;
   const extraArgs = finalArgs.slice(templateLen);
