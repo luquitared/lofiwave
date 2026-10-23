@@ -42,6 +42,9 @@
     <button id="new-session-btn" class="primary" aria-label="New session"><span aria-hidden="true">+</span><span class="label"> New session</span></button>
   </div>
 </header>
+<div class="app-body">
+<aside class="rail" id="session-rail" aria-label="Sessions"></aside>
+<div id="drawer-backdrop" class="drawer-backdrop" hidden></div>
 <main id="main">
   <div class="page-top">
     <h1 id="page-title">Sessions</h1>
@@ -52,8 +55,6 @@
 
   <section id="tab-console" class="tab active">
     <div class="console-view">
-      <aside class="rail" id="session-rail" aria-label="Sessions"></aside>
-      <div id="drawer-backdrop" class="drawer-backdrop" hidden></div>
       <div class="pane" id="session-pane" role="region" aria-label="Session terminal" aria-live="off"></div>
     </div>
   </section>
@@ -176,6 +177,7 @@
     </table>
   </section>
 </main>
+</div>
 
 <dialog id="start-dialog" aria-labelledby="start-title">
   <form id="start-form" class="grid" method="dialog">

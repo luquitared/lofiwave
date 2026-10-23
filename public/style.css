@@ -278,10 +278,12 @@ select { font-family:inherit; }
 .form-error { padding:12px; border:1px solid var(--bad); border-radius:8px; color:var(--bad); background:var(--bad-bg); font-size:13px; overflow-wrap:anywhere; }
 
 /* ---------------------------------------------------------------- console: session list + pane */
-/* Sessions fills the window with the selected session; the session list is a drawer from the left (☰ in the top bar),
-   docked beside the session on wide screens and over it on phones. */
-body[data-tab="console"] { height:100dvh; display:flex; flex-direction:column; overflow:hidden; }
-body[data-tab="console"] main { flex:1; min-height:0; width:100%; display:flex; flex-direction:column; padding-bottom:16px; }
+/* The window is the top bar over the session list (a drawer from the left, ☰ in the top bar: docked beside the page on
+   wide screens, over it on phones) and the page, which scrolls on its own. Sessions fills it with the selected session. */
+body.console { height:100dvh; display:flex; flex-direction:column; overflow:hidden; }
+.app-body { flex:1; min-height:0; display:flex; }
+.console main { flex:1; min-width:0; min-height:0; overflow-y:auto; overscroll-behavior:contain; }
+body[data-tab="console"] main { overflow:hidden; display:flex; flex-direction:column; padding-bottom:16px; }
 body[data-tab="console"] #tab-console.active { flex:1; min-height:0; display:flex; flex-direction:column; }
 .console-view { flex:1; min-height:0; display:flex; }
 .rail { min-width:0; min-height:0; display:flex; flex-direction:column; gap:12px; }
@@ -330,13 +332,12 @@ body[data-tab="console"] #tab-console.active { flex:1; min-height:0; display:fle
 /* the ☰ in the top bar that opens the list where it is a drawer; amber dot when a session needs you */
 .drawer-btn { position:relative; flex:none; display:grid; place-items:center; width:38px; height:38px; min-height:38px; padding:0; color:var(--text); background:var(--panel-2); border:0; border-radius:50%; }
 .drawer-btn.alert::after { content:""; position:absolute; top:5px; right:5px; width:9px; height:9px; border-radius:50%; background:var(--warn); box-shadow:0 0 0 2px var(--bg); }
-body:not([data-tab="console"]) .drawer-btn { display:none; }
 .drawer-backdrop { position:fixed; inset:0; z-index:29; background:var(--backdrop); }
 .rail { position:fixed; z-index:30; inset:0 auto 0 0; width:min(340px, 86vw); padding:14px 12px; padding-top:max(14px, env(safe-area-inset-top)); padding-bottom:max(12px, env(safe-area-inset-bottom)); background:var(--bg); border-right:1px solid var(--line); box-shadow:0 0 40px #0006; transform:translateX(-105%); visibility:hidden; transition:transform .22s ease, visibility 0s .22s; }
 body.drawer-open .rail { transform:none; visibility:visible; transition:transform .22s ease; }
 /* Wide enough to share: the open list docks beside the session instead of covering it, and stays while you work. */
 @media (min-width:900px) {
-  .rail, body.drawer-open .rail { position:static; z-index:auto; width:auto; flex:0 0 296px; display:none; margin-right:22px; padding:0 16px 0 0; background:transparent; border-right:1px solid var(--line); box-shadow:none; transform:none; visibility:visible; transition:none; }
+  .rail, body.drawer-open .rail { position:static; z-index:auto; width:auto; flex:0 0 300px; display:none; padding:18px 14px 12px 20px; background:var(--sidebar); border-right:1px solid var(--line); box-shadow:none; transform:none; visibility:visible; transition:none; }
   body.drawer-open .rail { display:flex; }
   .drawer-backdrop { display:none !important; }
 }

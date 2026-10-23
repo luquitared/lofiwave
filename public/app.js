@@ -932,9 +932,12 @@ const loadConsole = guard(async () => {
   renderRail();
   renderPane();
 });
+/** On the other pages only the session list needs the console's data: refresh it while the list is open. */
+const drawerShown = () => document.body.classList.contains("drawer-open");
 
 function selectConsoleRun(run) {
   drawerPicked();
+  if (activeTab !== "console") { consoleRun = run; paneSig = ""; localStorage.setItem("ac_console_run", String(run.id)); return switchTab("console"); }
   if (run.id === consoleRun?.id) return;
   consoleRun = run; paneSig = "";
   localStorage.setItem("ac_console_run", String(run.id));
@@ -951,6 +954,7 @@ function setConsoleView(view, render = true) {
 }
 function selectEndedRun(run) {
   drawerPicked();
+  if (activeTab !== "console") { endedRun = run; railSig = paneSig = ""; return switchTab("console"); }
   if (run.id === endedRun?.id) return;
   endedRun = run; railSig = "";
   syncConsoleHash(); renderRail(); renderPane();
@@ -982,7 +986,7 @@ function setDrawer(open, remember = true) {
 }
 /** After picking something in the list: a docked list stays, one over the session gets out of the way. */
 const drawerPicked = () => { if (!docked.matches) setDrawer(false); };
-$("#drawer-btn").onclick = () => setDrawer(!document.body.classList.contains("drawer-open"));
+$("#drawer-btn").onclick = () => { const open = !drawerShown(); setDrawer(open); if (open && activeTab !== "console") loadConsole(); };
 $("#drawer-backdrop").onclick = () => setDrawer(false);
 document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !docked.matches && document.body.classList.contains("drawer-open") && !$("dialog[open]")) { setDrawer(false); $("#drawer-btn").focus(); } });
 docked.addEventListener("change", () => setDrawer(docked.matches && dockedPref(), false));
@@ -1217,6 +1221,7 @@ function enableRemote(pid, s, inPane) {
 }
 
 function renderPane() {
+  if (activeTab !== "console") return; // the list shows on every page; the session only on Sessions
   if (consoleView === "ended") {
     closeTerm(); syncFull(false);
     const sig = `ended:${endedRun?.id ?? ""}`;
@@ -1565,8 +1570,9 @@ function emptyPane() {
 // ---------------------------------------------------------------- refresh loop
 function refresh() {
   if (document.hidden) return;
-  if (activeTab === "console") loadConsole();
-  else if (activeTab === "agents") loadAgents();
+  if (activeTab === "console" || drawerShown()) loadConsole();
+  if (activeTab === "console") return;
+  if (activeTab === "agents") loadAgents();
   else if (activeTab === "apps") loadTypes().then(loadApps);
   else if (activeTab === "workflows") loadWorkflows();
   else if (activeTab === "connect") loadConnect();
