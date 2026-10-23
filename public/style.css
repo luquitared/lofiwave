@@ -294,7 +294,6 @@ select { font-family:inherit; }
 .pane-meta { margin-top:6px; font-size:11.5px; overflow-wrap:anywhere; }
 .pane-meta code { margin-left:8px; }
 .pane-actions { gap:8px; }
-.pane .follow { display:flex; align-items:center; font-size:12px; white-space:nowrap; }
 .pane pre.screen { flex:1; min-height:340px; margin:0; padding:14px; overflow:auto; white-space:pre; background:var(--term-bg); border:1px solid var(--line); border-radius:8px; font-family:var(--mono); font-size:11.5px; line-height:1.3; }
 .pane form.keys input { flex:1; min-width:0; }
 .pane-foot { font-size:10.5px; }
@@ -395,7 +394,7 @@ dialog .hint { margin:0; font-size:12px; }
 .theme-name { font-size:13px; font-weight:600; }
 .theme-name small { display:block; font-weight:400; color:var(--muted); font-size:11px; margin-top:2px; }
 
-/* ---------------------------------------------------------------- view switch (Chat / Terminal / Simple) */
+/* ---------------------------------------------------------------- view switch (Chat / Terminal) */
 .seg { display:inline-flex; border:1px solid var(--line); border-radius:7px; overflow:hidden; }
 .seg button { border:0; border-radius:0; background:transparent; color:var(--muted); }
 .seg button + button { border-left:1px solid var(--line); }
