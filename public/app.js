@@ -1004,7 +1004,7 @@ function renderRail() {
       h("div", { class: `tile-act ${actOf(r)}` }, h("span", { class: `dot ${actOf(r)}` }), h("span", { class: "tile-act-text" }, tileAct(r))),
       h("div", { class: "rail-title" }, runLabel(r)),
       meter(r),
-      h("div", { class: "rail-sub" }, r.workflow_name ? h("span", { class: "wf-tag" }, `⌁ ${r.workflow_name}`) : "", groupTag(r), `${r.type_name} · ${shortCwd(r.cwd)}${byWho(r)}`),
+      h("div", { class: "rail-sub" }, r.workflow_name ? h("span", { class: "wf-tag" }, `⌁ ${r.workflow_name}`) : "", groupTag(r), `${r.type_name} · ${shortCwd(r.cwd)}`),
       h("div", { class: "rail-sub dim rail-up" }, railUp(r)),
     ))),
     h("button", { class: "tile-new", onclick: () => { setDrawer(false); openStartDialog({ kind: "agent" }); } }, h("span", { "aria-hidden": "true" }, "+"), "Start a session"),
@@ -1104,7 +1104,8 @@ const actOf = (r) => r.activity || sessOf(r)?.status || "";
 const ACT_LABEL = { working: "working", idle: "idle", waiting_input: "needs you" };
 /** The tile's status line: "working · 4m". */
 const tileAct = (r) => (ACT_LABEL[actOf(r)] || "running") + (ACT_LABEL[r.activity] && r.activity_since ? ` · ${fmtDur((Date.now() - r.activity_since) / 1000)}` : "");
-const railUp = (r) => `up ${fmtDur((Date.now() - r.started_at) / 1000)}` + (sessOf(r)?.model ? ` · ${sessOf(r).model.replace(/^claude-/, "")}` : "");
+// Who started it goes here, not after the folder, where a long path would cut it off.
+const railUp = (r) => `up ${fmtDur((Date.now() - r.started_at) / 1000)}${byWho(r)}` + (sessOf(r)?.model ? ` · ${sessOf(r).model.replace(/^claude-/, "")}` : "");
 
 // ---------------------------------------------------------------- activity meter
 // Each tile shows the last six minutes as twelve 30-second bars: how much of each one the run spent working (or
