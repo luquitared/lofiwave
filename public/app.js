@@ -1524,6 +1524,10 @@ function onTermWheel(t, e) {
   if (t.ownScroll && !t.mouseModes?.size) return; // nothing is listening for the mouse: leave it to xterm
   const px = t.term.element ? t.term.element.clientHeight / t.term.rows : 16; // one line, in pixels
   const dy = e.deltaMode === 1 ? e.deltaY * px : e.deltaMode === 2 ? e.deltaY * t.term.element.clientHeight : e.deltaY;
+  termScroll(t, e, dy, px);
+}
+/** Scroll the terminal by `dy` pixels (positive = down), from the wheel or a finger; `e` is the event to cancel. */
+function termScroll(t, e, dy, px, at = e) {
   if (t.hist) {
     const b = t.hist.body;
     const atBottom = b.scrollTop >= b.scrollHeight - b.clientHeight - 1;
@@ -1537,8 +1541,25 @@ function onTermWheel(t, e) {
   const lines = Math.trunc(t.wheelAcc);
   if (!lines) return;
   t.wheelAcc -= lines;
-  if (t.ownScroll) return sendWheel(t, e, lines);
+  if (t.ownScroll) return sendWheel(t, at, lines);
   openHistory(t, -lines);
+}
+/**
+ * Touch scrolling, for phones: a finger dragged over the terminal does what the wheel does. xterm's own touch handling
+ * only moves its scrollback, which tmux leaves empty, so the drag did nothing. A drag inside the history view is left
+ * to the browser, which scrolls the snapshot natively; dragging up at its bottom closes it, like the wheel.
+ */
+function onTermTouch(t, e) {
+  if (e.touches.length !== 1) { t.touchY = null; return; }
+  const p = e.touches[0];
+  if (e.type === "touchstart") { t.touchY = p.clientY; if (!t.ownScroll && !t.hist) fetchHistory(t).catch(() => {}); return; }
+  if (t.touchY == null || (t.ownScroll && !t.mouseModes?.size)) return;
+  const dy = t.touchY - p.clientY; // finger moving down scrolls back, like dragging a page
+  t.touchY = p.clientY;
+  // The history opened mid-drag: the finger is still on the live terminal underneath, so move the snapshot ourselves.
+  if (t.hist && !t.hist.box.contains(e.target)) { e.preventDefault(); t.hist.body.scrollTop += dy; return; }
+  const px = t.term.element ? t.term.element.clientHeight / t.term.rows : 16;
+  termScroll(t, e, dy, px, p);
 }
 
 /**
@@ -1626,6 +1647,7 @@ function openTerm(runId) {
   term.parser.registerCsiHandler({ prefix: "?", final: "l" }, trackModes(false));
   if (selectMode) setMouseTracking(term, false);
   el.addEventListener("wheel", (e) => onTermWheel(t, e), { capture: true, passive: false });
+  for (const type of ["touchstart", "touchmove"]) el.addEventListener(type, (e) => onTermTouch(t, e), { capture: true, passive: type === "touchstart" });
   el.addEventListener("pointerenter", () => { if (!t.ownScroll && !t.hist) fetchHistory(t).catch(() => {}); });
   // Copy on select: the forced (Option/Shift) selection, or one in the history view, goes to the clipboard on mouse-up.
   el.addEventListener("mouseup", () => {
