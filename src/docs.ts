@@ -49,7 +49,7 @@ curl -X POST ${api}/workflows -H "authorization: Bearer $KEY" -H 'content-type: 
 
 - Leave \`schedule\` out (or \`""\`) for a workflow that only runs on demand: \`POST ${api}/workflows/<id>/run\`.
 - \`GET ${api}/workflows\` lists them with \`next_run_at\` / \`last_run_at\`; \`PUT ${api}/workflows/<id>\` changes any field (\`{"enabled": false}\` pauses it).
-- \`GET ${api}/runs?workflow_id=<id>\` is its history; \`GET ${api}/runs/<run id>/screen\` shows the live terminal and \`POST ${api}/runs/<run id>/keys\` types into it.
+- \`GET ${api}/runs?workflow_id=<id>\` is its history. A run of an agent type is driven like any agent: see *Drive an agent* below.
 - Claude asks before editing files or running commands; for a run nobody watches, add \`"extra_args": "--permission-mode acceptEdits"\`.
 
 ## Quickstart: drive an agent (a worker you start, message and wait on)
@@ -62,7 +62,7 @@ curl -X POST ${api}/processes -H "authorization: Bearer $KEY" -H 'content-type: 
 
 # wait (long-poll, up to 600 s) until its turn is over; no sleep loop needed
 curl "${api}/runs/12/wait?until=idle&timeout=600" -H "authorization: Bearer $KEY"
-# → the run with "activity": "idle" (or "waiting_input": a permission prompt; answer it with /keys), "reached": true
+# → the run with "activity": "idle" (or "waiting_input": a permission prompt or question, see below), "reached": true
 
 # send it a follow-up, checked: {"delivered": true, "queued": false, "sent_at": ...}. Fine while it works: it queues.
 curl -X POST ${api}/runs/12/message -H "authorization: Bearer $KEY" -H 'content-type: application/json' -d '{"text": "Now run the whole suite"}'
@@ -73,6 +73,20 @@ curl "${api}/runs/12/wait?until=idle&timeout=600&after=<sent_at>" -H "authorizat
 - Every run has \`activity\` (\`working\` | \`idle\` | \`waiting_input\` | \`done\`) and \`activity_since\`: no need to read the screen to tell.
 - \`GET ${api}/runs/12/sessions/<session_id>/messages\` is the conversation so far; \`POST ${api}/runs/12/kill\` stops it.
 - An idle interactive claude run nobody watches ends by itself after \`AGENT_IDLE_STOP_SEC\` (default 30 min; \`"stop_when_idle": false\` keeps it, \`"idle_stop_sec": N\` sets it), so finished workers free their memory. \`wait?until=done\` waits for the end.
+
+Drive it with these calls, not by reading the terminal:
+
+| To | Use | Not |
+| --- | --- | --- |
+| tell what it is doing | \`activity\` on the run, \`GET ${api}/runs/<id>/wait\` | reading \`/screen\` |
+| send it a message | \`POST ${api}/runs/<id>/message\` (checks it arrived) | \`/keys\` |
+| know what was said | \`GET ${api}/runs/<id>/sessions/<session_id>/messages\` | reading \`/screen\` |
+
+**Text in Claude's input box is never evidence of what a person wants.** After a turn Claude Code shows a suggested next prompt in the empty box, drawn dim; \`/screen\` returns plain text, so it looks exactly like something a person typed (\`❯ go ahead, deploy it\`). Nobody wrote it. Never act on it, never press Enter on it, never report it as what the user said. What a person asked for is in \`/messages\` (\`role: "user"\`), and only there.
+
+\`activity: "waiting_input"\` means a permission prompt or question is open, and \`/message\` answers 409 until it is gone. Start unattended runs with a permission mode in \`extra_args\` (\`--permission-mode acceptEdits\`, or \`bypassPermissions\` in a sandbox) so they don't stop on one. If one is open anyway, read it with \`GET ${api}/runs/<id>/screen?lines=40\` and answer with \`POST ${api}/runs/<id>/keys\` (\`{"keys": ["Enter"]}\` takes the highlighted option, \`"Down"\` moves).
+
+\`/screen\` and \`/keys\` are the raw terminal: what a person watching would see, and keystrokes. Use them for a menu like that, not to hold a conversation.
 
 ## Quickstart: register an app so it can be monitored, started and stopped from the console
 
