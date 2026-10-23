@@ -278,7 +278,8 @@ select { font-family:inherit; }
 .form-error { padding:12px; border:1px solid var(--bad); border-radius:8px; color:var(--bad); background:var(--bad-bg); font-size:13px; overflow-wrap:anywhere; }
 
 /* ---------------------------------------------------------------- console: session list + pane */
-/* Sessions fills the window with the selected session; the session list is a drawer from the left (☰ in the top bar). */
+/* Sessions fills the window with the selected session; the session list is a drawer from the left (☰ in the top bar),
+   docked beside the session on wide screens and over it on phones. */
 body[data-tab="console"] { height:100dvh; display:flex; flex-direction:column; overflow:hidden; }
 body[data-tab="console"] main { flex:1; min-height:0; width:100%; display:flex; flex-direction:column; padding-bottom:16px; }
 body[data-tab="console"] #tab-console.active { flex:1; min-height:0; display:flex; flex-direction:column; }
@@ -333,6 +334,12 @@ body:not([data-tab="console"]) .drawer-btn { display:none; }
 .drawer-backdrop { position:fixed; inset:0; z-index:29; background:var(--backdrop); }
 .rail { position:fixed; z-index:30; inset:0 auto 0 0; width:min(340px, 86vw); padding:14px 12px; padding-top:max(14px, env(safe-area-inset-top)); padding-bottom:max(12px, env(safe-area-inset-bottom)); background:var(--bg); border-right:1px solid var(--line); box-shadow:0 0 40px #0006; transform:translateX(-105%); visibility:hidden; transition:transform .22s ease, visibility 0s .22s; }
 body.drawer-open .rail { transform:none; visibility:visible; transition:transform .22s ease; }
+/* Wide enough to share: the open list docks beside the session instead of covering it, and stays while you work. */
+@media (min-width:900px) {
+  .rail, body.drawer-open .rail { position:static; z-index:auto; width:auto; flex:0 0 296px; display:none; margin-right:22px; padding:0 16px 0 0; background:transparent; border-right:1px solid var(--line); box-shadow:none; transform:none; visibility:visible; transition:none; }
+  body.drawer-open .rail { display:flex; }
+  .drawer-backdrop { display:none !important; }
+}
 
 .pane { flex:1; min-width:0; min-height:0; display:flex; flex-direction:column; gap:12px; }
 .pane-head { flex:none; display:flex; align-items:center; justify-content:space-between; gap:10px 16px; flex-wrap:wrap; }

@@ -180,7 +180,7 @@ function switchTab(name, push = true) {
   if (name === "advanced") name = ADVANCED.includes(localStorage.getItem("ac_advanced")) ? localStorage.getItem("ac_advanced") : "runs";
   if (!TITLES[name]) name = "console";
   if (name !== "runs" && selectedRun) closeRun(false);
-  if (name !== "console") { closeTerm(); closeChat(); syncFull(false); setDrawer(false); }
+  if (name !== "console") { closeTerm(); closeChat(); syncFull(false); drawerPicked(); }
   activeTab = name;
   document.body.dataset.tab = name;
   const advanced = ADVANCED.includes(name);
@@ -934,7 +934,7 @@ const loadConsole = guard(async () => {
 });
 
 function selectConsoleRun(run) {
-  setDrawer(false);
+  drawerPicked();
   if (run.id === consoleRun?.id) return;
   consoleRun = run; paneSig = "";
   localStorage.setItem("ac_console_run", String(run.id));
@@ -950,7 +950,7 @@ function setConsoleView(view, render = true) {
   if (render) { syncConsoleHash(); renderRail(); renderPane(); }
 }
 function selectEndedRun(run) {
-  setDrawer(false);
+  drawerPicked();
   if (run.id === endedRun?.id) return;
   endedRun = run; railSig = "";
   syncConsoleHash(); renderRail(); renderPane();
@@ -968,16 +968,25 @@ const railBar = () => h("div", { class: "rail-bar" },
   h("button", { class: "small rail-resume", title: "Reopen a claude or codex session from its id", onclick: openResumeDialog }, "Resume"));
 
 // ---------------------------------------------------------------- the session drawer
-// The session list slides in from the left (☰ in the top bar) and closes when you pick one, tap outside or press Esc.
-function setDrawer(open) {
+// The session list opens from the left with ☰. On a wide screen it docks beside the session and stays open while you
+// work (remembered per browser, open the first time); on a phone it slides over the session and closes when you pick
+// one, tap outside or press Esc.
+const docked = matchMedia("(min-width: 900px)");
+const dockedPref = () => { try { return localStorage.getItem("ac_drawer") !== "0"; } catch { return true; } };
+function setDrawer(open, remember = true) {
   document.body.classList.toggle("drawer-open", open);
   $("#drawer-btn").setAttribute("aria-expanded", String(open));
-  $("#drawer-backdrop").hidden = !open;
-  if (open) ($("#session-rail .rail-item.active") || $("#session-rail .tile-new") || $("#session-rail button"))?.focus({ preventScroll: true });
+  $("#drawer-backdrop").hidden = !open || docked.matches;
+  if (docked.matches) { if (remember) try { localStorage.setItem("ac_drawer", open ? "1" : "0"); } catch {} }
+  else if (open) ($("#session-rail .rail-item.active") || $("#session-rail .tile-new") || $("#session-rail button"))?.focus({ preventScroll: true });
 }
+/** After picking something in the list: a docked list stays, one over the session gets out of the way. */
+const drawerPicked = () => { if (!docked.matches) setDrawer(false); };
 $("#drawer-btn").onclick = () => setDrawer(!document.body.classList.contains("drawer-open"));
 $("#drawer-backdrop").onclick = () => setDrawer(false);
-document.addEventListener("keydown", (e) => { if (e.key === "Escape" && document.body.classList.contains("drawer-open") && !$("dialog[open]")) { setDrawer(false); $("#drawer-btn").focus(); } });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !docked.matches && document.body.classList.contains("drawer-open") && !$("dialog[open]")) { setDrawer(false); $("#drawer-btn").focus(); } });
+docked.addEventListener("change", () => setDrawer(docked.matches && dockedPref(), false));
+setDrawer(docked.matches && dockedPref(), false);
 
 /** Pinned runs first, in the order they were pinned; the rest keep the server's order (newest first). */
 const pinnedFirst = (runs) => [...runs.filter((r) => r.pinned_at).sort((a, b) => a.pinned_at - b.pinned_at), ...runs.filter((r) => !r.pinned_at)];
@@ -1007,7 +1016,7 @@ function renderRail() {
       h("div", { class: "rail-sub" }, r.workflow_name ? h("span", { class: "wf-tag" }, `⌁ ${r.workflow_name}`) : "", groupTag(r), `${r.type_name} · ${shortCwd(r.cwd)}`),
       h("div", { class: "rail-sub dim rail-up" }, railUp(r)),
     ))),
-    h("button", { class: "tile-new", onclick: () => { setDrawer(false); openStartDialog({ kind: "agent" }); } }, h("span", { "aria-hidden": "true" }, "+"), "Start a session"),
+    h("button", { class: "tile-new", onclick: () => { drawerPicked(); openStartDialog({ kind: "agent" }); } }, h("span", { "aria-hidden": "true" }, "+"), "Start a session"),
     headless.length ? h("div", { class: "rail-head" }, h("span", {}, `${headless.length} running · log only`)) : "",
     ...headless.map((r) => h("a", { class: "rail-item flat", href: `#runs/${r.id}`, onclick: (e) => { e.preventDefault(); openRun(r.id); } },
       h("div", { class: "rail-title" }, runLabel(r)),
