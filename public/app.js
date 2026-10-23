@@ -1381,7 +1381,7 @@ async function openHistory(t, lines) {
   finally { t.histLoading = false; }
   if (t.closed || liveTerm !== t || t.hist) return;
   // Nothing to snapshot: the app draws full-screen and keeps its own history, so the wheel goes to it (shared, as before).
-  if (own_scroll) { t.ownScroll = true; toast("this session scrolls itself — the wheel now goes to it, and other viewers see it scroll too", true); return; }
+  if (own_scroll) { t.ownScroll = true; return; }
   const body = h("div", { class: "term-history-body" });
   const box = h("div", { class: "term-history" },
     h("div", { class: "term-history-bar", title: "back to the live screen", onclick: () => closeHistory(t) }, "Scrolled back · only you see this · snapshot, the session keeps running · scroll down or Esc to return"),
@@ -1409,23 +1409,50 @@ function closeHistory(t) {
   term.dispose(); box.remove();
   if (!t.closed) t.term.focus();
 }
+/** Lines the history view scrolls per line's worth of wheel movement. A session that scrolls itself gets one wheel step
+ * per line instead: apps already move several lines a step. */
+const WHEEL_SPEED = 3;
 /**
  * Capture-phase wheel handler on the terminal box. The wheel never reaches tmux: on the live terminal, scrolling up
  * opens the private history; in the history we scroll by whole lines ourselves (xterm's own wheel handling crawls
- * on pixel deltas), and scrolling down past the bottom closes it.
+ * on pixel deltas), and scrolling down past the bottom closes it. A session that scrolls itself (a full-screen app
+ * with no tmux history) gets the wheel as mouse reports, as many as the movement is worth: xterm would send at most
+ * one per wheel event, which crawls.
  */
 function onTermWheel(t, e) {
-  if (t.ownScroll) return; // let xterm pass the wheel to tmux and on to the app
+  if (t.ownScroll && !t.mouseModes?.size) return; // nothing is listening for the mouse: leave it to xterm
   e.preventDefault(); e.stopPropagation();
   const px = t.term.element ? t.term.element.clientHeight / t.term.rows : 16; // one line, in pixels
-  t.wheelAcc = (t.wheelAcc || 0) + (e.deltaMode === 1 ? e.deltaY : e.deltaMode === 2 ? e.deltaY * t.term.rows : e.deltaY / px);
+  t.wheelAcc = (t.wheelAcc || 0) + (t.ownScroll ? 1 : WHEEL_SPEED) * (e.deltaMode === 1 ? e.deltaY : e.deltaMode === 2 ? e.deltaY * t.term.rows : e.deltaY / px);
   const lines = Math.trunc(t.wheelAcc);
   if (!lines) return;
   t.wheelAcc -= lines;
+  if (t.ownScroll) return sendWheel(t, e, lines);
   if (!t.hist) { if (lines < 0) openHistory(t, -lines); return; }
   const b = t.hist.term.buffer.active;
   if (lines > 0 && b.viewportY >= b.baseY) closeHistory(t);
   else t.hist.term.scrollLines(lines);
+}
+
+/**
+ * Wheel reports (button 64 up, 65 down) at the pointer, in the encoding tmux asked for (SGR, else X10). They go out one
+ * at a time, 12 ms apart: a burst in one write reaches the app as a single wheel step. Turning the other way, or a
+ * long fling, never queues more than 60.
+ */
+function sendWheel(t, e, lines) {
+  const box = t.term.element.getBoundingClientRect();
+  t.wheelAt = [Math.min(t.term.cols, Math.max(1, Math.floor((e.clientX - box.left) / (box.width / t.term.cols)) + 1)),
+    Math.min(t.term.rows, Math.max(1, Math.floor((e.clientY - box.top) / (box.height / t.term.rows)) + 1))];
+  t.wheelQueue = Math.sign(t.wheelQueue || 0) === -Math.sign(lines) ? lines : Math.max(-60, Math.min(60, (t.wheelQueue || 0) + lines));
+  if (t.wheelTimer) return;
+  const step = () => {
+    if (!t.wheelQueue || t.closed || t.ws?.readyState !== 1) { t.wheelQueue = 0; t.wheelTimer = null; return; }
+    const b = t.wheelQueue < 0 ? 64 : 65, [col, row] = t.wheelAt;
+    t.ws.send(JSON.stringify({ t: "i", d: t.mouseModes.has(1006) ? `\x1b[<${b};${col};${row}M` : `\x1b[M${String.fromCharCode(32 + b, 32 + col, 32 + row)}` }));
+    t.wheelQueue -= Math.sign(t.wheelQueue);
+    t.wheelTimer = setTimeout(step, 12);
+  };
+  step();
 }
 
 let liveTerm = null; // { runId, el, term, fit, ws, ro, retry, closed, hist }
