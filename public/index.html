@@ -18,21 +18,28 @@
   document.documentElement.dataset.theme = pref === "system" ? (light ? "wave-light" : "wave") : pref;
 })();
 </script>
+<link rel="preload" href="/vendor/fonts/instrument-sans-latin.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="stylesheet" href="/vendor/xterm.css">
 <link rel="stylesheet" href="/style.css">
 </head>
-<body class="console">
+<body class="console" data-tab="console">
 <a class="skip-link" href="#main">Skip to content</a>
-<header class="sidebar">
-  <a class="brand" href="#console" aria-label="lofiwave home"><img class="brand-mark" src="/logo.png" alt="" width="32" height="32"><span>lofiwave</span></a>
+<header class="topbar">
+  <a class="brand" href="#console" aria-label="lofiwave home"><img class="brand-mark" src="/logo.png" alt="" width="30" height="30"><span>lofiwave</span></a>
   <nav aria-label="Main navigation">
-    <button data-tab="console" class="active"><span aria-hidden="true">▶</span>Sessions</button>
-    <button data-tab="workflows"><span aria-hidden="true">⌁</span>Workflows</button>
-    <button data-tab="connect"><span aria-hidden="true">⚿</span>Connect</button>
-    <button data-tab="advanced"><span aria-hidden="true">☷</span>Advanced</button>
-    <button data-tab="settings"><span aria-hidden="true">⚙</span>Settings</button>
+    <button data-tab="console" class="active">Sessions</button>
+    <button data-tab="workflows">Workflows</button>
+    <button data-tab="connect">Connect</button>
+    <button data-tab="advanced">Advanced</button>
+    <button data-tab="settings">Settings</button>
   </nav>
-  <div class="sidebar-bottom"><div id="sysinfo" class="sysinfo"></div></div>
+  <div class="topbar-right">
+    <span id="sysinfo" class="sysinfo"></span>
+    <span id="people" class="people" hidden></span>
+    <span class="connection" id="connection-status">Connecting…</span>
+    <button id="refresh-btn" class="small" aria-label="Refresh current view">↻</button>
+    <button id="new-session-btn" class="primary">+ New session</button>
+  </div>
 </header>
 <main id="main">
   <div class="page-top">
@@ -40,12 +47,11 @@
     <div class="subnav" id="subnav" role="tablist" aria-label="Advanced" hidden>
       <button data-sub="agents">Processes</button><button data-sub="apps">Apps</button><button data-sub="runs">Runs</button><button data-sub="types">Types</button>
     </div>
-    <span class="page-top-right"><span id="people" class="people" hidden></span><span class="connection" id="connection-status">Connecting…</span><button id="refresh-btn" class="small" aria-label="Refresh current view">↻</button></span>
   </div>
 
   <section id="tab-console" class="tab active">
     <div class="console-view">
-      <aside class="rail" id="session-rail" aria-label="Live sessions"></aside>
+      <aside class="rail" id="session-rail" aria-label="Sessions"></aside>
       <div class="pane" id="session-pane" role="region" aria-label="Session terminal" aria-live="off"></div>
     </div>
   </section>

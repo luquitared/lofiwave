@@ -182,6 +182,7 @@ function switchTab(name, push = true) {
   if (name !== "runs" && selectedRun) closeRun(false);
   if (name !== "console") { closeTerm(); closeChat(); syncFull(false); }
   activeTab = name;
+  document.body.dataset.tab = name;
   const advanced = ADVANCED.includes(name);
   if (advanced) localStorage.setItem("ac_advanced", name);
   $("#page-title").textContent = TITLES[name];
@@ -228,10 +229,12 @@ const loadSystem = guard(async () => {
   systemInfo = s;
   const addrs = Object.values(s.addresses).flat();
   const ts = s.tailscale;
-  $("#sysinfo").replaceChildren(
-    h("div", {}, h("b", {}, s.hostname), ` · ${s.platform} · bun ${s.bun} · up ${fmtDur(s.uptime_ms / 1000)}`),
-    h("div", {}, ts && ts.ips?.length ? `tailscale: ${ts.dns_name || ""} ${ts.ips.filter((ip) => !ip.includes(":")).join(", ")}${ts.state === "Running" ? "" : ` (${ts.state})`}` : ts ? `tailscale: ${ts.state}` : "tailscale: not installed", addrs.length ? ` · lan: ${addrs.join(", ")}` : ""),
-  );
+  // One short line in the top bar; the addresses are in its tooltip.
+  const el = $("#sysinfo");
+  el.replaceChildren(h("b", {}, s.hostname), ` · up ${fmtDur(s.uptime_ms / 1000)}`);
+  el.title = [`${s.hostname} · ${s.platform} · bun ${s.bun}`,
+    ts && ts.ips?.length ? `tailscale: ${ts.dns_name || ""} ${ts.ips.filter((ip) => !ip.includes(":")).join(", ")}${ts.state === "Running" ? "" : ` (${ts.state})`}` : ts ? `tailscale: ${ts.state}` : "tailscale: not installed",
+    addrs.length ? `lan: ${addrs.join(", ")}` : ""].filter(Boolean).join("\n");
 });
 
 /** An app's UI link as seen from this browser: {host} becomes the host the console was opened on (works over Tailscale too). */
@@ -647,7 +650,7 @@ const themePref = () => { try { return localStorage.getItem("ac_theme") || "syst
 const systemLight = matchMedia("(prefers-color-scheme: light)");
 function applyTheme(pref = themePref()) {
   document.documentElement.dataset.theme = pref === "system" ? (systemLight.matches ? "wave-light" : "wave") : pref;
-  const meta = $('meta[name="theme-color"]'); if (meta) meta.content = getComputedStyle(document.documentElement).getPropertyValue("--sidebar").trim();
+  const meta = $('meta[name="theme-color"]'); if (meta) meta.content = getComputedStyle(document.documentElement).getPropertyValue("--bg").trim();
   if (liveTerm) { liveTerm.term.options.theme = termTheme(); if (liveTerm.hist) liveTerm.hist.term.options.theme = termTheme(); }
 }
 systemLight.addEventListener("change", () => themePref() === "system" && applyTheme());
@@ -912,6 +915,7 @@ const loadConsole = guard(async () => {
   consoleData.live = pinnedFirst(consoleData.live);
   consoleData.ended = pinnedFirst(consoleData.ended);
   const { live, ended } = consoleData;
+  noteMeter(live);
   if (linkedRun) {
     const id = linkedRun; linkedRun = null;
     if (live.some((r) => r.id === id)) setConsoleView("live", false);
@@ -954,6 +958,9 @@ function railTabs() {
   const tab = (view, label, n) => h("button", { role: "tab", class: consoleView === view ? "active" : "", "aria-selected": String(consoleView === view), onclick: () => setConsoleView(view) }, `${label} ${n}`);
   return h("div", { class: "subnav rail-tabs", role: "tablist", "aria-label": "Sessions" }, tab("live", "Live", consoleData.live.length), tab("ended", "Ended", consoleData.ended.length));
 }
+/** The row above the tiles: Live / Ended, and Resume. */
+const railBar = () => h("div", { class: "rail-bar" }, railTabs(),
+  h("button", { class: "small", title: "Reopen a claude or codex session from its id", onclick: openResumeDialog }, "Resume"));
 
 /** Pinned runs first, in the order they were pinned; the rest keep the server's order (newest first). */
 const pinnedFirst = (runs) => [...runs.filter((r) => r.pinned_at).sort((a, b) => a.pinned_at - b.pinned_at), ...runs.filter((r) => !r.pinned_at)];
@@ -974,23 +981,16 @@ function renderRail() {
   const sig = JSON.stringify([consoleView, live.map((r) => [r.id, runLabel(r), r.pinned_at]), headless.map((r) => [r.id, runLabel(r)]), adoptable.map((p) => [p.pid, p.session?.session_id || "", p.session?.web_url || ""]), ended.map((r) => [r.id, runLabel(r), r.pinned_at]), endedRun?.id]);
   if (sig === railSig) return patchRail();
   railSig = sig;
-  if (consoleView === "ended") return $("#session-rail").replaceChildren(railTabs(), ...endedRail());
-  $("#session-rail").replaceChildren(
-    railTabs(),
-    h("div", { class: "rail-head" },
-      h("span", {}, live.length ? `${live.length} live session${live.length === 1 ? "" : "s"}` : "No live sessions"),
-      h("span", { class: "row" },
-        h("button", { class: "small", title: "Reopen a claude or codex session from its id", onclick: openResumeDialog }, "Resume"),
-        h("button", { class: "small primary", onclick: () => openStartDialog({ kind: "agent" }) }, "+ New"),
-      ),
-    ),
-    ...live.map((r) => {
-      return pinnable(r, h("button", { class: `rail-item ${consoleRun?.id === r.id ? "active" : ""}`, "data-run": r.id, "aria-current": consoleRun?.id === r.id ? "true" : "false", onclick: () => selectConsoleRun(r) },
-        h("div", { class: "rail-title" }, h("span", { class: `dot ${actOf(r)}`, title: actOf(r) }), runLabel(r)),
-        h("div", { class: "rail-sub" }, r.workflow_name ? h("span", { class: "wf-tag" }, `⌁ ${r.workflow_name}`) : "", groupTag(r), `${r.type_name} · ${shortCwd(r.cwd)}${byWho(r)}`),
-        h("div", { class: "rail-sub dim rail-up" }, railUp(r)),
-      ));
-    }),
+  if (consoleView === "ended") return $("#session-rail").replaceChildren(railBar(), h("div", { class: "rail-strip" }, ...endedRail()));
+  $("#session-rail").replaceChildren(railBar(), h("div", { class: "rail-strip" },
+    ...live.map((r) => pinnable(r, h("button", { class: `rail-item tile ${consoleRun?.id === r.id ? "active" : ""} ${actOf(r) === "waiting_input" ? "needs" : ""}`, "data-run": r.id, "aria-current": consoleRun?.id === r.id ? "true" : "false", onclick: () => selectConsoleRun(r) },
+      h("div", { class: `tile-act ${actOf(r)}` }, h("span", { class: `dot ${actOf(r)}` }), h("span", { class: "tile-act-text" }, tileAct(r))),
+      h("div", { class: "rail-title" }, runLabel(r)),
+      meter(r),
+      h("div", { class: "rail-sub" }, r.workflow_name ? h("span", { class: "wf-tag" }, `⌁ ${r.workflow_name}`) : "", groupTag(r), `${r.type_name} · ${shortCwd(r.cwd)}${byWho(r)}`),
+      h("div", { class: "rail-sub dim rail-up" }, railUp(r)),
+    ))),
+    h("button", { class: "tile-new", onclick: () => openStartDialog({ kind: "agent" }) }, h("span", { "aria-hidden": "true" }, "+"), "Start a session"),
     headless.length ? h("div", { class: "rail-head" }, h("span", {}, `${headless.length} running · log only`)) : "",
     ...headless.map((r) => h("a", { class: "rail-item flat", href: `#runs/${r.id}`, onclick: (e) => { e.preventDefault(); openRun(r.id); } },
       h("div", { class: "rail-title" }, runLabel(r)),
@@ -1008,19 +1008,18 @@ function renderRail() {
             remoteControlBtn(p.pid, p.session, Boolean(p.session.tmux)))
         : h("div", { class: "rail-sub dim" }, "no session id — can't take over"),
     )),
-  );
+  ));
 }
 
 function endedRail() {
   const { ended } = consoleData;
-  return [
-    h("div", { class: "rail-head" }, h("span", {}, ended.length ? `${ended.length} recently ended` : "Nothing ended yet")),
-    ...ended.map((r) => pinnable(r, h("button", { class: `rail-item ${endedRun?.id === r.id ? "active" : ""}`, "aria-current": endedRun?.id === r.id ? "true" : "false", onclick: () => selectEndedRun(r) },
-      h("div", { class: "rail-title" }, runLabel(r)),
-      h("div", { class: "rail-sub" }, r.workflow_name ? h("span", { class: "wf-tag" }, `⌁ ${r.workflow_name}`) : "", groupTag(r), `${r.type_name} · ${shortCwd(r.cwd)}${byWho(r)}`),
-      h("div", { class: "rail-sub dim" }, endedWhen(r)),
-    ))),
-  ];
+  if (!ended.length) return [h("div", { class: "rail-head" }, h("span", {}, "Nothing ended yet"))];
+  return ended.map((r) => pinnable(r, h("button", { class: `rail-item tile ${endedRun?.id === r.id ? "active" : ""}`, "aria-current": endedRun?.id === r.id ? "true" : "false", onclick: () => selectEndedRun(r) },
+    h("div", { class: "tile-act" }, h("span", { class: "dot" }), h("span", {}, r.status && r.status !== "success" ? r.status : "ended")),
+    h("div", { class: "rail-title" }, runLabel(r)),
+    h("div", { class: "rail-sub" }, r.workflow_name ? h("span", { class: "wf-tag" }, `⌁ ${r.workflow_name}`) : "", groupTag(r), `${r.type_name} · ${shortCwd(r.cwd)}${byWho(r)}`),
+    h("div", { class: "rail-sub dim" }, endedWhen(r)),
+  )));
 }
 const endedWhen = (r) => `ended ${r.ended_at ? fmtRel(r.ended_at) : "?"}` + (r.ended_at ? ` · ran ${fmtDur((r.ended_at - r.started_at) / 1000)}` : "") + (r.status && r.status !== "success" ? ` · ${r.status}` : "");
 
@@ -1085,20 +1084,64 @@ function originOf(p) {
 
 /** What a live run is doing (working / idle / waiting_input), from the run itself, else its session's own status. */
 const actOf = (r) => r.activity || sessOf(r)?.status || "";
-const ACT_LABEL = { working: "working", idle: "idle", waiting_input: "waiting for input" };
-const railUp = (r) => (ACT_LABEL[r.activity] ? `${ACT_LABEL[r.activity]} ${fmtDur((Date.now() - r.activity_since) / 1000)} · ` : "") + `up ${fmtDur((Date.now() - r.started_at) / 1000)}` + (sessOf(r)?.model ? ` · ${sessOf(r).model.replace(/^claude-/, "")}` : "");
-/** Keep the live bits fresh (working/idle, uptime) without touching the DOM structure. */
+const ACT_LABEL = { working: "working", idle: "idle", waiting_input: "needs you" };
+/** The tile's status line: "working · 4m". */
+const tileAct = (r) => (ACT_LABEL[actOf(r)] || "running") + (ACT_LABEL[r.activity] && r.activity_since ? ` · ${fmtDur((Date.now() - r.activity_since) / 1000)}` : "");
+const railUp = (r) => `up ${fmtDur((Date.now() - r.started_at) / 1000)}` + (sessOf(r)?.model ? ` · ${sessOf(r).model.replace(/^claude-/, "")}` : "");
+
+// ---------------------------------------------------------------- activity meter
+// Each tile shows the last six minutes as twelve 30-second bars: how much of each one the run spent working (or
+// waiting on you). Sampled on every refresh, in this browser only; before the page loaded, a run's current state
+// is filled back to when it began (activity_since), and anything older is blank.
+const METER_BUCKET = 30_000, METER_BARS = 12;
+const meterLog = new Map(); // run id → Map(bucket → { n, working, waiting })
+function noteMeter(runs) {
+  const now = Math.floor(Date.now() / METER_BUCKET);
+  for (const id of meterLog.keys()) if (!runs.some((r) => r.id === id)) meterLog.delete(id);
+  for (const r of runs) {
+    const act = actOf(r);
+    const sample = () => ({ n: 1, working: act === "working" ? 1 : 0, waiting: act === "waiting_input" ? 1 : 0 });
+    let log = meterLog.get(r.id);
+    if (!log) {
+      log = new Map(); meterLog.set(r.id, log);
+      if (r.activity_since) for (let k = Math.max(Math.floor(r.activity_since / METER_BUCKET), now - METER_BARS + 1); k < now; k++) log.set(k, sample());
+    }
+    const e = log.get(now);
+    if (!e) log.set(now, sample());
+    else { e.n++; if (act === "working") e.working++; else if (act === "waiting_input") e.waiting++; }
+    for (const k of log.keys()) if (k <= now - METER_BARS) log.delete(k);
+  }
+}
+function meterBars(r) {
+  const now = Math.floor(Date.now() / METER_BUCKET), log = meterLog.get(r.id);
+  return Array.from({ length: METER_BARS }, (_, i) => {
+    const e = log?.get(now - METER_BARS + 1 + i);
+    if (!e) return { cls: "none", pct: 10 };
+    const w = e.working / e.n, q = e.waiting / e.n;
+    return { cls: q > w ? "wait" : w > 0 ? "work" : "idle", pct: Math.round(Math.max(0.14, w + q * 0.6) * 100) };
+  });
+}
+const meter = (r) => h("span", { class: "meter", "aria-hidden": "true" }, ...meterBars(r).map((b) => h("i", { class: b.cls, style: `height:${b.pct}%` })));
+
+/** Keep the live bits fresh (working/idle, uptime, meter) without touching the DOM structure. */
 function patchRail() {
   for (const r of consoleData.live) {
     const el = $(`#session-rail [data-run="${r.id}"]`);
     if (!el) continue;
     const selected = consoleRun?.id === r.id;
     el.classList.toggle("active", selected);
+    el.classList.toggle("needs", actOf(r) === "waiting_input");
     el.setAttribute("aria-current", selected ? "true" : "false");
+    const act = $(".tile-act", el);
+    if (act) act.className = `tile-act ${actOf(r)}`;
     const dot = $(".dot", el);
-    if (dot) { dot.className = `dot ${actOf(r)}`; dot.title = actOf(r); }
+    if (dot) dot.className = `dot ${actOf(r)}`;
+    const text = $(".tile-act-text", el);
+    if (text) text.textContent = tileAct(r);
     const up = $(".rail-up", el);
     if (up) up.textContent = railUp(r);
+    const bars = $$(".meter i", el);
+    meterBars(r).forEach((b, i) => { if (bars[i]) { bars[i].className = b.cls; bars[i].style.height = `${b.pct}%`; } });
   }
 }
 
@@ -1175,7 +1218,35 @@ function renderPane() {
   const up = $("#pane-up"); if (up) up.textContent = `up ${fmtDur((Date.now() - r.started_at) / 1000)}`;
   syncFull(mode === "terminal");
   if (mode === "terminal") openTerm(r.id);
-  else openChat(r.id);
+  else { openChat(r.id); pollPeek(r); }
+}
+
+// ---------------------------------------------------------------- terminal strip (under the chat)
+// The last lines of the real terminal, so you can see what the TUI is showing without leaving the chat. Polled with
+// the console while it is open; reading the screen counts as someone watching, like the terminal itself.
+const PEEK_LINES = 6;
+const peekOpen = () => { try { const v = localStorage.getItem("ac_peek"); return v ? v === "1" : !matchMedia("(max-width: 700px)").matches; } catch { return true; } };
+function peekFor(r) {
+  if (!r.meta?.tmux && !r.meta?.e2b) return "";
+  const open = peekOpen();
+  return h("section", { class: `peek ${open ? "open" : ""}`, "aria-label": "Terminal" },
+    h("div", { class: "peek-head" },
+      h("button", { class: "peek-toggle", "aria-expanded": String(open), onclick: () => { try { localStorage.setItem("ac_peek", open ? "0" : "1"); } catch {} paneSig = ""; renderPane(); } }, h("span", { class: "chev" }), "terminal"),
+      h("span", { class: "mono muted peek-where" }, r.meta?.e2b ? "E2B sandbox" : `tmux ${r.meta.tmux}`),
+    ),
+    open ? h("pre", { id: "peek-screen", class: "peek-screen" }) : "");
+}
+let peekBusy = false;
+async function pollPeek(r) {
+  const pre = $("#peek-screen");
+  if (!pre || peekBusy || document.hidden) return;
+  peekBusy = true;
+  try {
+    const { text } = await get(`/runs/${r.id}/screen?lines=${PEEK_LINES * 4}`);
+    const tail = text.split("\n").slice(-PEEK_LINES).join("\n");
+    if (pre.textContent !== tail) pre.textContent = tail;
+  } catch { /* the next refresh tries again */ }
+  finally { peekBusy = false; }
 }
 
 function paneFor(r) {
@@ -1185,23 +1256,24 @@ function paneFor(r) {
     h("div", { class: "pane-head" },
       h("div", { class: "pane-id" },
         h("h2", {}, h("span", { id: "pane-dot", class: `dot ${s?.status || ""}`, title: s?.status || "" }), h("span", { id: "pane-label" }, runLabel(r))),
+        s?.model ? h("span", { class: "chip mono" }, s.model.replace(/^claude-/, "")) : "",
+        s?.web_url ? h("a", { class: "chip ok", href: s.web_url, target: "_blank", title: "open this session on claude.ai" }, "Remote Control ↗") : "",
         h("div", { class: "pane-meta muted" },
           `${r.type_name} · ${shortCwd(r.cwd)}${byWho(r)} · `, h("span", { id: "pane-up" }, `up ${fmtDur((Date.now() - r.started_at) / 1000)}`),
-          s?.model ? ` · ${s.model}` : "",
           s?.session_id ? h("code", { class: "mono", title: s.session_id }, shortId(s.session_id)) : "",
         ),
       ),
       h("div", { class: "row pane-actions" },
-        s?.web_url ? h("a", { href: s.web_url, target: "_blank" }, h("button", { class: "small" }, "Open on web ↗")) : remoteControlBtn(r.pid, s, true),
+        viewSwitch(r, mode),
+        mode === "terminal" ? h("button", { class: "small", id: "select-btn", title: "turn the mouse into a plain text selector: drag to select, it's copied when you let go; click again to give the mouse back to tmux", onclick: () => toggleSelect() }, selectLabel()) : "",
+        mode === "terminal" ? h("button", { class: "small", id: "full-btn", title: "hide the top bar and session list, terminal edge to edge (Ctrl+Shift+F)", onclick: () => toggleFull() }, fullLabel()) : "",
+        s?.web_url ? "" : remoteControlBtn(r.pid, s, true),
         h("button", { class: "small", title: "the full run record: command, env, log, sessions", onclick: () => openRun(r.id) }, "Details"),
         h("button", { class: "small danger", onclick: () => confirmDo(`Stop "${runLabel(r)}" (run #${r.id})?`, async () => { await post(`/runs/${r.id}/kill`); toast("stopped", true); consoleRun = null; railSig = paneSig = ""; loadConsole(); }) }, "Stop"),
-        mode === "terminal" ? h("button", { class: "small", id: "select-btn", title: "turn the mouse into a plain text selector: drag to select, it's copied when you let go; click again to give the mouse back to tmux", onclick: () => toggleSelect() }, selectLabel()) : "",
-        mode === "terminal" ? h("button", { class: "small", id: "full-btn", title: "hide the sidebar and session list, terminal edge to edge (Ctrl+Shift+F)", onclick: () => toggleFull() }, fullLabel()) : "",
-        viewSwitch(r, mode),
       ),
     ),
     mode === "terminal" ? h("div", { id: "console-term", class: "term" }, h("span", { class: "term-status" }, "connecting…")) : h("div", { id: "console-chat" }),
-    mode === "terminal" ? h("div", { class: "term-hint muted" }, copyHint()) : "",
+    mode === "terminal" ? h("div", { class: "term-hint muted" }, copyHint()) : peekFor(r),
     h("div", { class: "pane-foot muted mono" }, r.meta?.e2b ? `E2B sandbox ${r.meta.e2b.sandbox_id || "(starting…)"}${r.meta.e2b.paused ? " · paused while idle; opening the terminal resumes it" : ""}` : `tmux attach -t ${r.meta?.tmux || "?"}`),
   ];
 }
@@ -1520,6 +1592,7 @@ document.addEventListener("visibilitychange", () => !document.hidden && refresh(
 })();
 
 $("#refresh-btn").onclick = () => { refresh(); loadSystem(); };
+$("#new-session-btn").onclick = () => openStartDialog({ kind: "agent" });
 window.addEventListener("hashchange", () => {
   const [tab, id] = location.hash.slice(1).split("/");
   if (tab === "runs" && /^\d+$/.test(id || "")) openRun(Number(id));
