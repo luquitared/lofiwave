@@ -42,7 +42,7 @@ export function ttyFor(runId: number, url: URL, user: string): TtyData {
 }
 
 const dec = new TextDecoder();
-/** How many live terminals each tmux session has; the simple view leaves the window size alone while there are any. */
+/** How many live terminals each tmux session has; /screen leaves the window size alone while there are any. */
 export const ttyViewers = new Map<string, number>();
 const addViewer = (s: string, n: number) => { const v = (ttyViewers.get(s) ?? 0) + n; if (v > 0) ttyViewers.set(s, v); else ttyViewers.delete(s); };
 
@@ -72,7 +72,7 @@ export const ttySocket = {
   async open(ws: ServerWebSocket<TtyData>) {
     const d = ws.data;
     if (d.e2b) return openE2B(ws);
-    // The simple (polling) view resizes the window by hand, which pins it to "manual"; give sizing back to tmux.
+    // /screen (run details, API clients) resizes the window by hand, which pins it to "manual"; give sizing back to tmux.
     await Bun.spawn(["tmux", "set-option", "-t", tmuxTarget(d.session), "window-size", "latest"], { stdout: "ignore", stderr: "ignore" }).exited;
     await Bun.spawn(["tmux", "set-option", "-t", tmuxTarget(d.session), "mouse", "on"], { stdout: "ignore", stderr: "ignore" }).exited;
     // Ask clients for focus in/out reports: focusing a viewer then counts as its activity.

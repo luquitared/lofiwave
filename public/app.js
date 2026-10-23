@@ -1162,8 +1162,7 @@ function renderPane() {
   else if (mode !== "terminal") parkTerm();
   if (!r || mode !== "chat" || liveChat?.runId !== r.id) closeChat();
   if (mode !== "terminal") syncFull(false);
-  // Rebuild only when the run or its session changes: a rebuild would drop whatever is half-typed in the keys field,
-  // and idle/working flips constantly. Everything volatile is patched in place below.
+  // Rebuild only when the run or its session changes: idle/working flips constantly. Everything volatile is patched in place below.
   const sig = r ? JSON.stringify([r.id, r.status, mode, r.meta?.remote_url || "", sessOf(r)?.session_id || "", sessOf(r)?.web_url || ""]) : `empty:${consoleData.live.length}:${consoleData.adoptable.length}`;
   if (sig !== paneSig) {
     paneSig = sig;
@@ -1176,8 +1175,7 @@ function renderPane() {
   const up = $("#pane-up"); if (up) up.textContent = `up ${fmtDur((Date.now() - r.started_at) / 1000)}`;
   syncFull(mode === "terminal");
   if (mode === "terminal") openTerm(r.id);
-  else if (mode === "chat") openChat(r.id);
-  else pollScreenInto($("#console-screen"), r.id, $("#console-follow")?.checked !== false);
+  else openChat(r.id);
 }
 
 function paneFor(r) {
@@ -1200,12 +1198,9 @@ function paneFor(r) {
         mode === "terminal" ? h("button", { class: "small", id: "select-btn", title: "turn the mouse into a plain text selector: drag to select, it's copied when you let go; click again to give the mouse back to tmux", onclick: () => toggleSelect() }, selectLabel()) : "",
         mode === "terminal" ? h("button", { class: "small", id: "full-btn", title: "hide the sidebar and session list, terminal edge to edge (Ctrl+Shift+F)", onclick: () => toggleFull() }, fullLabel()) : "",
         viewSwitch(r, mode),
-        mode === "simple" ? h("label", { class: "muted follow" }, h("input", { type: "checkbox", id: "console-follow", checked: true }), " follow") : "",
       ),
     ),
-    ...(mode === "terminal" ? [h("div", { id: "console-term", class: "term" }, h("span", { class: "term-status" }, "connecting…"))]
-      : mode === "chat" ? [h("div", { id: "console-chat" })]
-      : [h("pre", { id: "console-screen", class: "screen" }, "connecting to the terminal…"), keysForm(r.id, () => pollScreenInto($("#console-screen"), r.id, true))]),
+    mode === "terminal" ? h("div", { id: "console-term", class: "term" }, h("span", { class: "term-status" }, "connecting…")) : h("div", { id: "console-chat" }),
     mode === "terminal" ? h("div", { class: "term-hint muted" }, copyHint()) : "",
     h("div", { class: "pane-foot muted mono" }, r.meta?.e2b ? `E2B sandbox ${r.meta.e2b.sandbox_id || "(starting…)"}${r.meta.e2b.paused ? " · paused while idle; opening the terminal resumes it" : ""}` : `tmux attach -t ${r.meta?.tmux || "?"}`),
   ];
@@ -1256,17 +1251,14 @@ function syncFull(hasTerm) {
 
 // ---------------------------------------------------------------- live terminal (xterm.js ⟷ websocket ⟷ tmux attach)
 /**
- * How the pane shows a run: "chat" (the session rendered from its transcript, Claude only), "terminal" (xterm.js on
- * the tmux pane) or "simple" (a polled screen and a text box). Saved per browser. Terminal by default where it works
- * well; the simple view on phones (no keys for Esc/Tab/arrows) or if xterm didn't load.
+ * How the pane shows a run: "chat" (the session rendered from its transcript, Claude only) or "terminal" (xterm.js on
+ * the tmux pane). Saved per browser. Terminal by default, Chat on phones (no keys for Esc/Tab/arrows) where it can.
  */
 function paneMode(r) {
-  const xterm = Boolean(window.Terminal && window.FitAddon);
   const saved = localStorage.getItem("ac_term_mode");
   if (saved === "chat" && chatable(r)) return "chat";
-  if (saved === "terminal" && xterm) return "terminal";
-  if (saved === "simple") return "simple";
-  return xterm && !matchMedia("(max-width: 700px)").matches ? "terminal" : "simple";
+  if (saved === "terminal") return "terminal";
+  return chatable(r) && matchMedia("(max-width: 700px)").matches ? "chat" : "terminal";
 }
 function setPaneMode(mode) { localStorage.setItem("ac_term_mode", mode); paneSig = ""; renderPane(); }
 /** The chat view reads Claude Code transcripts; other agents (Codex) and plain commands get the terminal only. */
@@ -1277,8 +1269,8 @@ function chatable(r) {
   return /(^|\/)claude$/.test(typeByName(r.type_name)?.command || "");
 }
 function viewSwitch(r, mode) {
-  const views = [["chat", "Chat", "the session as messages, tool calls and diffs, read from its transcript; scrolls on its own"], ["terminal", "Terminal", "a real terminal in the browser"], ["simple", "Simple", "a polled screen and a text box (good on a phone or a flaky link)"]]
-    .filter(([m]) => (m !== "chat" || chatable(r)) && (m !== "terminal" || (window.Terminal && window.FitAddon)));
+  const views = [["chat", "Chat", "the session as messages, tool calls and diffs, read from its transcript; scrolls on its own"], ["terminal", "Terminal", "a real terminal in the browser"]]
+    .filter(([m]) => m !== "chat" || chatable(r));
   return h("div", { class: "seg", role: "group", "aria-label": "View" },
     ...views.map(([m, label, title]) => h("button", { class: `small${m === mode ? " on" : ""}`, title, "aria-pressed": String(m === mode), onclick: () => m !== mode && setPaneMode(m) }, label)));
 }
@@ -1467,7 +1459,7 @@ let liveChat = null; // { runId, view }
 function openChat(runId) {
   if (!liveChat || liveChat.runId !== runId) {
     closeChat();
-    liveChat = { runId, view: new ChatView(`/runs/${runId}`, { onTerminal: () => setPaneMode(window.Terminal && window.FitAddon ? "terminal" : "simple") }) };
+    liveChat = { runId, view: new ChatView(`/runs/${runId}`, { onTerminal: () => setPaneMode("terminal") }) };
   }
   // A rebuilt pane has a fresh placeholder: move the live view into it.
   const el = $("#console-chat"), root = liveChat.view.root;
