@@ -82,7 +82,9 @@ export const ttySocket = {
     await Bun.spawn(["tmux", "set-option", "-w", "-t", tmuxTarget(d.session), "fill-character", " "], { stdout: "ignore", stderr: "ignore" }).exited;
     if (ws.readyState !== 1) return;
     addViewer(d.session, 1);
-    d.proc = Bun.spawn(["tmux", "attach-session", "-t", tmuxTarget(d.session)], {
+    // -u: the browser terminal is always UTF-8. Without it tmux guesses from LANG/LC_*, which a launchd or systemd
+    // service usually lacks, and then draws every non-ASCII character (⏺ • › ’, box drawing) as "_".
+    d.proc = Bun.spawn(["tmux", "-u", "attach-session", "-t", tmuxTarget(d.session)], {
       env: { ...process.env, TERM: "xterm-256color", COLORTERM: "truecolor" },
       terminal: {
         cols: d.cols, rows: d.rows,
