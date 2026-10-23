@@ -167,7 +167,6 @@ class ChatView {
       h("span", { class: "chat-pill" }, h("span", { class: "dot" }), h("span", { class: "chat-pill-text" }, "")),
       h("span", { class: "chat-usage", hidden: true }),
       h("span", { class: "chat-foot-note" }, this.composer ? "" : "Read-only: this session runs outside lofiwave."),
-      this.onTerminal ? h("button", { class: "small", onclick: () => this.onTerminal() }, "Open terminal") : "",
     );
   }
 

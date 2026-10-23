@@ -178,19 +178,21 @@ button.danger:hover { background:var(--bad-bg); color:var(--bad); }
 a { color:var(--accent); }
 .skip-link { position:fixed; top:-80px; left:16px; z-index:50; padding:12px; background:var(--panel); }
 .skip-link:focus { top:12px; }
-.console .sidebar { width:184px; position:fixed; inset:0 auto 0 0; display:flex; flex-direction:column; align-items:stretch; flex-wrap:nowrap; gap:0; padding:18px 12px 16px; border:0; border-right:1px solid var(--line); background:var(--sidebar); z-index:5; }
 .brand { display:flex; align-items:center; gap:11px; text-decoration:none; color:var(--text); font-size:15px; letter-spacing:-.3px; }
 .brand-mark { width:32px; height:32px; flex-shrink:0; border-radius:9px; display:block; }
 .brand small { display:block; color:var(--muted); font-size:10px; font-weight:400; margin-top:3px; letter-spacing:.1px; }
-.console nav { display:flex; flex-direction:column; gap:4px; margin-top:28px; }
-.console nav button { display:flex; align-items:center; gap:11px; width:100%; min-height:38px; text-align:left; padding:8px 11px; font-size:13px; border-radius:8px; border-color:transparent; background:transparent; color:var(--muted); }
-.console nav button > span { width:18px; text-align:center; font-size:16px; line-height:18px; }
-.console nav button.active { background:var(--sel); color:var(--accent); border-color:var(--sel-line); }
-.sidebar-bottom { margin-top:auto; }
-.sysinfo { overflow-wrap:anywhere; margin:16px 0 0; padding:16px 12px 0; border-top:1px solid var(--line); text-align:left; font-family:inherit; font-size:10px; line-height:1.8; }
-.console main { margin-left:184px; padding:0 28px 32px; max-width:1800px; }
-.page-top { display:flex; align-items:center; gap:18px; height:58px; margin-bottom:18px; border-bottom:1px solid var(--line); font-size:12px; }
-.page-top-right { margin-left:auto; }
+/* top bar: brand, pages, machine, New session */
+.console .topbar { position:sticky; top:0; z-index:5; display:flex; flex-wrap:nowrap; align-items:center; gap:22px; padding:12px 24px; padding-top:max(12px, env(safe-area-inset-top)); background:var(--bg); border-bottom:1px solid var(--line); }
+.console nav { display:flex; gap:2px; min-width:0; }
+.console nav button { min-height:34px; padding:6px 14px; font-size:13.5px; border:0; border-radius:999px; background:transparent; color:var(--muted); white-space:nowrap; }
+.console nav button:hover { background:var(--hover); color:var(--text); }
+.console nav button.active { background:var(--panel-2); color:var(--text); font-weight:600; }
+.topbar-right { margin-left:auto; display:flex; align-items:center; gap:14px; min-width:0; }
+.topbar .sysinfo { margin:0; font-family:var(--mono); font-size:11.5px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+#new-session-btn { min-height:36px; padding:7px 16px; border-radius:999px; white-space:nowrap; }
+.console main { padding:18px 24px 32px; max-width:1800px; margin:0 auto; }
+.page-top { display:flex; align-items:center; gap:18px; min-height:44px; margin-bottom:18px; font-size:12px; }
+body[data-tab="console"] .page-top { display:none; }
 #refresh-btn { min-height:30px; padding:4px 10px; color:var(--muted); background:transparent; }
 .connection { color:var(--muted); font-size:11px; white-space:nowrap; }.connection::before { content:""; display:inline-block; width:6px; height:6px; margin-right:7px; border-radius:50%; background:var(--warn); }.connection.online::before { background:var(--ok); box-shadow:0 0 0 4px color-mix(in srgb, var(--ok) 5%, transparent); }
 h1 { margin:0; font-size:19px; line-height:1.3; font-weight:580; letter-spacing:-.4px; white-space:nowrap; }
@@ -237,11 +239,11 @@ dialog { padding:28px; width:min(720px,calc(100vw - 32px)); max-height:calc(100d
 @media (min-width:1700px) { .proc-table tbody { grid-template-columns:repeat(3,minmax(0,1fr)); } }
 @media (max-width:1200px) { .console main { padding-inline:20px; }.proc-table tbody { grid-template-columns:1fr; }.split.open { grid-template-columns:1fr; }.split.open > table { display:none; }.detail { position:static; max-height:none; } }
 @media (max-width:900px) {
-  .console .sidebar { width:auto; position:sticky; inset:auto; top:0; padding:16px 20px 0; border-right:0; border-bottom:1px solid var(--line); }
-  .brand { font-size:14px; }.sidebar-bottom { display:none; }.brand-mark { width:28px; height:28px; }
-  .console nav { flex-direction:row; gap:4px; margin:12px -6px 0; padding:0 0 10px; overflow-x:auto; }
-  .console nav button { justify-content:center; gap:6px; width:auto; flex:1; white-space:nowrap; min-height:44px; padding:9px; }.console nav button > span { font-size:18px; width:18px; }
-  .console main { margin:0; padding:0 20px 40px; }.page-top { height:auto; min-height:50px; flex-wrap:wrap; gap:10px; padding:8px 0; }
+  .console .topbar { flex-wrap:wrap; gap:10px 14px; padding:10px 16px 0; padding-top:max(10px, env(safe-area-inset-top)); }
+  .brand-mark { width:28px; height:28px; }.topbar .sysinfo { display:none; }
+  .console nav { order:10; flex-basis:100%; margin:0 -8px; padding:0 4px 8px; overflow-x:auto; scrollbar-width:none; }
+  .console nav button { flex:1 0 auto; min-height:40px; }
+  .console main { padding:14px 16px 40px; }.page-top { height:auto; min-height:50px; flex-wrap:wrap; gap:10px; padding:8px 0; }
   table,tbody { display:block; border:0; background:none; }thead { display:none; }
   tbody tr { display:flex; flex-wrap:wrap; align-items:center; gap:12px; min-width:0; background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:18px; margin-bottom:12px; }
   td { display:block; padding:0; border:0; min-width:0; max-width:100% !important; }td.full,td.trunc,td.row { flex-basis:100%; }td.row { padding-top:12px; border-top:1px solid var(--line); }td.status { margin-left:auto; }
@@ -252,8 +254,9 @@ dialog { padding:28px; width:min(720px,calc(100vw - 32px)); max-height:calc(100d
   body.run-open { overflow:hidden; }.detail h3 { position:sticky; top:-20px; background:var(--panel); padding:14px 0; z-index:1; }.detail pre { flex:1 0 45dvh; min-height:240px; }.detail dl { grid-template-columns:1fr; }.detail dt { margin-top:8px; }.detail .keys { position:sticky; bottom:0; background:var(--panel); padding-block:10px; }
 }
 @media (max-width:540px) {
-  .console .sidebar { padding:12px 14px 0; padding-top:max(12px,env(safe-area-inset-top)); }.console nav { margin-top:10px; gap:1px; }.console nav button { font-size:11px; flex-direction:column; gap:4px; padding:7px 5px; min-width:0; }.console nav button > span { font-size:20px; }
-  .console main { padding:0 14px calc(30px + env(safe-area-inset-bottom)); }.page-top { font-size:10px; }.connection { font-size:10px; }.people { display:none; }
+  .console nav button { padding:6px 11px; font-size:13px; }
+  .console main { padding:12px 14px calc(30px + env(safe-area-inset-bottom)); }.page-top { font-size:10px; }.connection { font-size:0; }.connection::before { margin:0; }.people { display:none; }
+  #new-session-btn { padding:7px 13px; }
   .toolbar { gap:10px; margin-bottom:16px; }.toolbar .right { flex-basis:100%; margin:2px 0 0; }.toolbar select { flex:1 1 130px; width:0; }.toolbar #runs-count { flex-basis:100%; }
   input,select,textarea { font-size:16px; min-height:44px; }.grid label { font-size:12px; }input[type=checkbox] { min-height:0; }button,button.small { min-height:44px; } .on-toggle { min-height:44px; width:48px; background:transparent; }.on-toggle::before { content:""; position:absolute; inset:10px 0; border-radius:15px; background:var(--toggle); }.on-toggle.on::before { background:var(--toggle-on); }.on-toggle::after { top:13px; left:4px; }.on-toggle.on::after { left:26px; }
   .proc-table tbody tr { padding:16px; gap:10px; }.proc-table td:last-child:not([colspan]) { gap:8px; }.proc-table td:nth-child(2) { font-size:11px; }.sess > div:first-child { font-size:15px; }
@@ -274,62 +277,106 @@ select { font-family:inherit; }
 }
 .form-error { padding:12px; border:1px solid var(--bad); border-radius:8px; color:var(--bad); background:var(--bad-bg); font-size:13px; overflow-wrap:anywhere; }
 
-/* ---------------------------------------------------------------- console: session rail + terminal pane */
-.console-view { display:grid; grid-template-columns:minmax(240px,290px) minmax(0,1fr); gap:18px; align-items:start; }
-.rail { display:flex; flex-direction:column; gap:8px; position:sticky; top:20px; max-height:calc(100dvh - 40px); overflow:auto; }
-.rail-head { flex-shrink:0; display:flex; align-items:center; justify-content:space-between; gap:10px; padding:6px 2px; color:var(--muted); font-size:10px; letter-spacing:1.2px; text-transform:uppercase; }
-.rail-head:not(:first-child) { margin-top:10px; padding-top:14px; border-top:1px solid var(--line); }
-.rail-item { flex-shrink:0; display:block; width:100%; padding:11px 12px; min-height:0; text-align:left; font:inherit; color:var(--text); text-decoration:none; background:var(--panel); border:1px solid var(--line); border-radius:12px; }
+/* ---------------------------------------------------------------- console: session list + pane */
+/* The window is the top bar over the session list (a drawer from the left, ☰ in the top bar: docked beside the page on
+   wide screens, over it on phones) and the page, which scrolls on its own. Sessions fills it with the selected session. */
+body.console { height:100dvh; display:flex; flex-direction:column; overflow:hidden; }
+.app-body { flex:1; min-height:0; display:flex; }
+.console main { flex:1; min-width:0; min-height:0; overflow-y:auto; overscroll-behavior:contain; }
+body[data-tab="console"] main { overflow:hidden; display:flex; flex-direction:column; padding-bottom:16px; }
+body[data-tab="console"] #tab-console.active { flex:1; min-height:0; display:flex; flex-direction:column; }
+.console-view { flex:1; min-height:0; display:flex; }
+.rail { min-width:0; min-height:0; display:flex; flex-direction:column; gap:12px; }
+.rail-bar { flex:none; display:flex; align-items:center; gap:8px; }
+.rail-bar > .rail-resume { margin-left:auto; }
+.rail-tabs { flex-shrink:0; }
+.drawer-x { display:grid; flex:none; width:36px; height:36px; min-height:36px; padding:0; place-items:center; font-size:20px; line-height:1; color:var(--muted); background:transparent; border:0; border-radius:50%; }
+.rail-strip { flex:1; min-height:0; display:flex; flex-direction:column; gap:8px; overflow-y:auto; overscroll-behavior:contain; padding:2px 4px 12px 2px; scrollbar-width:thin; }
+.rail-head { flex:none; margin-top:8px; padding:12px 2px 2px; border-top:1px solid var(--line); color:var(--muted); font-size:10px; letter-spacing:1px; text-transform:uppercase; line-height:1.5; }
+.rail-item { flex:none; display:flex; flex-direction:column; gap:6px; min-height:0; padding:12px 14px; text-align:left; font:inherit; font-weight:400; color:var(--text); text-decoration:none; background:var(--panel); border:1.5px solid var(--line); border-radius:14px; }
 .rail-item:hover { background:var(--hover); border-color:var(--hover-line); }
-.rail-item.active { background:var(--sel); border-color:var(--sel-line); }
-/* the pin sits in the card's top-right corner: faint until hovered, solid when pinned */
-.rail-slot { position:relative; flex-shrink:0; }
-.rail-slot > .rail-item .rail-title { padding-right:22px; }
-.rail-pin { position:absolute; top:7px; right:7px; min-height:0; padding:2px 4px; font-size:12px; line-height:1; background:transparent; border:0; opacity:0; filter:grayscale(1); }
+.rail-item.active { background:var(--panel-2); border-color:var(--accent); }
+.rail-item.needs:not(.active) { border-color:var(--warn); }
+/* the pin sits in the item's top-right corner: faint until hovered, solid when pinned */
+.rail-slot { position:relative; flex:none; display:flex; }
+.rail-slot > .rail-item { flex:1; min-width:0; }
+.rail-slot > .rail-item .tile-act { padding-right:22px; }
+.rail-pin { position:absolute; top:8px; right:8px; min-height:0; padding:2px 4px; font-size:12px; line-height:1; background:transparent; border:0; opacity:0; filter:grayscale(1); }
 .rail-slot:hover .rail-pin, .rail-pin:focus-visible { opacity:.55; }
-.rail-pin:hover { opacity:1 !important; }
+.rail-pin:hover { opacity:1 !important; background:transparent; }
 .rail-slot.pinned .rail-pin { opacity:1; filter:none; }
 @media (hover:none) { .rail-pin { opacity:.4; } }
+.tile-act { display:flex; align-items:center; gap:7px; font-size:12px; color:var(--muted); }
+.tile-act .dot { margin:0; }
+.tile-act.working { color:var(--ok); }
+.tile-act.waiting_input { color:var(--warn); }
+.rail-title { font-size:14.5px; font-weight:600; line-height:1.3; letter-spacing:-.1px; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
+.rail-sub { color:var(--muted); font-family:var(--mono); font-size:11px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.rail-item.flat .rail-sub { white-space:normal; overflow-wrap:anywhere; }
+.rail-sub.dim { color:var(--dim); }
+.rail-sub .wf-tag { font-family:var(--sans); }
+/* the last six minutes, one bar per 30 s: how much of it the session spent working */
+.meter { display:flex; align-items:flex-end; gap:3px; height:18px; }
+.meter i { flex:none; width:5px; border-radius:2px; background:var(--accent); transition:height .3s; }
+.meter i.idle { background:var(--toggle); }
+.meter i.wait { background:var(--warn); }
+.meter i.none { background:var(--line); }
+.tile-new { flex:none; display:flex; align-items:center; justify-content:center; gap:8px; min-height:44px; padding:8px; color:var(--muted); background:transparent; border:1.5px dashed var(--toggle); border-radius:14px; }
+.tile-new span { font-size:18px; line-height:1; }
+.tile-new:hover { color:var(--text); background:var(--hover); }
 .rail-item.flat { background:transparent; }
 .rail-item.flat:hover { background:var(--panel-2); }
-.rail-title { font-size:14px; font-weight:500; line-height:1.4; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
-.rail-sub { margin-top:4px; color:var(--muted); font-size:11px; overflow-wrap:anywhere; }
-.rail-sub.dim { color:var(--dim); }
-.rail-item.flat button { width:100%; margin-top:10px; }
-.rail-item.flat .row { gap:6px; margin-top:10px; }.rail-item.flat .row button { flex:1 1 auto; width:auto; margin-top:0; }
-.pane { display:flex; flex-direction:column; gap:10px; position:sticky; top:20px; max-height:calc(100dvh - 40px); padding:14px 16px; background:var(--panel); border:1px solid var(--line); border-radius:12px; }
-.pane-head { display:flex; align-items:flex-start; justify-content:space-between; gap:14px; flex-wrap:wrap; }
-.pane-id { min-width:0; }
-.pane h2 { margin:0; font-size:19px; font-weight:560; line-height:1.35; letter-spacing:-.4px; overflow-wrap:anywhere; }
-.pane-meta { margin-top:6px; font-size:11.5px; overflow-wrap:anywhere; }
+.rail-item.flat .rail-title .dot { margin-right:6px; }
+.rail-item.flat button { width:100%; }
+.rail-item.flat .row { gap:6px; margin-top:2px; }.rail-item.flat .row button { flex:1 1 auto; width:auto; }
+/* the ☰ in the top bar that opens the list where it is a drawer; amber dot when a session needs you */
+.drawer-btn { position:relative; flex:none; display:grid; place-items:center; width:38px; height:38px; min-height:38px; padding:0; color:var(--text); background:var(--panel-2); border:0; border-radius:50%; }
+.drawer-btn.alert::after { content:""; position:absolute; top:5px; right:5px; width:9px; height:9px; border-radius:50%; background:var(--warn); box-shadow:0 0 0 2px var(--bg); }
+.drawer-backdrop { position:fixed; inset:0; z-index:29; background:var(--backdrop); }
+.rail { position:fixed; z-index:30; inset:0 auto 0 0; width:min(340px, 86vw); padding:14px 12px; padding-top:max(14px, env(safe-area-inset-top)); padding-bottom:max(12px, env(safe-area-inset-bottom)); background:var(--bg); border-right:1px solid var(--line); box-shadow:0 0 40px #0006; transform:translateX(-105%); visibility:hidden; transition:transform .22s ease, visibility 0s .22s; }
+body.drawer-open .rail { transform:none; visibility:visible; transition:transform .22s ease; }
+/* Wide enough to share: the open list docks beside the session instead of covering it, and stays while you work. */
+@media (min-width:900px) {
+  .rail, body.drawer-open .rail { position:static; z-index:auto; width:auto; flex:0 0 300px; display:none; padding:18px 14px 12px 20px; background:var(--sidebar); border-right:1px solid var(--line); box-shadow:none; transform:none; visibility:visible; transition:none; }
+  body.drawer-open .rail { display:flex; }
+  .drawer-backdrop { display:none !important; }
+}
+
+.pane { flex:1; min-width:0; min-height:0; display:flex; flex-direction:column; gap:12px; }
+.pane-head { flex:none; display:flex; align-items:center; justify-content:space-between; gap:10px 16px; flex-wrap:wrap; }
+.pane-id { display:flex; flex-wrap:wrap; align-items:center; gap:6px 10px; min-width:0; }
+.pane h2 { margin:0; font-family:var(--display); font-size:24px; font-weight:700; line-height:1.25; letter-spacing:-.02em; overflow-wrap:anywhere; }
+.pane-meta { flex-basis:100%; font-size:11.5px; overflow-wrap:anywhere; }
 .pane-meta code { margin-left:8px; }
+.chip { display:inline-flex; align-items:center; padding:3px 10px; font-size:12px; line-height:1.5; color:var(--muted); text-decoration:none; white-space:nowrap; background:var(--panel-2); border-radius:999px; }
+.chip.ok { color:var(--ok); background:var(--ok-bg); }
+a.chip:hover { text-decoration:underline; }
 .pane-actions { gap:8px; }
-.pane pre.screen { flex:1; min-height:340px; margin:0; padding:14px; overflow:auto; white-space:pre; background:var(--term-bg); border:1px solid var(--line); border-radius:8px; font-family:var(--mono); font-size:11.5px; line-height:1.3; }
-.pane form.keys input { flex:1; min-width:0; }
-.pane-foot { font-size:10.5px; }
-.term-hint { font-size:11px; }
-#select-btn.on { background:var(--accent, var(--accent)); color:var(--term-bg); border-color:transparent; }
+.pane-actions button { border-radius:999px; }
+.pane .chat { flex:1; height:auto; min-height:0; background:transparent; border:0; }
+.pane-foot { flex:none; font-size:10.5px; }
+.term-hint { flex:none; font-size:11px; }
+#select-btn.on { background:var(--accent); color:var(--term-bg); border-color:transparent; }
 body.term-full .term-hint { margin-top:-4px; }
 .pane-empty { display:flex; flex-direction:column; align-items:center; gap:14px; padding:56px 10px; text-align:center; }
-.pane-empty h2 { font-size:21px; }
+.pane-empty h2 { font-size:22px; }
 .pane-empty p { margin:0; max-width:430px; font-size:13px; line-height:1.7; }
-@media (max-width:1200px) {
-  .console-view { grid-template-columns:1fr; }
-  /* the rail becomes a scrolling row of session cards above the terminal */
-  .rail { position:static; max-height:none; flex-direction:row; align-items:stretch; overflow-x:auto; padding-bottom:4px; }
-  .rail-head { flex:0 0 auto; flex-direction:column; align-items:flex-start; justify-content:center; margin:0; padding:0 6px 0 0; border:0; }
-  .rail-head:not(:first-child) { margin:0; padding:0 6px; border:0; border-left:1px solid var(--line); }
-  .rail-item, .rail-slot { flex:0 0 230px; }
-  .rail-item.flat button { margin-top:8px; }
-  .rail-item.flat .row { margin-top:8px; }.rail-item.flat .row button { margin-top:0; }
-  .pane { position:static; max-height:none; }
-}
+
 @media (max-width:900px) {
-  .pane { padding:16px; }
-  .pane pre.screen { min-height:44dvh; font-size:11px; }
+  body[data-tab="console"] main { padding-top:12px; }
+  .console-view { gap:12px; }
+  .pane h2 { font-size:19px; }
+  .pane-actions { width:100%; }
   .pane form.keys { position:sticky; bottom:0; padding-block:8px; background:var(--panel); }
   .pane form.keys input { flex:1 1 100%; }
-  .pane-actions { width:100%; }
+}
+@media (max-width:700px) {
+  .pane-head { gap:8px; }
+  .pane-meta { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .pane-actions { flex-wrap:nowrap; overflow-x:auto; margin:0 -14px; padding:0 14px; scrollbar-width:none; }
+  .pane-actions::-webkit-scrollbar { display:none; }
+  .pane-actions > * { flex:none; }
+  .pane-foot { display:none; }
 }
 
 /* people: who you are, who else is here */
@@ -342,9 +389,11 @@ dialog.login { width:min(420px, calc(100vw - 32px)); }
 
 /* live terminal (xterm.js over a websocket to tmux) */
 /* A fixed height, never "grow to fit": the fit addon sizes the terminal from this box, so a box that grew with the
-   terminal would feed back (more rows → taller box → more rows) up to the row cap. */
-.pane .term { position:relative; flex:none; height:max(360px, calc(100dvh - 250px)); padding:8px; background:var(--term-bg); border:1px solid var(--line); border-radius:8px; overflow:hidden; }
-.pane .term .xterm { height:100%; }
+   terminal would feed back (more rows → taller box → more rows) up to the row cap. Here it takes what is left of the
+   window-high pane, which doesn't depend on the terminal either. */
+.pane .term { position:relative; flex:1; height:auto; min-height:240px; padding:0; background:var(--term-bg); border:1px solid var(--line); border-radius:8px; overflow:hidden; }
+/* the padding goes on .xterm: the fit addon subtracts the terminal element's padding, not its parent's */
+.pane .term .xterm { height:100%; padding:8px; }
 .pane .term-status { position:absolute; top:8px; right:12px; z-index:5; font-size:11px; color:var(--muted); background:color-mix(in srgb, var(--term-bg) 80%, transparent); padding:2px 8px; border-radius:6px; }
 .pane .term-status:empty { display:none; }
 .pane .term-history { position:absolute; inset:0; z-index:4; display:flex; flex-direction:column; gap:4px; padding:8px; background:var(--term-bg); }
@@ -353,13 +402,13 @@ dialog.login { width:min(420px, calc(100vw - 32px)); }
 .pane .term-history-body .xterm { height:100%; }
 
 /* full-screen terminal: just the session, edge to edge */
-body.term-full .sidebar, body.term-full .page-top, body.term-full .rail, body.term-full .pane-foot { display:none; }
+body.term-full .topbar, body.term-full .page-top, body.term-full .rail, body.term-full .pane-foot { display:none; }
 body.term-full main { margin:0; padding:0; max-width:none; }
 body.term-full .console-view { display:block; }
-body.term-full .pane { position:fixed; inset:0; top:0; max-height:none; gap:8px; padding:8px 12px 10px; border:0; border-radius:0; z-index:20; }
-body.term-full .pane .term { flex:1; height:auto; min-height:0; }
+body.term-full .pane { position:fixed; inset:0; top:0; max-height:none; gap:8px; padding:8px 12px 10px; background:var(--bg); z-index:20; }
+body.term-full .pane .term { min-height:0; }
 body.term-full .pane-head { align-items:center; }
-body.term-full .pane h2 { font-size:15px; }
+body.term-full .pane h2 { font-size:16px; }
 body.term-full .pane-meta { margin-top:2px; }
 
 /* ---------------------------------------------------------------- compact layout: advanced sub-nav, workflows, connect */
@@ -390,7 +439,7 @@ dialog .hint { margin:0; font-size:12px; }
 .new-key { margin-bottom:14px; padding:12px 14px; border:1px solid var(--sel-line); background:var(--sel); border-radius:10px; font-size:13px; }
 #key-table th:first-child { width:34%; }#key-table th:last-child { width:110px; }
 @media (max-width:900px) {
-  .subnav { order:3; flex-basis:100%; }
+  .page-top .subnav { order:3; flex-basis:100%; }
   .copy-row { flex-wrap:wrap; }.copy-row code { flex-basis:100%; }
   .card-head form { width:100%; }.card-head form input { flex:1; width:auto; }
   .wf-sub { white-space:normal; }
@@ -405,14 +454,11 @@ dialog .hint { margin:0; font-size:12px; }
 .theme-swatch span { flex:1; }
 .theme-name { font-size:13px; font-weight:600; }
 .theme-name small { display:block; font-weight:400; color:var(--muted); font-size:11px; margin-top:2px; }
-.rail-tabs { flex-shrink:0; align-self:flex-start; }
-@media (max-width:1200px) { .rail-tabs { align-self:center; flex-direction:column; } }
-#ended-read.chat { flex:1; min-height:340px; max-height:calc(100dvh - 190px); overflow:auto; display:flex; flex-direction:column; gap:10px; padding:14px; background:var(--term-bg); border:1px solid var(--line); border-radius:8px; }
+#ended-read.chat { flex:1; min-height:0; overflow:auto; display:flex; flex-direction:column; gap:10px; padding:14px; background:var(--sunken); border:1px solid var(--line); border-radius:8px; }
 #ended-read.chat .msg { max-width:80ch; white-space:pre-wrap; overflow-wrap:anywhere; font-size:13px; line-height:1.5; }
 #ended-read.chat .msg.user { align-self:flex-end; padding:8px 12px; background:var(--sel); border:1px solid var(--sel-line); border-radius:12px; }
 #ended-read.chat .msg.tool { color:var(--dim); font-family:var(--mono); font-size:11px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:100%; }
 #ended-read.chat pre.screen { margin:0; border:0; padding:0; }
-@media (max-width:900px) { #ended-read.chat { max-height:none; min-height:44dvh; } }
 
 /* ---------------------------------------------------------------- view switch (Chat / Terminal) */
 .seg { display:inline-flex; border:1px solid var(--line); border-radius:7px; overflow:hidden; }
@@ -646,3 +692,64 @@ a.chat-path:hover { border-bottom-style:solid; }
 :root[data-theme="wave-light"] .hljs-title, :root[data-theme="wave-light"] .hljs-section, :root[data-theme="wave-light"] .hljs-function .hljs-title { color:#1f63a8; }
 :root[data-theme="wave-light"] .hljs-attr, :root[data-theme="wave-light"] .hljs-variable, :root[data-theme="wave-light"] .hljs-template-variable, :root[data-theme="wave-light"] .hljs-property { color:#8a5a00; }
 :root[data-theme="wave-light"] .hljs-meta, :root[data-theme="wave-light"] .hljs-type { color:#147a68; }
+
+/* ---------------------------------------------------------------- type and finish */
+/* Instrument Sans for text, Bricolage Grotesque for names and titles (both OFL, in vendor/fonts). */
+@font-face { font-family:"Instrument Sans"; font-style:normal; font-weight:400 700; font-display:swap; src:url(/vendor/fonts/instrument-sans-latin.woff2) format("woff2"); }
+@font-face { font-family:"Bricolage Grotesque"; font-style:normal; font-weight:600 700; font-display:swap; src:url(/vendor/fonts/bricolage-grotesque-latin.woff2) format("woff2"); }
+:root { --sans:"Instrument Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; --display:"Bricolage Grotesque", var(--sans); }
+body { font-family:var(--sans); }
+.brand { font-family:var(--display); font-size:19px; font-weight:700; letter-spacing:-.02em; }
+.brand-mark { width:30px; height:30px; }
+h1 { font-family:var(--display); font-size:22px; font-weight:700; letter-spacing:-.02em; }
+dialog h3, .card h2 { font-family:var(--display); font-weight:700; letter-spacing:-.01em; }
+/* status dots: working is go (green), waiting on you is amber, idle is an empty ring */
+.dot.working, .dot.busy { background:var(--ok); box-shadow:none; }
+.dot.idle { background:transparent; box-shadow:inset 0 0 0 1.5px var(--muted); }
+.dot.waiting_input, .dot.waiting { background:var(--warn); }
+/* pill switches */
+.subnav { padding:3px; border-radius:999px; background:var(--sunken); }
+.subnav button { min-height:30px; padding:4px 13px; border-radius:999px; font-size:12.5px; }
+.subnav button.active { background:var(--panel-2); color:var(--text); font-weight:600; }
+.seg { padding:3px; gap:2px; border-radius:999px; background:var(--sunken); }
+.seg button, .seg button + button { min-height:28px; padding:4px 13px; border:0; border-radius:999px; }
+.seg button.on { background:var(--panel-2); color:var(--text); font-weight:600; }
+/* chat: bubbles for you, a rounded box to type in */
+.chat-list { max-width:820px; }
+.chat-user { background:var(--panel-2); border:0; border-radius:18px 18px 4px 18px; padding:11px 16px; }
+.chat-compose { border-top:0; background:transparent; padding:6px 0 4px; }
+.chat-input-row { max-width:820px; align-items:center; padding:6px 6px 6px 10px; background:var(--panel); border:1px solid var(--line); border-radius:22px; }
+.chat-input-row:focus-within { border-color:var(--sel-line); }
+.chat-input { background:transparent; border:0; padding:8px 4px; }
+.chat-attach { border:0; background:transparent; border-radius:999px; }
+.chat-send, .chat-stop { border-radius:999px; }
+.chat-foot { border-top:0; max-width:820px; width:100%; margin:0 auto; padding:4px 12px 0; }
+.pane .chat-compose, .pane .chat-foot { background:transparent; }
+
+/* ---------------------------------------------------------------- phones: give the conversation the screen */
+@media (max-width:700px) {
+  /* one row: ☰, pages (swipe), connection, + */
+  .console .topbar { flex-wrap:nowrap; gap:10px; padding:8px 12px; padding-top:max(8px, env(safe-area-inset-top)); }
+  .brand > span { display:none; }
+  .brand-mark { width:30px; height:30px; }
+  .console nav { order:0; flex:1 1 auto; flex-basis:auto; min-width:0; margin:0; padding:0; }
+  .console nav button { flex:none; min-height:36px; padding:6px 12px; font-size:14px; }
+  .topbar-right { gap:8px; flex:none; }
+  #refresh-btn, #new-session-btn .label { display:none; }
+  #new-session-btn { width:36px; min-height:36px; height:36px; padding:0; font-size:20px; line-height:1; border-radius:50%; }
+  .drawer-btn { width:36px; height:36px; min-height:36px; }
+  .brand { display:none; }
+  /* the session: title and Remote Control on one line, then the actions */
+  body[data-tab="console"] main { padding:10px 14px max(6px, env(safe-area-inset-bottom)); }
+  .console-view { gap:10px; }
+  .pane { gap:8px; }
+  .pane-id { flex-wrap:nowrap; width:100%; }
+  .pane h2 { font-size:18px; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .pane h2 #pane-label { overflow:hidden; text-overflow:ellipsis; }
+  .pane-id .chip.mono, .pane-meta { display:none; }
+  .pane-id .chip { flex:none; }
+  .pane-actions button, .pane-actions .seg button { min-height:34px; }
+  .chat-compose { padding-top:4px; }
+  .chat-foot { padding-top:2px; }
+}
+
