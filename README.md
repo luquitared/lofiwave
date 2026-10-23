@@ -99,6 +99,7 @@ Environment variables, or `KEY=VALUE` lines in `.env`:
 | `GIT_AUTHORS` | *(unset)* | Git identity per signed-in person: `"lucas=Lucas N <lucas@x.com>, seth=Seth N <seth@x.com>"` (key = first word of the sign-in name, any case). Runs they start get `GIT_AUTHOR_*`/`GIT_COMMITTER_*` set, so commits carry their name; everyone else uses git's own config. |
 | `DATA_DIR` | `./data` | SQLite database, run logs, generated token |
 | `CLAUDE_PERMISSION_MODE` | *(unset)* | Permission mode every `claude` run starts in — new, restarted and resumed, headless or interactive: adds `--permission-mode <mode>` (`acceptEdits`, `bypassPermissions`, …) unless the run's args already choose one. Unset: Claude Code's own default (prompts on). |
+| `CLAUDE_TUI` | `default` | Claude Code renderer for interactive runs: adds `--settings '{"tui":"<value>"}'` unless the run's args already pass `--settings`. `default` keeps claude out of the alternate screen, so tmux keeps the history and scrolling up in the browser terminal is private and smooth; `fullscreen` hands the wheel to claude (every viewer's screen moves, one redraw per tick); `keep` uses your own `~/.claude/settings.json`. |
 | `SCHEDULER_INTERVAL_MS` | `15000` | How often scheduled workflows are checked |
 | `IDLE_STOP_SEC` | `120` | How long a workflow's claude session stays open once the agent is done and idle (and nobody has its terminal open) |
 | `OUTPUT_TAIL_BYTES` | `65536` | How much of the end of each log is copied into the run record (`output`) |

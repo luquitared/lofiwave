@@ -111,6 +111,10 @@ export function buildCommand(type: ProcessTypeRow, opts: { cwd: string; prompt?:
   // The configured default mode goes in with the template (so restarts don't count it as an extra arg); args that pick a mode win.
   const picksMode = [...templ, ...extra].some((a) => a === "--dangerously-skip-permissions" || a === "--permission-mode" || a.startsWith("--permission-mode="));
   if (config.claudePermissionMode && basename(command) === "claude" && !picksMode) templ.push("--permission-mode", config.claudePermissionMode);
+  // Interactive claude gets the configured renderer, unless the run's args bring their own --settings.
+  const interactive = Boolean(opts.interactive) || Boolean(opts.resumeSession);
+  const hasSettings = [...templ, ...extra].some((a) => a === "--settings" || a.startsWith("--settings="));
+  if (interactive && config.claudeTui !== "keep" && basename(command) === "claude" && !hasSettings) templ.push("--settings", JSON.stringify({ tui: config.claudeTui }));
   return { command, args: [...templ, ...extra], template_len: templ.length };
 }
 

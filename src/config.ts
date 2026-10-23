@@ -49,6 +49,12 @@ export const config = {
    * `--permission-mode <mode>` unless the run's args already pick one. E.g. `bypassPermissions` on a sandbox VM.
    */
   claudePermissionMode: process.env.CLAUDE_PERMISSION_MODE?.trim() || "",
+  /**
+   * Claude Code renderer for interactive runs (`--settings {"tui":…}`). "default" keeps claude off the alternate
+   * screen, so tmux keeps its history and each viewer scrolls it locally; "fullscreen" sends every wheel tick to
+   * claude, shared by all viewers. "keep" leaves the user's own setting alone.
+   */
+  claudeTui: process.env.CLAUDE_TUI?.trim() || "default",
   schedulerIntervalMs: Number(process.env.SCHEDULER_INTERVAL_MS ?? 15_000),
   /**
    * A workflow's interactive claude run ends once the agent has finished and stayed idle this long, with nobody
