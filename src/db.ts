@@ -134,6 +134,9 @@ if (!typeCols.has("resume_args")) {
 }
 const workflowCols = new Set(db.query<{ name: string }, []>("PRAGMA table_info(workflows)").all().map((c) => c.name));
 if (!workflowCols.has("target")) db.exec("ALTER TABLE workflows ADD COLUMN target TEXT NOT NULL DEFAULT ''"); // a targets.name; '' = this machine
+const runCols = new Set(db.query<{ name: string }, []>("PRAGMA table_info(runs)").all().map((c) => c.name));
+// Pinned to the top of the Sessions rail. A column, not meta: a live run rewrites its meta from memory.
+if (!runCols.has("pinned_at")) db.exec("ALTER TABLE runs ADD COLUMN pinned_at INTEGER");
 // sessions.session_id started out UNIQUE; a resumed session legitimately belongs to several runs.
 const sessionsUniqueOnIdOnly = db.query<{ name: string; unique: number }, []>("PRAGMA index_list(sessions)").all()
   .some((i) => i.unique === 1 && db.query<{ name: string }, [string]>(`PRAGMA index_info(${i.name})`).all(i.name).map((c) => c.name).join(",") === "session_id");
@@ -174,7 +177,7 @@ export type RunRow = {
   id: number; workflow_id: number | null; workflow_name: string | null; type_name: string; cwd: string;
   command: string; args: string; prompt: string; env: string; trigger: string; status: string; pid: number | null;
   started_at: number; ended_at: number | null; exit_code: number | null; log_path: string | null;
-  output: string; error: string; meta: string;
+  output: string; error: string; meta: string; pinned_at: number | null;
 };
 
 export type TargetRow = { id: number; name: string; kind: string; config: string; created_at: number; updated_at: number };
