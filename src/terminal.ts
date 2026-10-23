@@ -196,8 +196,11 @@ export async function openTerminalForTmux(target: string, opts: { terminal?: str
   const want = (opts.terminal || preference).trim().toLowerCase() || "auto";
   if (want === "none" || want === "off" || want === "false" || want === "0") return { opened: false, app: "", error: "" };
   const tmuxBin = Bun.which("tmux") ?? "tmux";
-  const argvCmd = [tmuxBin, "attach-session", "-t", target];
-  const shellCmd = `${shellQuote(tmuxBin)} attach-session -t ${shellQuote(target)}`;
+  // ignore-size: the window doesn't size the session while a browser viewer is attached. Without it, every focus
+  // change on the desktop (switching apps, another run's window opening) claimed the size under `window-size latest`,
+  // and the TUI flashed as it repainted at the other size. Alone, it sizes the session as usual.
+  const argvCmd = [tmuxBin, "attach-session", "-f", "ignore-size", "-t", target];
+  const shellCmd = `${shellQuote(tmuxBin)} attach-session -f ignore-size -t ${shellQuote(target)}`;
   try {
     if (process.platform === "darwin") return await openMac(shellCmd, want);
     if (process.platform === "linux") return openLinux(argvCmd, shellCmd, want);
