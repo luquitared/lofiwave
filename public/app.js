@@ -1112,6 +1112,7 @@ function closeTerm() {
   closeHistory(t);
   t.closed = true; clearTimeout(t.retry); clearTimeout(t.parkTimer); t.ro?.disconnect();
   t.el.remove();
+  paneSig = ""; // the pane lost its terminal: rebuild it next time
   try { t.ws?.close(); } catch {}
   t.term.dispose();
 }
@@ -1217,7 +1218,8 @@ function openChat(runId) {
   const el = $("#console-chat"), root = liveChat.view.root;
   if (el && el !== root) { el.replaceWith(root); root.id = "console-chat"; }
 }
-function closeChat() { if (liveChat) { liveChat.view.close(); liveChat.view.root.remove(); liveChat = null; } }
+// The pane loses its chat with it, so it is rebuilt next time (else a new view has no placeholder to move into).
+function closeChat() { if (liveChat) { liveChat.view.close(); liveChat.view.root.remove(); liveChat = null; paneSig = ""; } }
 
 /** A session lofiwave didn't start (Agents tab, the rail's "started outside"): its chat, read-only, in a dialog. */
 let dialogChat = null;
