@@ -256,6 +256,7 @@ Restarting is done through the run: `POST /api/runs/:id/restart`.
 | `GET /api/runs/:id` | full record incl. `output` (log tail), `duration_ms`, `live` |
 | `GET /api/runs/:id/log?offset=0` | `{data, offset, size, status}` – poll with the returned `offset` to tail a running log |
 | `GET /api/runs/:id/log?raw=1` | the whole log as `text/plain` |
+| `POST /api/runs/:id/pin` | `{pinned: true\|false}` (default true): pin the run to the top of the *Sessions* list, or unpin it → updated run (`pinned_at` is when it was pinned, else null) |
 | `POST /api/runs/:id/kill?force=1` | stop (tree) → updated run. A `queued` run is taken out of the queue (`killed`). |
 | `POST /api/runs/:id/restart` | start a new run with the same parameters (kills the old one first if it is running) → 201 |
 | `GET /api/runs/:id/wait?until=idle&timeout=60&after=` | long-poll: answers once the run is `idle` (its turn is over, it waits on a prompt, or it ended) or `done` (ended), or after `timeout` seconds (max 600). `after` (Unix ms, e.g. a message's `sent_at`): only an idle that began then or later counts. → the run (without `output`) plus `{reached, timed_out, waited_ms}` |
@@ -264,7 +265,7 @@ Restarting is done through the run: `POST /api/runs/:id/restart`.
 | `POST /api/runs/:id/keys` | interactive runs: type into the terminal: `{text?, keys?: ["Down", "Escape", "C-c", ...], enter?: true}` (`keys` are tmux key names, sent after `text`). `text` with `enter` and no `keys` is delivered like `message` (unless the agent waits on a prompt) and the answer includes `delivered` and `attempts`. |
 | `DELETE /api/runs/:id` | delete record + log (must not be running) |
 
-Run record fields: `id, workflow_id, workflow_name, type_name, type (the same as type_name), cwd, command, args, prompt, env, trigger (manual|schedule|restart), status, pid, started_at, ended_at, exit_code, log_path, output, error, live, duration_ms, activity, activity_since, waiting_for?, group, parent_run, out_dir, meta {timeout_sec, orphan, interactive, tmux, stop_when_idle, idle_stop_sec, trust, group, parent_run, queued_at, ...}`. `GET /api/runs/:id` also includes `sessions` (below).
+Run record fields: `id, workflow_id, workflow_name, type_name, type (the same as type_name), cwd, command, args, prompt, env, trigger (manual|schedule|restart), status, pid, started_at, ended_at, exit_code, log_path, output, error, pinned_at, live, duration_ms, activity, activity_since, waiting_for?, group, parent_run, out_dir, meta {timeout_sec, orphan, interactive, tmux, stop_when_idle, idle_stop_sec, trust, group, parent_run, queued_at, ...}`. `GET /api/runs/:id` also includes `sessions` (below).
 
 `activity` is what the agent is doing now: `working` (on a turn), `idle` (its turn is over), `waiting_input` (a permission prompt or question, or the folder trust dialog; `waiting_for` says which when known) or `done` (the run ended); `activity_since` is when that began. For claude it comes from Claude Code's own session registry; for other TUIs from the screen (`esc to interrupt` means working); a headless run is `working` until it ends.
 

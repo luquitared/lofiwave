@@ -282,6 +282,14 @@ select { font-family:inherit; }
 .rail-item { flex-shrink:0; display:block; width:100%; padding:11px 12px; min-height:0; text-align:left; font:inherit; color:var(--text); text-decoration:none; background:var(--panel); border:1px solid var(--line); border-radius:12px; }
 .rail-item:hover { background:var(--hover); border-color:var(--hover-line); }
 .rail-item.active { background:var(--sel); border-color:var(--sel-line); }
+/* the pin sits in the card's top-right corner: faint until hovered, solid when pinned */
+.rail-slot { position:relative; flex-shrink:0; }
+.rail-slot > .rail-item .rail-title { padding-right:22px; }
+.rail-pin { position:absolute; top:7px; right:7px; min-height:0; padding:2px 4px; font-size:12px; line-height:1; background:transparent; border:0; opacity:0; filter:grayscale(1); }
+.rail-slot:hover .rail-pin, .rail-pin:focus-visible { opacity:.55; }
+.rail-pin:hover { opacity:1 !important; }
+.rail-slot.pinned .rail-pin { opacity:1; filter:none; }
+@media (hover:none) { .rail-pin { opacity:.4; } }
 .rail-item.flat { background:transparent; }
 .rail-item.flat:hover { background:var(--panel-2); }
 .rail-title { font-size:14px; font-weight:500; line-height:1.4; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
@@ -312,7 +320,7 @@ body.term-full .term-hint { margin-top:-4px; }
   .rail { position:static; max-height:none; flex-direction:row; align-items:stretch; overflow-x:auto; padding-bottom:4px; }
   .rail-head { flex:0 0 auto; flex-direction:column; align-items:flex-start; justify-content:center; margin:0; padding:0 6px 0 0; border:0; }
   .rail-head:not(:first-child) { margin:0; padding:0 6px; border:0; border-left:1px solid var(--line); }
-  .rail-item { flex:0 0 230px; }
+  .rail-item, .rail-slot { flex:0 0 230px; }
   .rail-item.flat button { margin-top:8px; }
   .rail-item.flat .row { margin-top:8px; }.rail-item.flat .row button { margin-top:0; }
   .pane { position:static; max-height:none; }

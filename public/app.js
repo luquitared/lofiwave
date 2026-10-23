@@ -909,6 +909,8 @@ function openSessionLink(id) {
 
 const loadConsole = guard(async () => {
   consoleData = await get("/console");
+  consoleData.live = pinnedFirst(consoleData.live);
+  consoleData.ended = pinnedFirst(consoleData.ended);
   const { live, ended } = consoleData;
   if (linkedRun) {
     const id = linkedRun; linkedRun = null;
@@ -953,9 +955,23 @@ function railTabs() {
   return h("div", { class: "subnav rail-tabs", role: "tablist", "aria-label": "Sessions" }, tab("live", "Live", consoleData.live.length), tab("ended", "Ended", consoleData.ended.length));
 }
 
+/** Pinned runs first, in the order they were pinned; the rest keep the server's order (newest first). */
+const pinnedFirst = (runs) => [...runs.filter((r) => r.pinned_at).sort((a, b) => a.pinned_at - b.pinned_at), ...runs.filter((r) => !r.pinned_at)];
+const setPinned = (r, pinned) => guard(async () => {
+  await post(`/runs/${r.id}/pin`, { pinned });
+  railSig = "";
+  await loadConsole();
+})();
+/** A rail card with its pin toggle beside it (a button can't hold another button). */
+function pinnable(r, card) {
+  const on = Boolean(r.pinned_at);
+  return h("div", { class: `rail-slot ${on ? "pinned" : ""}` }, card,
+    h("button", { class: "rail-pin", title: on ? "Unpin" : "Pin to the top", "aria-label": `${on ? "Unpin" : "Pin"} ${runLabel(r)}`, "aria-pressed": String(on), onclick: () => setPinned(r, !on) }, "📌"));
+}
+
 function renderRail() {
   const { live, headless, adoptable, ended } = consoleData;
-  const sig = JSON.stringify([consoleView, live.map((r) => [r.id, runLabel(r)]), headless.map((r) => [r.id, runLabel(r)]), adoptable.map((p) => [p.pid, p.session?.session_id || "", p.session?.web_url || ""]), ended.map((r) => [r.id, runLabel(r)]), endedRun?.id]);
+  const sig = JSON.stringify([consoleView, live.map((r) => [r.id, runLabel(r), r.pinned_at]), headless.map((r) => [r.id, runLabel(r)]), adoptable.map((p) => [p.pid, p.session?.session_id || "", p.session?.web_url || ""]), ended.map((r) => [r.id, runLabel(r), r.pinned_at]), endedRun?.id]);
   if (sig === railSig) return patchRail();
   railSig = sig;
   if (consoleView === "ended") return $("#session-rail").replaceChildren(railTabs(), ...endedRail());
@@ -969,11 +985,11 @@ function renderRail() {
       ),
     ),
     ...live.map((r) => {
-      return h("button", { class: `rail-item ${consoleRun?.id === r.id ? "active" : ""}`, "data-run": r.id, "aria-current": consoleRun?.id === r.id ? "true" : "false", onclick: () => selectConsoleRun(r) },
+      return pinnable(r, h("button", { class: `rail-item ${consoleRun?.id === r.id ? "active" : ""}`, "data-run": r.id, "aria-current": consoleRun?.id === r.id ? "true" : "false", onclick: () => selectConsoleRun(r) },
         h("div", { class: "rail-title" }, h("span", { class: `dot ${actOf(r)}`, title: actOf(r) }), runLabel(r)),
         h("div", { class: "rail-sub" }, r.workflow_name ? h("span", { class: "wf-tag" }, `⌁ ${r.workflow_name}`) : "", groupTag(r), `${r.type_name} · ${shortCwd(r.cwd)}${byWho(r)}`),
         h("div", { class: "rail-sub dim rail-up" }, railUp(r)),
-      );
+      ));
     }),
     headless.length ? h("div", { class: "rail-head" }, h("span", {}, `${headless.length} running · log only`)) : "",
     ...headless.map((r) => h("a", { class: "rail-item flat", href: `#runs/${r.id}`, onclick: (e) => { e.preventDefault(); openRun(r.id); } },
@@ -999,11 +1015,11 @@ function endedRail() {
   const { ended } = consoleData;
   return [
     h("div", { class: "rail-head" }, h("span", {}, ended.length ? `${ended.length} recently ended` : "Nothing ended yet")),
-    ...ended.map((r) => h("button", { class: `rail-item ${endedRun?.id === r.id ? "active" : ""}`, "aria-current": endedRun?.id === r.id ? "true" : "false", onclick: () => selectEndedRun(r) },
+    ...ended.map((r) => pinnable(r, h("button", { class: `rail-item ${endedRun?.id === r.id ? "active" : ""}`, "aria-current": endedRun?.id === r.id ? "true" : "false", onclick: () => selectEndedRun(r) },
       h("div", { class: "rail-title" }, runLabel(r)),
       h("div", { class: "rail-sub" }, r.workflow_name ? h("span", { class: "wf-tag" }, `⌁ ${r.workflow_name}`) : "", groupTag(r), `${r.type_name} · ${shortCwd(r.cwd)}${byWho(r)}`),
       h("div", { class: "rail-sub dim" }, endedWhen(r)),
-    )),
+    ))),
   ];
 }
 const endedWhen = (r) => `ended ${r.ended_at ? fmtRel(r.ended_at) : "?"}` + (r.ended_at ? ` · ran ${fmtDur((r.ended_at - r.started_at) / 1000)}` : "") + (r.status && r.status !== "success" ? ` · ${r.status}` : "");
@@ -1012,6 +1028,7 @@ const endedWhen = (r) => `ended ${r.ended_at ? fmtRel(r.ended_at) : "?"}` + (r.e
 const turnBackOn = (r) => guard(async () => {
   const s = sessOf(r);
   const n = s?.session_id ? await post(`/runs/${r.id}/sessions/${encodeURIComponent(s.session_id)}/resume`) : await post(`/runs/${r.id}/restart`);
+  if (r.pinned_at) { await post(`/runs/${n.id}/pin`, { pinned: true }); await post(`/runs/${r.id}/pin`, { pinned: false }); }
   toast(`back on as run #${n.id}`, true);
   selectConsoleRunId(n.id);
   setConsoleView("live", false);

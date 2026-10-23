@@ -473,7 +473,7 @@ route("GET", "/api/console", async () => {
   const adoptable = (await listConsoleProcesses(undefined, "agent")).filter((p) => !p.child && !(p.run_id && liveRunIds.has(p.run_id)));
   // ended: recent interactive runs that have stopped, newest first, one per conversation, leaving out any that is live again.
   const seen = new Set(live.flatMap((r) => r.sessions.map((s) => s.session_id)));
-  const ended = db.query<RunRow, []>("SELECT * FROM runs WHERE status != 'running' AND json_extract(meta, '$.interactive') = 1 ORDER BY started_at DESC LIMIT 100").all()
+  const ended = db.query<RunRow, []>("SELECT * FROM runs WHERE status != 'running' AND json_extract(meta, '$.interactive') = 1 ORDER BY pinned_at IS NULL, started_at DESC LIMIT 100").all()
     .map(withSessions)
     .filter((r) => {
       const sid = r.sessions.at(-1)?.session_id;
@@ -715,6 +715,11 @@ route("GET", "/api/runs/:id/log", (_r, p, url) => {
   return json({ id: run.id, status: run.status, ...readLogFrom(run.log_path, offset) });
 });
 
+route("POST", "/api/runs/:id/pin", async (req, p) => {
+  const id = getRun(Number(p.id)).id;
+  db.prepare("UPDATE runs SET pinned_at = ? WHERE id = ?").run(bool((await body(req)).pinned, true) ? now() : null, id);
+  return json(runOut(getRun(id)));
+});
 route("POST", "/api/runs/:id/kill", async (_r, p, url) => json(runOut(await killRun(Number(p.id), bool(url.searchParams.get("force"), false)))));
 route("POST", "/api/runs/:id/restart", async (_r, p) => json(runOut(await restartRun(Number(p.id))), 201));
 
