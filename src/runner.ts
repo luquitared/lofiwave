@@ -345,6 +345,9 @@ export async function startRun(opts: StartOptions): Promise<RunRow> {
     const pid = Number(pane.out);
     if (!pid) await fail(`could not read the tmux pane pid: ${pane.err || pane.out}`);
     entry = { pid, tmux: sess, done };
+    // Record the pid now, not after the window opens: until it is in the row, the process list counts this
+    // process as started outside the console and offers to take it over (a second copy of the same session).
+    db.prepare("UPDATE runs SET pid = ? WHERE id = ?").run(pid, id);
     // Show the session on this machine's desktop too. Failing to find a terminal is not fatal:
     // the run keeps going in tmux, and the console's own screen view still works.
     const term = await openTerminalForTmux(tmuxTarget(sess), { terminal: opts.terminal });
@@ -884,10 +887,19 @@ export async function resumeSession(runId: number, sessionId: string): Promise<R
  * Reopen any agent session by id, whether or not the console started it (e.g. a claude session from a terminal, seen on the
  * Agents tab). If that session is still open elsewhere, claude forks a copy that continues the conversation under a new id.
  */
-export async function resumeAgentSession(o: { agent: string; sessionId: string; cwd?: string; typeName?: string; env?: Record<string, string>; terminal?: string }): Promise<RawRun> {
+/**
+ * Reopen a session here. `replacePid`: the process that has it open now (taking it over); it is stopped first, so
+ * two agents never write one transcript. Refused when that pid is on a different session.
+ */
+export async function resumeAgentSession(o: { agent: string; sessionId: string; cwd?: string; typeName?: string; env?: Record<string, string>; terminal?: string; replacePid?: number }): Promise<RawRun> {
   const typeName = o.typeName ?? o.agent;
   const type = getType(typeName);
   if (!JSON.parse(type.resume_args || "[]").length) throw new ApiError(400, `process type "${typeName}" has no resume_args template`);
+  if (o.replacePid && pidAlive(o.replacePid)) {
+    const onIt = claudeRegistry(true).byPid.get(o.replacePid)?.sessionId;
+    if (onIt && onIt !== o.sessionId) throw new ApiError(409, `pid ${o.replacePid} is on session ${onIt}, not ${o.sessionId}`);
+    await stopAndWait(o.replacePid);
+  }
   const cwd = o.cwd && existsSync(o.cwd) ? o.cwd : (type.default_cwd || process.env.HOME || "/");
   const run = await startRun({ typeName, cwd, trigger: "resume", resumeSession: o.sessionId, env: o.env ?? {}, terminal: o.terminal });
   // Until the agent reports back (claude's hook, codex's index), remember what we asked it to reopen. Codex's is
@@ -896,6 +908,15 @@ export async function resumeAgentSession(o: { agent: string; sessionId: string; 
   return getRun(run.id);
 }
 type RawRun = RunRow;
+
+/** Stop a process (through its run, when it is one of ours) and wait for it to exit, so a reopen never runs alongside it. */
+async function stopAndWait(pid: number): Promise<void> {
+  const run = db.query<RunRow, [number]>("SELECT * FROM runs WHERE pid = ? AND status = 'running'").get(pid);
+  if (run) await killRun(run.id, false);
+  else await killTree(pid, false);
+  for (let i = 0; i < 50 && pidAlive(pid); i++) await Bun.sleep(200);
+  if (pidAlive(pid)) throw new ApiError(500, `pid ${pid} did not exit after SIGTERM; not reopening the session alongside it`);
+}
 
 /**
  * Turn Remote Control on for a claude session that is already running, so it shows up in the Claude app.
@@ -950,10 +971,7 @@ export async function enableRemoteControl(pid: number, o: { replace?: boolean; t
   }
 
   if (!o.replace) throw new ApiError(409, `pid ${pid} is not in a tmux pane or terminal tab the console can type into. Pass replace: true to stop it and reopen the conversation here with Remote Control.`);
-  if (run) await killRun(run.id, false);
-  else await killTree(pid, false);
-  for (let i = 0; i < 50 && pidAlive(pid); i++) await Bun.sleep(200);
-  if (pidAlive(pid)) throw new ApiError(500, `pid ${pid} did not exit after SIGTERM; not reopening the session alongside it`);
+  await stopAndWait(pid);
   const own = run ? getType(run.type_name) : null;
   const typeName = own && basename(own.command) === "claude" ? own.name : "claude";
   const env = run ? JSON.parse(run.env || "{}") : {};
