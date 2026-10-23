@@ -4,3 +4,4 @@ legacy/
 .env
 # Private ops repo (luquitared/lofiwave-ops), imported by CLAUDE.md
 ops
+build/
