@@ -11,6 +11,7 @@
  */
 import { db, type RunRow } from "../db";
 import { checkpoint } from "./checkpoints";
+import { adoptSession } from "../runner";
 
 /** One assistant message as it streams: `parts[index]` is each delta. */
 export type Stream = { messageId: string; promptId: string; parts: string[]; final: boolean; at: number };
@@ -110,6 +111,8 @@ export async function turnHook(req: Request, p: any): Promise<void> {
   if (!run || (event !== "UserPromptSubmit" && event !== "Stop") || typeof p.prompt_id !== "string" || !p.prompt_id) return;
   const cwd = typeof p.cwd === "string" && p.cwd ? p.cwd : run.cwd;
   const sid = String(p.session_id ?? "");
+  // Every turn says which session it is in: the run has it even if the SessionStart hook never reported it.
+  if (/^[A-Za-z0-9_.-]+$/.test(sid)) adoptSession(run.id, { session_id: sid, cwd, transcript_path: typeof p.transcript_path === "string" ? p.transcript_path : "", source: "turn hook" });
   if (event === "UserPromptSubmit") {
     // Anything still streaming belongs to an earlier prompt; the transcript has it by now.
     const m = streams.get(run.id);

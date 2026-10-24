@@ -7,6 +7,7 @@ import { db, now, hydrate, type ProcessTypeRow, type WorkflowRow, type RunRow, t
 import { getTarget, parseTargetConfig, checkTarget, TargetError, TARGET_KINDS } from "./targets";
 import { listOsProcesses, cwdOf, killTree, type OsProcess } from "./procs";
 import { ApiError, startRun, killRun, restartRun, getRun, getType, readLogFrom, isLive, buildCommand, screenOf, historyOf, sendKeys, sendMessage, activityOf, waitForRun, tmuxPath, recordSession, resumeSession, resumeAgentSession, enableRemoteControl } from "./runner";
+import { transcriptMark, recordMessage, messageStatus, runMessages, waitForReply } from "./messages";
 import { describeSession, sessionForPid, locateSession, transcriptMessages, codexThreadNear, type SessionInfo } from "./agents";
 import { startScheduler, refreshNextRun, runWorkflow, computeNext } from "./scheduler";
 import { validateCron } from "./cron";
@@ -114,6 +115,8 @@ function runOut(r: RunRow, { withOutput = true } = {}) {
     ...h, type: r.type_name, duration_ms: (r.ended_at ?? now()) - r.started_at, live: isLive(r.id),
     group: meta.group ?? null, parent_run: meta.parent_run ?? null, out_dir: (h.env as any)?.LOFIWAVE_OUT_DIR ?? null, ...activityOf(r),
   };
+  // The session it is on now (the latest recorded), so a caller can go straight to …/sessions/:session_id/messages.
+  out.session_id = db.query<{ session_id: string }, [number]>("SELECT session_id FROM sessions WHERE run_id = ? ORDER BY started_at DESC, id DESC LIMIT 1").get(r.id)?.session_id ?? null;
   if (!withOutput) delete out.output;
   else out.sessions = sessionsOf(r.id);
   return out;
@@ -734,21 +737,43 @@ route("POST", "/api/runs/:id/keys", async (req, p) => {
   const r = await sendKeys(getRun(Number(p.id)), str(b.text, "text"), strArray(b.keys, "keys"), bool(b.enter, true));
   return json({ ok: true, ...r });
 });
-// A message to the agent, checked: {delivered: true|false|null (can't tell for this TUI), queued (it was mid-turn), attempts, sent_at}.
+// A message to the agent, checked: {message_id, delivered: true|false|null (can't tell for this TUI), queued (it was
+// mid-turn), attempts, sent_at}. GET …/messages/:message_id then says what became of it and gives the reply.
 route("POST", "/api/runs/:id/message", async (req, p) => {
   const b = await body(req);
   const run = getRun(Number(p.id));
-  const r = await sendMessage(run, str(b.text, "text", { required: true }));
-  return json({ ...r, run: runOut(getRun(run.id), { withOutput: false }) });
+  const text = str(b.text, "text", { required: true });
+  const mark = transcriptMark(run);
+  const r = await sendMessage(run, text);
+  const message_id = recordMessage(run, text, r, mark, actor.getStore() ?? "");
+  return json({ message_id, ...r, run: runOut(getRun(run.id), { withOutput: false }) });
 });
-// Long-poll until the run is idle (turn over, waiting on a prompt, or ended) or done (ended), or `timeout` seconds pass (max 600).
+// Messages sent with POST …/message: where each is (sent, queued, answering, answered, removed) and the reply.
+route("GET", "/api/runs/:id/messages", (_r, p, url) => json(runMessages(Number(p.id), Math.min(int(url.searchParams.get("limit"), "limit", 20) || 20, 200))));
+// One message; ?wait=<seconds> (max 600) long-polls until it is answered (the turn that read it is over).
+route("GET", "/api/runs/:id/messages/:mid", async (req, p, url) => {
+  const wait = Math.min(int(url.searchParams.get("wait"), "wait", 0), 600);
+  if (!wait) return json(messageStatus(Number(p.id), Number(p.mid)));
+  const started = now();
+  const { message, reached } = await waitForReply(Number(p.id), Number(p.mid), wait * 1000, req.signal);
+  return json({ ...message, reached, timed_out: !reached, waited_ms: now() - started });
+});
+// Long-poll until the run is idle (turn over, waiting on a prompt, or ended), done (ended), or replied (the turn
+// that read `message` is over), or `timeout` seconds pass (max 600).
 route("GET", "/api/runs/:id/wait", async (req, p, url) => {
   const until = url.searchParams.get("until") || "idle";
-  if (until !== "idle" && until !== "done") throw new ApiError(400, `until must be "idle" or "done"`);
+  if (until !== "idle" && until !== "done" && until !== "replied") throw new ApiError(400, `until must be "idle", "done" or "replied"`);
   const timeout = Math.min(int(url.searchParams.get("timeout"), "timeout", 60), 600);
-  const after = int(url.searchParams.get("after"), "after", 0);
   const started = now();
-  const { run, reached } = await waitForRun(getRun(Number(p.id)).id, until, timeout * 1000, after, req.signal);
+  const id = getRun(Number(p.id)).id;
+  if (until === "replied") {
+    const mid = int(url.searchParams.get("message"), "message", 0);
+    if (!mid) throw new ApiError(400, "until=replied needs message=<message_id> (from POST /message)");
+    const { message, reached } = await waitForReply(id, mid, timeout * 1000, req.signal);
+    return json({ ...runOut(getRun(id), { withOutput: false }), reached, timed_out: !reached, waited_ms: now() - started, message });
+  }
+  const after = int(url.searchParams.get("after"), "after", 0);
+  const { run, reached } = await waitForRun(id, until, timeout * 1000, after, req.signal);
   return json({ ...runOut(run, { withOutput: false }), reached, timed_out: !reached, waited_ms: now() - started });
 });
 

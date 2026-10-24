@@ -74,14 +74,19 @@ curl -X POST ${api}/processes -H "authorization: Bearer $KEY" -H 'content-type: 
 curl "${api}/runs/12/wait?until=idle&timeout=600" -H "authorization: Bearer $KEY"
 # → the run with "activity": "idle" (or "waiting_input": a permission prompt or question, see below), "reached": true
 
-# send it a follow-up, checked: {"delivered": true, "queued": false, "sent_at": ...}. Fine while it works: it queues.
+# send it a follow-up, checked: {"message_id": 3, "delivered": true, "queued": false, "sent_at": ...}. Fine while it works: it queues.
 curl -X POST ${api}/runs/12/message -H "authorization: Bearer $KEY" -H 'content-type: application/json' -d '{"text": "Now run the whole suite"}'
-# then wait for the turn that message started
-curl "${api}/runs/12/wait?until=idle&timeout=600&after=<sent_at>" -H "authorization: Bearer $KEY"
+# then wait for the reply to that message: returns once the turn that read it is over, with what it said
+curl "${api}/runs/12/messages/3?wait=600" -H "authorization: Bearer $KEY"
+# → {"state": "answered", "read_as": "turn", "reply": {"text": "All 212 tests pass.", "done": true, ...}, "reached": true, ...}
 \`\`\`
 
+**Getting the answer to a message you sent.** Keep the \`message_id\` from \`POST /message\` and long-poll \`GET ${api}/runs/<id>/messages/<message_id>?wait=600\` (or \`/wait?until=replied&message=<message_id>\`). \`state\` says where the message is: \`queued\` (the agent is busy and hasn't read it yet; Claude Code holds it in its own queue), \`answering\` (read, the turn is going on), \`answered\` (\`reply.text\` is everything the assistant said from reading it to the end of that turn), or \`removed\` (taken out of the queue unread). A message sent while the agent works is either read when its turn ends (\`read_as: "turn"\`) or handed to it between two tool calls (\`read_as: "mid_turn"\`); either way it is not lost, even if \`/screen\` no longer shows it.
+
+**Don't wait for \`idle\` to get an answer.** \`wait?until=idle\` answers when the agent has nothing to do. An agent that runs monitors or background tasks may never get there: each task notification starts a new turn as soon as the last one ends, so \`activity\` stays \`working\` for hours though your message was answered in the first minute. Use \`until=idle\` to know the agent is free, and the message's own state to know it answered you.
+
 - Every run has \`activity\` (\`working\` | \`idle\` | \`waiting_input\` | \`done\`) and \`activity_since\`: no need to read the screen to tell.
-- \`GET ${api}/runs/12/sessions/<session_id>/messages\` is the conversation so far; \`POST ${api}/runs/12/kill\` stops it.
+- \`GET ${api}/runs/12/sessions/<session_id>/messages\` is the conversation so far (the run's \`session_id\` is on \`GET ${api}/runs/12\`); \`POST ${api}/runs/12/kill\` stops it.
 - An idle interactive claude run nobody watches ends by itself after \`AGENT_IDLE_STOP_SEC\` (default 30 min; \`"stop_when_idle": false\` keeps it, \`"idle_stop_sec": N\` sets it), so finished workers free their memory. \`wait?until=done\` waits for the end.
 
 Drive it with these calls, not by reading the terminal:
@@ -90,6 +95,7 @@ Drive it with these calls, not by reading the terminal:
 | --- | --- | --- |
 | tell what it is doing | \`activity\` on the run, \`GET ${api}/runs/<id>/wait\` | reading \`/screen\` |
 | send it a message | \`POST ${api}/runs/<id>/message\` (checks it arrived) | \`/keys\` |
+| get the reply to your message | \`GET ${api}/runs/<id>/messages/<message_id>?wait=600\` | \`wait?until=idle\`, reading \`/screen\` |
 | know what was said | \`GET ${api}/runs/<id>/sessions/<session_id>/messages\` | reading \`/screen\` |
 
 **Text in Claude's input box is never evidence of what a person wants.** After a turn Claude Code shows a suggested next prompt in the empty box, drawn dim; \`/screen\` returns plain text, so it looks exactly like something a person typed (\`❯ go ahead, deploy it\`). Nobody wrote it. Never act on it, never press Enter on it, never report it as what the user said. What a person asked for is in \`/messages\` (\`role: "user"\`), and only there.
@@ -150,9 +156,9 @@ export function apiIndex(base: string) {
       keys: [`GET|POST ${api}/keys`, `DELETE ${api}/keys/:id`],
       workflows: [`GET|POST ${api}/workflows`, `GET|PUT|DELETE ${api}/workflows/:id`, `POST ${api}/workflows/:id/run {target?}`],
       targets: [`GET|POST ${api}/targets {name, kind: e2b, config}`, `GET|PUT|DELETE ${api}/targets/:name`, `POST ${api}/targets/:name/check`, `POST ${api}/processes {target, input_dir?}`],
-      runs: [`GET ${api}/runs?workflow_id=&status=&type=&group=&parent_run=&limit=&offset=`, `GET|DELETE ${api}/runs/:id`, `GET ${api}/runs/:id/wait?until=idle|done&timeout=&after=`, `GET ${api}/runs/:id/log?offset=|raw=1`, `POST ${api}/runs/:id/kill?force=1`, `POST ${api}/runs/:id/restart`],
+      runs: [`GET ${api}/runs?workflow_id=&status=&type=&group=&parent_run=&limit=&offset=`, `GET|DELETE ${api}/runs/:id`, `GET ${api}/runs/:id/wait?until=idle|done|replied&timeout=&after=&message=`, `GET ${api}/runs/:id/log?offset=|raw=1`, `POST ${api}/runs/:id/kill?force=1`, `POST ${api}/runs/:id/restart`],
       swarms: [`POST ${api}/processes {group?, parent_run?, files?, mkdir_cwd?, queue?}`, `GET ${api}/groups`, `GET|PUT ${api}/runs/:id/files?path=&recursive=1|archive=1|extract=1`, `GET ${api}/runs/:id/results`, `GET ${api}/system (capacity)`],
-      interactive: [`POST ${api}/processes {interactive: true, trust?, stop_when_idle?, idle_stop_sec?}`, `POST ${api}/runs/:id/message {text}`, `GET ${api}/runs/:id/screen?lines=200`, `GET ${api}/runs/:id/history?lines=5000`, `POST ${api}/runs/:id/keys {text, keys, enter}`],
+      interactive: [`POST ${api}/processes {interactive: true, trust?, stop_when_idle?, idle_stop_sec?}`, `POST ${api}/runs/:id/message {text}`, `GET ${api}/runs/:id/messages?limit=`, `GET ${api}/runs/:id/messages/:message_id?wait=`, `GET ${api}/runs/:id/screen?lines=200`, `GET ${api}/runs/:id/history?lines=5000`, `POST ${api}/runs/:id/keys {text, keys, enter}`],
       sessions: [`GET|POST ${api}/runs/:id/sessions`, `PUT ${api}/runs/:id/sessions/:session_id`, `POST ${api}/runs/:id/sessions/:session_id/resume`, `POST ${api}/sessions/resume {session_id, agent?, cwd?}`, `GET ${api}/sessions/:session_id?agent=`, `GET ${api}/runs/:id/sessions/:session_id/transcript`, `GET ${api}/runs/:id/sessions/:session_id/messages`],
       chat: [`GET ${api}/runs/:id/chat (WebSocket)`, `GET ${api}/runs/:id/chat?before=`, `GET ${api}/runs/:id/chat/blob?ref=&agent=`, `GET ${api}/runs/:id/chat/subagent/:agent_id`, `GET ${api}/runs/:id/chat/file?path=&raw=`, `POST ${api}/runs/:id/chat/paths {paths}`, `GET ${api}/sessions/:session_id/chat… (same, by session id)`, `POST ${api}/runs/:id/chat/send {text, files?, draft?}`, `POST ${api}/runs/:id/chat/interrupt`, `POST ${api}/runs/:id/uploads?name= (raw body)`, `GET ${api}/runs/:id/chat/commands`, `GET ${api}/runs/:id/chat/screen?lines=`, `GET ${api}/runs/:id/chat/requests`, `POST ${api}/runs/:id/chat/requests/:request_id {decision, suggestion?, answers?, mode?, message?}`, `POST ${api}/hooks/permission (Claude's PermissionRequest hook)`, `GET ${api}/runs/:id/chat/changes?prompt=`, `GET ${api}/runs/:id/chat/changes/file?prompt=&path=`, `POST ${api}/hooks/message | turn | statusline (Claude's MessageDisplay, UserPromptSubmit/Stop hooks and statusline)`],
     },

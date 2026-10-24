@@ -129,6 +129,43 @@ export function recordSession(runId: number, s: { session_id: string; agent?: st
   ).run(runId, s.session_id, s.agent || "claude", s.cwd ?? "", s.transcript_path ?? "", s.model ?? "", s.source ?? "", now());
 }
 
+/**
+ * Record a session learned of on the side (claude's pid registry, a turn hook, a message found in its transcript). Unlike
+ * recordSession it never overwrites what the session hook reported; it only fills in what is missing.
+ */
+export function adoptSession(runId: number, s: { session_id: string; agent?: string; cwd?: string; transcript_path?: string; source: string }) {
+  db.prepare(
+    `INSERT INTO sessions (run_id, session_id, agent, cwd, transcript_path, source, started_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(run_id, session_id) DO UPDATE SET
+       cwd = CASE WHEN sessions.cwd = '' THEN excluded.cwd ELSE sessions.cwd END,
+       transcript_path = CASE WHEN sessions.transcript_path = '' THEN excluded.transcript_path ELSE sessions.transcript_path END`,
+  ).run(runId, s.session_id, s.agent || "claude", s.cwd ?? "", s.transcript_path ?? "", s.source, now());
+}
+
+/** What noteClaudeSession last recorded for each run, so the pane watcher only writes when it changes. */
+const notedSessions = new Map<number, string>();
+/**
+ * Record the session a claude run's process is on, from claude's own pid registry (~/.claude/sessions/<pid>.json).
+ * The SessionStart hook has to be installed globally and reach us once, at startup; when it doesn't, this still
+ * records the session, and it follows a /clear or a resume to the new id. Returns the id.
+ */
+export function noteClaudeSession(runId: number, pid: number | null, cwd: string): string | null {
+  const reg = pid ? claudeRegistry().byPid.get(pid) : undefined;
+  if (!reg?.sessionId) return null;
+  const at = reg.cwd || cwd;
+  // Only where claude writes it for this folder: a session that hasn't written one yet would otherwise search every
+  // project folder on each look. The path is filled in once the file exists.
+  const home = claudeTranscriptHome(reg.sessionId, at);
+  const path = existsSync(home) ? home : "";
+  const key = `${reg.sessionId}\0${path}`;
+  if (notedSessions.get(runId) !== key) {
+    adoptSession(runId, { session_id: reg.sessionId, cwd: at, transcript_path: path, source: "registry" });
+    notedSessions.set(runId, key);
+  }
+  return reg.sessionId;
+}
+
 export function tmuxPath(): string | null { return Bun.which("tmux"); }
 export const tmuxSessionName = (runId: number) => `ac-${runId}`;
 /**
@@ -449,6 +486,7 @@ async function watchPane(w: Watch): Promise<number | null> {
     if (ticks % 2) continue;
 
     const reg = w.isClaude ? claudeActivity(pid, id) : null;
+    if (w.isClaude) noteClaudeSession(id, pid, w.cwd);
     // The screen, early on (the Remote Control link, the trust dialog) and whenever no registry says what the agent is doing.
     let screen: string | null = null;
     if (!reg || ticks <= 120) {
@@ -527,6 +565,7 @@ async function finishRun(r: {
   live.delete(id);
   activities.delete(id);
   messagedAt.delete(id);
+  notedSessions.delete(id);
   db.prepare("UPDATE runs SET status = ?, ended_at = ?, exit_code = ?, output = ?, error = ? WHERE id = ?")
     .run(status, now(), code, readTail(logPath, config.outputTailBytes), entry.error ?? (code === null && !entry.killedBy ? (entry.lostWhy ? entry.lostWhy : r.onTarget ? "the sandbox run ended without a result" : "tmux session disappeared") : ""), id);
   markDone();

@@ -1,0 +1,110 @@
+#!/usr/bin/env bun
+// A stand-in for Claude Code's TUI, for test/messages.e2e.test.ts. It keeps the on-disk state lofiwave reads the way
+// Claude Code does: the pid registry (~/.claude/sessions/<pid>.json) and the transcript
+// (~/.claude/projects/<cwd slug>/<session>.jsonl, with queue-operation, user, assistant and turn_duration lines).
+// It draws an input box between two rules, so POST /message can check delivery.
+//
+// What it does, like an agent running monitors:
+//  1. starts working on a long turn of its own (FAKE_FIRST_TURN_MS);
+//  2. a message typed meanwhile is queued; when that turn ends it is dequeued and answered in its own turn
+//     ("ANSWER: <text>");
+//  3. then it goes straight into turns started by task notifications, back to back, and never goes idle. A message
+//     typed during one of those is absorbed mid-turn and answered in that turn.
+// It never runs a SessionStart hook: the run has to find its session some other way.
+import { mkdirSync, writeFileSync, appendFileSync } from "node:fs";
+import { join } from "node:path";
+import { homedir } from "node:os";
+import { randomUUID } from "node:crypto";
+
+const sid = randomUUID();
+const cwd = process.cwd();
+const firstTurnMs = Number(process.env.FAKE_FIRST_TURN_MS ?? 4000);
+const regDir = join(homedir(), ".claude", "sessions");
+const projDir = join(homedir(), ".claude", "projects", cwd.replace(/[^A-Za-z0-9]/g, "-"));
+mkdirSync(regDir, { recursive: true });
+mkdirSync(projDir, { recursive: true });
+const transcript = join(projDir, `${sid}.jsonl`);
+
+const register = (status: string) =>
+  writeFileSync(join(regDir, `${process.pid}.json`), JSON.stringify({ pid: process.pid, sessionId: sid, cwd, startedAt: Date.now(), status, statusUpdatedAt: Date.now() }));
+const line = (d: Record<string, any>) => appendFileSync(transcript, JSON.stringify({ ...d, timestamp: new Date().toISOString(), sessionId: sid, cwd }) + "\n");
+const user = (promptId: string, content: any, extra: Record<string, any> = {}) => line({ type: "user", isSidechain: false, promptId, uuid: randomUUID(), message: { role: "user", content }, ...extra });
+const assistant = (content: any[], stop: string) => line({ type: "assistant", isSidechain: false, uuid: randomUUID(), message: { id: `msg_${randomUUID()}`, role: "assistant", content, stop_reason: stop } });
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+let input = "";
+let status = "working";
+const queue: string[] = [];
+function draw() {
+  const rule = "─".repeat(60);
+  process.stdout.write(`\x1b[2J\x1b[H fake claude · session ${sid}\r\n ${status}${status === "working" ? " (esc to interrupt)" : ""}\r\n${rule}\r\n❯ ${input}\r\n${rule}\r\n`);
+}
+
+if (process.stdin.isTTY) process.stdin.setRawMode(true);
+process.stdin.on("data", (buf: Buffer) => {
+  for (const ch of buf.toString("utf8").replace(/\x1b\[20[01]~/g, "")) {
+    if (ch === "\r" || ch === "\n") {
+      const text = input.trim();
+      input = "";
+      if (text) { queue.push(text); line({ type: "queue-operation", operation: "enqueue", content: text }); }
+    } else if (ch === "\x03") process.exit(0);
+    else if (ch === "\x7f") input = input.slice(0, -1);
+    else if (ch >= " ") input += ch;
+  }
+  draw();
+});
+
+/** One tool call and its result, inside the turn `promptId`. */
+async function toolStep(promptId: string) {
+  const id = `toolu_${randomUUID()}`;
+  assistant([{ type: "tool_use", id, name: "Bash", input: { command: "check the fill" } }], "tool_use");
+  await sleep(300);
+  user(promptId, [{ type: "tool_result", tool_use_id: id, content: "still filling" }]);
+}
+function endTurn(text: string) {
+  assistant([{ type: "text", text }], "end_turn");
+  line({ type: "system", subtype: "turn_duration", durationMs: 1 });
+}
+/** A turn started by a task notification, like a monitor's. Messages typed meanwhile are read mid-turn. */
+async function notificationTurn(n: number) {
+  const note = `<task-notification><task-id>t${n}</task-id><status>running</status></task-notification>`;
+  line({ type: "queue-operation", operation: "enqueue", content: note });
+  line({ type: "queue-operation", operation: "dequeue" });
+  const promptId = randomUUID();
+  user(promptId, note);
+  const answers: string[] = [];
+  for (let i = 0; i < 4; i++) {
+    await toolStep(promptId);
+    for (const text of queue.splice(0)) {
+      const uuid = randomUUID();
+      line({ type: "attachment", isSidechain: false, attachment: { type: "queued_command", prompt: text, source_uuid: uuid, commandMode: "prompt" } });
+      line({ type: "queue-operation", operation: "remove", content: text, reason: "absorbed_mid_turn", commandUuid: uuid });
+      answers.push(text);
+    }
+    await sleep(200);
+  }
+  for (const a of answers) assistant([{ type: "text", text: `ANSWER: ${a}` }], "tool_use");
+  endTurn(`notification t${n} handled`);
+}
+
+draw();
+register("busy");
+(async () => {
+  // 1. its own long turn (a fill monitor)
+  const first = randomUUID();
+  user(first, "start the fill monitor and watch it");
+  const until = Date.now() + firstTurnMs;
+  while (Date.now() < until) await toolStep(first);
+  endTurn("monitor is running");
+  // 2. what was typed meanwhile: dequeued, its own turn
+  for (const text of queue.splice(0)) {
+    line({ type: "queue-operation", operation: "dequeue" });
+    const p = randomUUID();
+    user(p, text);
+    await toolStep(p);
+    assistant([{ type: "text", text: `ANSWER: ${text}` }], "end_turn");
+    line({ type: "system", subtype: "turn_duration", durationMs: 1 });
+  }
+  // 3. back to back notification turns: never idle
+  for (let n = 1; ; n++) { register("busy"); await notificationTurn(n); }
+})();
