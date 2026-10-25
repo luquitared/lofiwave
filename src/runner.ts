@@ -3,7 +3,7 @@
  * console — ad-hoc or from a workflow — is a row in `runs` with its own log file.
  */
 import { join, basename, dirname } from "node:path";
-import { existsSync, statSync, openSync, readSync, closeSync, appendFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, statSync, openSync, readSync, closeSync, appendFileSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { db, now, hydrate, type ProcessTypeRow, type RunRow, type WorkflowRow } from "./db";
@@ -342,6 +342,7 @@ export async function startRun(opts: StartOptions): Promise<RunRow> {
     if (local && existsSync(local) && statSync(local).isDirectory()) meta.local_cwd = local;
     if (targetSession) meta.claude_session = targetSession;
   }
+  // In a container the agent's registry and transcripts are out of reach (its pid here is docker's): the screen is all there is.
   const isCodex = basename(command) === "codex" && !target;
   const isClaude = basename(command) === "claude";
   // meta.trust: false (opted out), or how the folder came to be trusted: already | trusted | skipped | failed, later accepted.
@@ -426,10 +427,18 @@ export async function startRun(opts: StartOptions): Promise<RunRow> {
   } else if (interactive) {
     // A detached tmux session owns the pty; we track the pane's process and poll its exit status.
     const sess = meta.tmux as string;
+    // The config's secrets stay off tmux's argv (which `ps` shows): a 0600 file the pane's shell sources, removes, and execs from.
+    const secretKeys = runConfig ? Object.keys(runConfig.env).filter((k) => !(k in (opts.env ?? {}))) : [];
+    const secretFile = secretKeys.length ? join(config.dataDir, "runs", String(id), "env.sh") : "";
+    if (secretFile) {
+      mkdirSync(dirname(secretFile), { recursive: true });
+      writeFileSync(secretFile, secretKeys.map((k) => `export ${k}=${shellQuote(runConfig!.env[k])}\n`).join(""), { mode: 0o600 });
+    }
     const envFlags = Object.entries({ ...gitEnv, ...launchEnv, PATH: childEnv.PATH ?? "", AGENT_CONSOLE_RUN_ID: childEnv.AGENT_CONSOLE_RUN_ID, AGENT_CONSOLE_URL: childEnv.AGENT_CONSOLE_URL, AGENT_CONSOLE_TOKEN: childEnv.AGENT_CONSOLE_TOKEN })
-      .flatMap(([k, v]) => ["-e", `${k}=${v}`]);
-    const created = await tmux("new-session", "-d", "-s", sess, "-c", cwd, "-x", "180", "-y", "48", ...envFlags, "--", command, ...args);
-    if (created.code !== 0) await fail(`failed to start tmux session: ${created.err || created.out}`);
+      .filter(([k]) => !secretKeys.includes(k)).flatMap(([k, v]) => ["-e", `${k}=${v}`]);
+    const paneCmd = secretFile ? ["sh", "-c", '. "$0"; rm -f "$0"; exec "$@"', secretFile, command, ...args] : [command, ...args];
+    const created = await tmux("new-session", "-d", "-s", sess, "-c", cwd, "-x", "180", "-y", "48", ...envFlags, "--", ...paneCmd);
+    if (created.code !== 0) { if (secretFile) rmSync(secretFile, { force: true }); await fail(`failed to start tmux session: ${created.err || created.out}`); }
     await tmux("set-option", "-t", tmuxTarget(sess), "remain-on-exit", "on");
     const pane = await tmux("display-message", "-p", "-t", tmuxTarget(sess), "#{pane_pid}");
     const pid = Number(pane.out);
