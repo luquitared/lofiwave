@@ -18,6 +18,7 @@ import { getTarget, TargetError, e2bConfig, type E2BConfig } from "./targets";
 import { runE2B, sandboxEnv, e2bTerms, type E2BHandle } from "./e2b";
 import { keyBytes } from "./vtscreen";
 import { admissionBlocker } from "./capacity";
+import { getConfig, ConfigError, instructionArgs, dockerArgv, dockerStatus, containerName, removeContainer, type RunConfig, type DockerSettings } from "./configs";
 
 export class ApiError extends Error {
   /** `extra`: more fields for the JSON error body, next to `error`. */
@@ -106,7 +107,14 @@ export type StartOptions = {
   idleStopSec?: number;
   /** Claude runs: mark the folder trusted first, and answer the trust dialog if it shows anyway (default true). */
   trust?: boolean;
+  /** A run config (configs.name): its instructions, env and Docker settings apply to this run (src/configs.ts). */
+  config?: string;
 };
+
+/** A run config by name, with ConfigErrors as ApiErrors. */
+export function configOf(name: string): RunConfig {
+  try { return getConfig(name); } catch (e) { if (e instanceof ConfigError) throw new ApiError(e.status, e.message); throw e; }
+}
 
 /** Stop a live entry: on its target, or its local process tree. */
 function stopEntry(entry: LiveEntry, force: boolean): Promise<void> {
@@ -203,14 +211,21 @@ function templateFor(type: ProcessTypeRow, interactive: boolean, resume: boolean
   return ia.length ? ia : JSON.parse(type.args || "[]");
 }
 
-export function buildCommand(type: ProcessTypeRow, opts: { cwd: string; prompt?: string; extraArgs?: string[]; interactive?: boolean; resumeSession?: string; permissionMode?: string; target?: string }) {
+/**
+ * The command and args for a run of `type`. `runConfig`: the run's config, whose instructions go in with the template
+ * (claude/codex flags, or `{instructions}` in the type's args). A config with Docker settings runs where this
+ * machine's files aren't: lofiwave's chat settings file is left out, as on a target. The `docker run` wrapping itself
+ * is added by startRun (wrapInDocker), once the run's env is known.
+ */
+export function buildCommand(type: ProcessTypeRow, opts: { cwd: string; prompt?: string; extraArgs?: string[]; interactive?: boolean; resumeSession?: string; permissionMode?: string; target?: string; runConfig?: RunConfig | null }) {
   const templateArgs = templateFor(type, Boolean(opts.interactive), Boolean(opts.resumeSession));
   const prompt = opts.prompt ?? "";
+  const instructions = opts.runConfig?.instructions ?? "";
   const needsPrompt = templateArgs.some((a) => a.includes("{prompt}")) || type.command.includes("{prompt}");
   // Interactive sessions can start empty: the user types (or Remote Control sends) the first message. Drop {prompt} args then.
   if (needsPrompt && !prompt.trim() && !opts.interactive) throw new ApiError(400, `process type "${type.name}" requires a prompt`);
-  const vars = { prompt, cwd: opts.cwd, session: opts.resumeSession ?? "" };
-  const kept = prompt.trim() ? templateArgs : templateArgs.filter((a) => !a.includes("{prompt}"));
+  const vars = { prompt, cwd: opts.cwd, session: opts.resumeSession ?? "", instructions };
+  const kept = templateArgs.filter((a) => (prompt.trim() || !a.includes("{prompt}")) && (instructions.trim() || !a.includes("{instructions}")));
   const command = substitute(type.command, vars);
   const templ = kept.map((a) => substitute(a, vars));
   // A switch the template already passes (claude's --remote-control) isn't passed twice when the caller adds it too.
@@ -227,17 +242,36 @@ export function buildCommand(type: ProcessTypeRow, opts: { cwd: string; prompt?:
   // and per-turn checkpoints in the chat view. They merge with the user's and the project's hooks. A run that brings
   // its own --settings is left alone, and so is a run on a target: the file is on this machine, not in the sandbox.
   const picksSettings = [...templ, ...extra].some((a) => a === "--settings" || a.startsWith("--settings="));
-  // A run on a target still gets the renderer (CLAUDE_TUI), which the file would have carried.
+  // A run on a target (or in a container) still gets the renderer (CLAUDE_TUI), which the file would have carried.
+  const elsewhere = Boolean(opts.target || opts.runConfig?.docker);
   if ((opts.interactive || opts.resumeSession) && basename(command) === "claude" && !picksSettings) {
-    if (!opts.target) templ.push("--settings", chatSettingsPath());
+    if (!elsewhere) templ.push("--settings", chatSettingsPath());
     else if (config.claudeTui !== "keep") templ.push("--settings", JSON.stringify({ tui: config.claudeTui }));
   }
+  // The config's instructions, unless the type's template took them as {instructions} or the args set a system prompt.
+  if (!templateArgs.some((a) => a.includes("{instructions}"))) templ.push(...instructionArgs(basename(command), instructions, [...templ, ...extra]));
   return { command, args: [...templ, ...extra], template_len: templ.length };
+}
+
+/**
+ * Run `command args` in the config's container instead: `docker run … <image> command args`. The docker flags count
+ * as template (a restart builds them again), so `template_len` grows by them.
+ */
+export function wrapInDocker(d: DockerSettings, b: { command: string; args: string[]; template_len: number }, o: { name: string; cwd: string; envKeys: string[]; interactive: boolean }) {
+  const argv = dockerArgv(d, { ...o, command: b.command, args: b.args });
+  return { command: Bun.which("docker") ?? "docker", args: argv, template_len: argv.length - b.args.length + b.template_len };
 }
 
 export async function startRun(opts: StartOptions): Promise<RunRow> {
   const type = getType(opts.typeName);
   const target = opts.target ? targetOf(opts.target) : null;
+  const runConfig = opts.config ? configOf(opts.config) : null;
+  const docker = runConfig?.docker ?? null;
+  if (docker && target) throw new ApiError(400, `config "${runConfig!.name}" runs in Docker; a run on target "${target.name}" can't use it`);
+  if (docker) {
+    const st = await dockerStatus();
+    if (!st.available) throw new ApiError(400, `config "${runConfig!.name}" runs in Docker: ${st.error}`);
+  }
   const e2b = target ? asApiErr(() => e2bConfig(target)) : null;
   if (target && opts.resumeSession) throw new ApiError(400, `runs on target "${target.name}" can't resume a session`);
   if (opts.inputDir && !e2b) throw new ApiError(400, "input_dir is for runs on an e2b target");
@@ -248,9 +282,9 @@ export async function startRun(opts: StartOptions): Promise<RunRow> {
   if (!target && (!existsSync(cwd) || !statSync(cwd).isDirectory())) throw new ApiError(400, `cwd does not exist: ${cwd}`);
   const interactive = Boolean(opts.interactive) || Boolean(opts.resumeSession);
   if (interactive && !e2b && !tmuxPath()) throw new ApiError(400, "interactive runs need tmux on PATH (brew install tmux / apt install tmux)");
-  let { command, args, template_len } = buildCommand(type, { ...opts, cwd, permissionMode: e2b?.permission_mode });
+  let { command, args, template_len } = buildCommand(type, { ...opts, cwd, permissionMode: e2b?.permission_mode, runConfig });
   // Remote Control needs a claude.ai login: in a sandbox that only has an API key, leave it out.
-  if (e2b && !sandboxEnv(e2b, { ...JSON.parse(type.env || "{}"), ...(opts.env ?? {}) }, [config.authToken]).CLAUDE_CODE_OAUTH_TOKEN) {
+  if (e2b && !sandboxEnv(e2b, { ...JSON.parse(type.env || "{}"), ...(runConfig?.env ?? {}), ...(opts.env ?? {}) }, [config.authToken]).CLAUDE_CODE_OAUTH_TOKEN) {
     const drop = args.slice(0, template_len).filter((a) => a === "--remote-control").length;
     if (drop) { args = [...args.slice(0, template_len).filter((a) => a !== "--remote-control"), ...args.slice(template_len)]; template_len -= drop; }
   }
@@ -267,7 +301,12 @@ export async function startRun(opts: StartOptions): Promise<RunRow> {
   // Results go in <cwd>/out/. Not made in the home folder or / (a session reopened there), where it would just be litter.
   const outDir = outDirOf(cwd);
   if (!opts.resumeSession && cwd !== homedir() && cwd !== "/") { try { mkdirSync(outDir, { recursive: true }); } catch { /* read-only cwd: the run still starts */ } }
+  // `env` is what the run record keeps; the config's env (secrets) only goes to the process: machine < type < config < run.
   const env: Record<string, string> = { LOFIWAVE_OUT_DIR: outDir, ...typeEnv, ...(opts.env ?? {}) };
+  const configEnv: Record<string, string> = runConfig
+    ? { LOFIWAVE_CONFIG: runConfig.name, ...(runConfig.instructions.trim() ? { LOFIWAVE_INSTRUCTIONS: runConfig.instructions } : {}), ...runConfig.env }
+    : {};
+  const launchEnv: Record<string, string> = { LOFIWAVE_OUT_DIR: outDir, ...typeEnv, ...configEnv, ...(opts.env ?? {}) };
   const t = now();
   const timeoutSec = opts.timeoutSec ?? opts.workflow?.timeout_sec ?? 0;
   const meta: Record<string, any> = { ...(opts.meta ?? {}), timeout_sec: timeoutSec, template_len };
@@ -279,6 +318,23 @@ export async function startRun(opts: StartOptions): Promise<RunRow> {
   // Who started it: the logged-in person (or "api" for the token), when it comes from a request; scheduled runs have none.
   const by = actor.getStore() ?? opts.meta?.started_by;
   if (by) meta.started_by = by;
+  // Commits made in this run are authored by the person who started it (GIT_AUTHORS), when we know them.
+  const author = by ? config.gitAuthors.get(by.trim().split(/\s+/)[0].toLowerCase()) : undefined;
+  const gitEnv: Record<string, string> = author
+    ? { GIT_AUTHOR_NAME: author.name, GIT_AUTHOR_EMAIL: author.email, GIT_COMMITTER_NAME: author.name, GIT_COMMITTER_EMAIL: author.email }
+    : {};
+  if (author) meta.git_author = `${author.name} <${author.email}>`;
+  if (runConfig) meta.config = runConfig.name;
+  if (docker) {
+    // The container gets the run's env by name (docker reads the values from the pane's environment), and of
+    // lofiwave's own only the run id: its token and URL stay out of the container.
+    const name = containerName();
+    ({ command, args, template_len } = wrapInDocker(docker, { command, args, template_len }, {
+      name, cwd, interactive, envKeys: Object.keys({ ...gitEnv, ...launchEnv, AGENT_CONSOLE_RUN_ID: "" }),
+    }));
+    meta.template_len = template_len;
+    meta.docker = { image: docker.image, container: name };
+  }
   if (target) {
     meta.target = target.name; meta.target_kind = target.kind;
     // The folder on this machine its transcript is filed under, so "Resume here" opens it there.
@@ -323,15 +379,8 @@ export async function startRun(opts: StartOptions): Promise<RunRow> {
   sink.write(header);
   sink.flush();
 
-  // Commits made in this run are authored by the person who started it (GIT_AUTHORS), when we know them.
-  const author = by ? config.gitAuthors.get(by.trim().split(/\s+/)[0].toLowerCase()) : undefined;
-  const gitEnv: Record<string, string> = author
-    ? { GIT_AUTHOR_NAME: author.name, GIT_AUTHOR_EMAIL: author.email, GIT_COMMITTER_NAME: author.name, GIT_COMMITTER_EMAIL: author.email }
-    : {};
-  if (author) meta.git_author = `${author.name} <${author.email}>`;
-
   const childEnv = {
-    ...process.env, ...gitEnv, ...env,
+    ...process.env, ...gitEnv, ...launchEnv,
     AGENT_CONSOLE_RUN_ID: String(id),
     // Lets scripts/claude-session-hook.sh (a Claude Code SessionStart/SessionEnd hook) report the session back.
     AGENT_CONSOLE_URL: `http://127.0.0.1:${config.port}`,
@@ -358,7 +407,7 @@ export async function startRun(opts: StartOptions): Promise<RunRow> {
     let h: E2BHandle;
     try {
       h = runE2B({
-        runId: id, c: e2b, command, args, env, interactive, sessionId: targetSession || undefined,
+        runId: id, c: e2b, command, args, env: launchEnv, interactive, sessionId: targetSession || undefined,
         inputDir: opts.inputDir, outDir: join(config.dataDir, "runs", String(id), "out"),
         forbiddenValues: [config.authToken], write,
         onMeta: (patch) => { meta.e2b = { ...meta.e2b, ...patch }; db.prepare("UPDATE runs SET meta = ? WHERE id = ?").run(JSON.stringify(meta), id); },
@@ -377,7 +426,7 @@ export async function startRun(opts: StartOptions): Promise<RunRow> {
   } else if (interactive) {
     // A detached tmux session owns the pty; we track the pane's process and poll its exit status.
     const sess = meta.tmux as string;
-    const envFlags = Object.entries({ ...gitEnv, ...env, PATH: childEnv.PATH ?? "", AGENT_CONSOLE_RUN_ID: childEnv.AGENT_CONSOLE_RUN_ID, AGENT_CONSOLE_URL: childEnv.AGENT_CONSOLE_URL, AGENT_CONSOLE_TOKEN: childEnv.AGENT_CONSOLE_TOKEN })
+    const envFlags = Object.entries({ ...gitEnv, ...launchEnv, PATH: childEnv.PATH ?? "", AGENT_CONSOLE_RUN_ID: childEnv.AGENT_CONSOLE_RUN_ID, AGENT_CONSOLE_URL: childEnv.AGENT_CONSOLE_URL, AGENT_CONSOLE_TOKEN: childEnv.AGENT_CONSOLE_TOKEN })
       .flatMap(([k, v]) => ["-e", `${k}=${v}`]);
     const created = await tmux("new-session", "-d", "-s", sess, "-c", cwd, "-x", "180", "-y", "48", ...envFlags, "--", command, ...args);
     if (created.code !== 0) await fail(`failed to start tmux session: ${created.err || created.out}`);
@@ -542,6 +591,8 @@ async function finishRun(r: {
   const { id, entry, sink, logPath, meta } = r;
   const code = await exited;
   if (entry.timer) clearTimeout(entry.timer);
+  // Stopping `docker run -t` (killing its process tree) leaves the container running: remove it.
+  if (meta.docker?.container) await removeContainer(meta.docker.container);
   if (entry.tmux) {
     // Keep what was on screen (scrollback included) as the run's record, then drop the dead session.
     const cap = await tmux("capture-pane", "-p", "-J", "-t", tmuxTarget(entry.tmux), "-S", "-2000");
@@ -881,6 +932,7 @@ export async function killRun(id: number, force = false): Promise<RunRow> {
         if (cap.code === 0 && run.log_path) appendFileSync(run.log_path, cap.out.replace(/^Pane is dead.*$/m, "").replace(/\n{3,}/g, "\n\n").replace(/\s+$/, "") + "\n\n# lofiwave: killed (orphan)\n");
         await tmux("kill-session", "-t", tmuxTarget(meta.tmux));
       }
+      if (meta.docker?.container) await removeContainer(meta.docker.container);
       db.prepare("UPDATE runs SET status = 'killed', ended_at = ? WHERE id = ?").run(now(), id);
     }
   }
@@ -898,9 +950,12 @@ export async function restartRun(id: number): Promise<RunRow> {
   const finalArgs: string[] = JSON.parse(run.args || "[]");
   const templateLen: number = meta.template_len ?? JSON.parse(type.args || "[]").length;
   const extraArgs = finalArgs.slice(templateLen);
+  // The record's env holds the type's env too; leave out what the type sets anyway, so the config's env still wins over it.
+  const typeEnv: Record<string, string> = JSON.parse(type.env || "{}");
+  const env = Object.fromEntries(Object.entries(JSON.parse(run.env || "{}") as Record<string, string>).filter(([k, v]) => k !== "LOFIWAVE_OUT_DIR" && typeEnv[k] !== v));
   return startRun({
     typeName: run.type_name, cwd: run.cwd, prompt: run.prompt, extraArgs,
-    env: JSON.parse(run.env || "{}"), trigger: "restart", workflow: wf, timeoutSec: meta.timeout_sec ?? 0,
+    env, trigger: "restart", config: meta.config || undefined, workflow: wf, timeoutSec: meta.timeout_sec ?? 0,
     interactive: Boolean(meta.interactive), resumeSession: meta.resume_session, stopWhenIdle: meta.stop_when_idle ? true : undefined,
     idleStopSec: typeof meta.idle_stop_sec === "number" ? meta.idle_stop_sec : undefined, trust: meta.trust !== false,
     target: meta.target,
@@ -923,7 +978,10 @@ export async function resumeSession(runId: number, sessionId: string): Promise<R
   // The run's own type if it is that agent (keeps its env/extra config), else the built-in type for the agent.
   const own = getType(run.type_name);
   const typeName = basename(own.command) === s.agent ? own.name : s.agent;
-  return resumeAgentSession({ agent: s.agent, sessionId, cwd: s.cwd || run.cwd, typeName, env: JSON.parse(run.env || "{}") });
+  // It keeps its config too, while that still exists.
+  const cfg = JSON.parse(run.meta || "{}").config;
+  const config = cfg && db.query("SELECT 1 FROM configs WHERE name = ?").get(cfg) ? cfg : undefined;
+  return resumeAgentSession({ agent: s.agent, sessionId, cwd: s.cwd || run.cwd, typeName, env: JSON.parse(run.env || "{}"), config });
 }
 
 /**
@@ -934,7 +992,7 @@ export async function resumeSession(runId: number, sessionId: string): Promise<R
  * Reopen a session here. `replacePid`: the process that has it open now (taking it over); it is stopped first, so
  * two agents never write one transcript. Refused when that pid is on a different session.
  */
-export async function resumeAgentSession(o: { agent: string; sessionId: string; cwd?: string; typeName?: string; env?: Record<string, string>; terminal?: string; replacePid?: number }): Promise<RawRun> {
+export async function resumeAgentSession(o: { agent: string; sessionId: string; cwd?: string; typeName?: string; env?: Record<string, string>; terminal?: string; replacePid?: number; config?: string }): Promise<RawRun> {
   const typeName = o.typeName ?? o.agent;
   const type = getType(typeName);
   if (!JSON.parse(type.resume_args || "[]").length) throw new ApiError(400, `process type "${typeName}" has no resume_args template`);
@@ -944,7 +1002,7 @@ export async function resumeAgentSession(o: { agent: string; sessionId: string; 
     await stopAndWait(o.replacePid);
   }
   const cwd = o.cwd && existsSync(o.cwd) ? o.cwd : (type.default_cwd || process.env.HOME || "/");
-  const run = await startRun({ typeName, cwd, trigger: "resume", resumeSession: o.sessionId, env: o.env ?? {}, terminal: o.terminal });
+  const run = await startRun({ typeName, cwd, trigger: "resume", resumeSession: o.sessionId, env: o.env ?? {}, terminal: o.terminal, config: o.config });
   // Until the agent reports back (claude's hook, codex's index), remember what we asked it to reopen. Codex's is
   // confirmed (or marked failed) once its index shows the thread in use: see findCodexRunSession.
   recordSession(run.id, { session_id: o.sessionId, agent: o.agent, cwd, source: o.agent === "codex" ? "resume requested" : "resume" });

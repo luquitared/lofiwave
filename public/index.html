@@ -126,6 +126,14 @@
       </table>
     </div>
     <div class="card">
+      <div class="card-head"><h2>Run configs</h2><button class="primary small" id="config-new-btn">+ New config</button></div>
+      <p class="muted">Custom instructions, environment variables (API keys) and, optionally, a Docker image with volumes, to attach to any session or workflow. Values are kept in lofiwave's database and never shown in full. <span id="docker-status"></span></p>
+      <table id="config-table">
+        <thead><tr><th>Name</th><th>Instructions</th><th>Env</th><th>Docker</th><th>Used by</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div class="card">
       <h2>Appearance</h2>
       <p class="muted">Saved in this browser.</p>
       <div class="themes" id="theme-picker" role="radiogroup" aria-label="Color scheme"></div>
@@ -185,11 +193,13 @@
     <label>Agent <select name="type"></select></label>
     <label>Folder <span class="pp"><input name="cwd" placeholder="start typing to search" autocomplete="off" data-pathpicker></span></label>
     <label class="wide" id="start-target-label">Runs on <select name="target"></select><small class="muted" id="start-target-hint"></small></label>
+    <label class="wide" id="start-config-label">Config <select name="config"></select><small class="muted" id="start-config-hint"></small></label>
     <label class="wide" id="prompt-label">Prompt <textarea name="prompt" rows="4" placeholder="Optional first message"></textarea></label>
     <details class="wide more"><summary class="muted">More options</summary>
       <div class="grid">
         <label>Extra args <input name="extra_args" placeholder="--permission-mode acceptEdits"></label>
         <label>Timeout (sec, 0 = none) <input name="timeout_sec" type="number" min="0" value="0"></label>
+        <label class="wide">Env (KEY=VALUE per line; overrides the config's) <textarea name="env" rows="2"></textarea></label>
         <code id="preview" class="wide muted"></code>
         <div class="wide"><button type="button" class="small" id="preview-btn">Preview command</button></div>
       </div>
@@ -208,6 +218,7 @@
     <label>Name <input name="name" required autocomplete="off"></label>
     <label>Agent <select name="type"></select></label>
     <label class="wide">Runs on <select name="target"></select></label>
+    <label class="wide">Config <select name="config"></select></label>
     <label class="wide" id="wf-cwd-label">Folder <span class="pp"><input name="cwd" autocomplete="off" data-pathpicker placeholder="blank = the type's default folder"></span></label>
     <label class="wide">Prompt <textarea name="prompt" rows="4"></textarea></label>
     <label>Schedule <select name="preset">
@@ -261,6 +272,32 @@
       <button type="submit" class="primary">Save</button>
       <button type="button" id="target-check">Save &amp; check</button>
       <button type="button" id="target-cancel" style="margin-left:auto">Cancel</button>
+    </div>
+  </form>
+</dialog>
+<dialog id="config-dialog" aria-labelledby="config-title">
+  <form id="config-form" class="grid" method="dialog">
+    <h3 class="wide" id="config-title">New config</h3>
+    <input type="hidden" name="orig">
+    <label>Name <input name="name" required autocomplete="off" pattern="[A-Za-z0-9][A-Za-z0-9_.\-]{0,40}" placeholder="frontend"></label>
+    <label>Description <input name="description" autocomplete="off" placeholder="optional"></label>
+    <label class="wide">Instructions <textarea name="instructions" rows="4" placeholder="Custom instructions for the agent: claude gets them as --append-system-prompt, codex as developer_instructions."></textarea></label>
+    <label class="wide">Env <textarea name="env" rows="4" class="mono" spellcheck="false" autocomplete="off" placeholder="KEY=value or export KEY=value, one per line (paste a .env file)"></textarea>
+      <small class="muted">Saved values show masked (<code>••••abcd</code>); leave those lines as they are to keep them. <button type="button" class="small" id="config-env-import">Import .env file…</button><input type="file" id="config-env-file" hidden></small></label>
+    <details class="wide more" id="config-docker"><summary class="muted">Docker</summary>
+      <div class="grid">
+        <p class="wide muted" id="config-docker-status"></p>
+        <label class="wide">Image <input name="image" autocomplete="off" placeholder="blank = run on this machine, e.g. node:22 or your own image with the agent installed"><small class="muted">The run's folder is mounted at the same path and is the working dir. The image needs the agent (e.g. <code>claude</code>) installed.</small></label>
+        <label class="wide">Volumes (one per line: source:target or source:target:ro) <textarea name="volumes" rows="3" class="mono" spellcheck="false" placeholder="~/datasets:/data:ro&#10;npm-cache:/root/.npm"></textarea><small class="muted">source: a folder here (absolute or ~/…) or a named docker volume.</small></label>
+        <label>User <input name="user" autocomplete="off" placeholder="image default; host = your uid:gid"></label>
+        <label>Network <input name="network" autocomplete="off" placeholder="default bridge; host, none, …"></label>
+        <label class="wide">More docker run flags <input name="docker_args" autocomplete="off" placeholder="--memory 4g --cpus 2"></label>
+      </div>
+    </details>
+    <div id="config-feedback" class="wide form-error" role="alert" hidden></div>
+    <div class="wide row">
+      <button type="submit" class="primary">Save</button>
+      <button type="button" id="config-cancel" style="margin-left:auto">Cancel</button>
     </div>
   </form>
 </dialog>

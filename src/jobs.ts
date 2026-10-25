@@ -6,7 +6,7 @@
  * in `runs`, so it survives a restart of the console.
  */
 import { db, now, type RunRow } from "./db";
-import { ApiError, startRun, getType, getRun, buildCommand, type StartOptions } from "./runner";
+import { ApiError, startRun, getType, getRun, buildCommand, configOf, type StartOptions } from "./runner";
 import { admissionBlocker, queuedRuns } from "./capacity";
 import { existsSync, statSync } from "node:fs";
 import { actor } from "./auth";
@@ -39,7 +39,7 @@ function enqueue(opts: StartOptions): RunRow {
   if (!cwd) throw new ApiError(400, "cwd is required");
   if (!existsSync(cwd) || !statSync(cwd).isDirectory()) throw new ApiError(400, `cwd does not exist: ${cwd}`);
   // Fail now on a bad request rather than when its turn comes.
-  const { command, args } = buildCommand(type, opts);
+  const { command, args } = buildCommand(type, { ...opts, runConfig: opts.config ? configOf(opts.config) : null });
   const { workflow: _w, meta: extra, runId: _r, ...rest } = opts;
   const queued: QueuedOpts = { ...rest, cwd };
   const meta: Record<string, any> = { ...(extra ?? {}), queued, queued_at: now() };
