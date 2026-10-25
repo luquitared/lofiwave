@@ -44,13 +44,13 @@ test("parseDotenv: refuses what isn't KEY=value", () => {
 });
 
 test("masking keeps only the last 4 of long values, and a masked value sent back keeps the stored one", () => {
-  expect(maskValue("sk-1234567890abcd")).toBe(`${MASK}abcd`);
+  expect(maskValue("sk-1234567890abcdefghij")).toBe(`${MASK}ghij`);
   expect(maskValue("short")).toBe(MASK);
-  const cur = { KEY: "sk-1234567890abcd", OTHER: "x" };
-  expect(maskEnv(cur)).toEqual({ KEY: `${MASK}abcd`, OTHER: MASK });
+  const cur = { KEY: "sk-1234567890abcdefghij", OTHER: "x" };
+  expect(maskEnv(cur)).toEqual({ KEY: `${MASK}ghij`, OTHER: MASK });
   // KEY unchanged (masked as listed), OTHER changed, NEW added, a key left out is dropped.
-  expect(parseEnvInput({ KEY: `${MASK}abcd`, NEW: "n" }, cur)).toEqual({ KEY: "sk-1234567890abcd", NEW: "n" });
-  expect(parseEnvInput("KEY=" + `${MASK}abcd` + "\nOTHER=y", cur)).toEqual({ KEY: "sk-1234567890abcd", OTHER: "y" });
+  expect(parseEnvInput({ KEY: `${MASK}ghij`, NEW: "n" }, cur)).toEqual({ KEY: "sk-1234567890abcdefghij", NEW: "n" });
+  expect(parseEnvInput("KEY=" + `${MASK}ghij` + "\nOTHER=y", cur)).toEqual({ KEY: "sk-1234567890abcdefghij", OTHER: "y" });
   // A masked value for a key that wasn't there is taken literally (nothing to keep).
   expect(parseEnvInput({ X: MASK }, cur)).toEqual({ X: MASK });
   expect(() => parseEnvInput({ AGENT_CONSOLE_TOKEN: "x" })).toThrow(/lofiwave's own/);

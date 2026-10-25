@@ -665,6 +665,10 @@ function configName(v: unknown): string | undefined {
   configOf(name);
   return name;
 }
+/** A config body, with docker.args given as one string ("--memory 4g") split like extra_args. */
+function configBody(b: any) {
+  return typeof b?.docker?.args === "string" ? { ...b, docker: { ...b.docker, args: splitArgs(b.docker.args) } } : b;
+}
 function asApiCfg<T>(fn: () => T): T {
   try { return fn(); } catch (e) { if (e instanceof ConfigError) throw new ApiError(e.status, e.message); throw e; }
 }
@@ -683,7 +687,7 @@ route("POST", "/api/configs", async (req) => {
   const b = await body(req);
   const name = str(b.name, "name", { required: true }).trim();
   if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,40}$/.test(name)) throw new ApiError(400, "name: letters, digits, . _ - (up to 41)");
-  const c = asApiCfg(() => parseConfig(b));
+  const c = asApiCfg(() => parseConfig(configBody(b)));
   const t = now();
   try {
     db.prepare("INSERT INTO configs (name, description, instructions, env, docker, created_at, updated_at) VALUES (?,?,?,?,?,?,?)")
@@ -697,7 +701,7 @@ route("POST", "/api/configs", async (req) => {
 route("PUT", "/api/configs/:name", async (req, p) => {
   const cur = configRowOf(p.name);
   const b = await body(req);
-  const c = asApiCfg(() => parseConfig(b, rowToConfig(cur)));
+  const c = asApiCfg(() => parseConfig(configBody(b), rowToConfig(cur)));
   db.prepare("UPDATE configs SET description = ?, instructions = ?, env = ?, docker = ?, updated_at = ? WHERE id = ?")
     .run(c.description, c.instructions, JSON.stringify(c.env), c.docker ? JSON.stringify(c.docker) : "", now(), cur.id);
   return json(configOut(configRowOf(cur.name)));

@@ -80,7 +80,7 @@ export function parseDotenv(text: string): Record<string, string> {
 
 /** How a secret is listed: never in full. Long values keep their last 4 characters so you can tell keys apart. */
 export const MASK = "••••";
-export const maskValue = (v: string) => (v.length >= 12 ? `${MASK}${v.slice(-4)}` : MASK);
+export const maskValue = (v: string) => (v.length >= 20 ? `${MASK}${v.slice(-4)}` : MASK);
 export const maskEnv = (env: Record<string, string>) => Object.fromEntries(Object.entries(env).map(([k, v]) => [k, maskValue(v)]));
 
 /**
@@ -138,7 +138,7 @@ export function parseDocker(v: unknown): DockerSettings | null {
   if (user && user !== "host" && !/^[A-Za-z0-9_.-]+(:[A-Za-z0-9_.-]+)?$/.test(user)) throw new ConfigError(400, `docker.user "${user}": "host", a name or uid[:gid]`);
   const network = String(o.network ?? "").trim();
   if (network && !/^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(network)) throw new ConfigError(400, `docker.network "${network}" is not a network name`);
-  const args = o.args === undefined || o.args === null ? [] : typeof o.args === "string" ? o.args.split(/\s+/).filter(Boolean) : o.args;
+  const args = o.args ?? [];
   if (!Array.isArray(args) || !args.every((a: unknown) => typeof a === "string")) throw new ConfigError(400, "docker.args must be an array of strings");
   return { image, volumes: vols.map(parseVolume), user, network, args };
 }
