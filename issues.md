@@ -18,7 +18,7 @@ verified with `alpine` and a stand-in agent. Not done:
       does it by hand) and read it from there.
 - [ ] `lofiwave`'s own token and the env flags of non-secret variables are still on tmux's command line (`ps`); only a
       config's env is kept off it (a 0600 file the pane's shell sources and removes).
-- [ ] Env values are stored in the database as plain text, as the brief asked; encrypt them with a key kept outside
+- [ ] Env values are stored in the database as plain text (needed to start a run); encrypt them with a key kept outside
       the data folder if the database is ever shared.
 - [ ] A named volume is root-owned, so `user: host` can't write to it; `docker run` has no flag for that, an init
       step would have to chown it.
