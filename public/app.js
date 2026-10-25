@@ -171,9 +171,9 @@ let consoleView = localStorage.getItem("ac_console_view") === "ended" ? "ended" 
 const typeByName = (n) => types.find((t) => t.name === n);
 
 // ---------------------------------------------------------------- tabs
-// Main tabs: Sessions, Workflows, Connect, and Advanced, which holds the rest (processes, apps, runs, types).
-const ADVANCED = ["agents", "apps", "runs", "types"];
-const TITLES = { console: "Sessions", workflows: "Workflows", connect: "Connect", settings: "Settings", agents: "Advanced", apps: "Advanced", runs: "Advanced", types: "Advanced" };
+// Main tabs: Sessions, Workflows, Connect, and Advanced, which holds the rest (processes, apps, runs, types, system).
+const ADVANCED = ["agents", "apps", "runs", "types", "system"];
+const TITLES = { console: "Sessions", workflows: "Workflows", connect: "Connect", settings: "Settings", agents: "Advanced", apps: "Advanced", runs: "Advanced", types: "Advanced", system: "Advanced" };
 $$("nav button").forEach((b) => b.addEventListener("click", () => switchTab(b.dataset.tab)));
 $$("#subnav button").forEach((b) => b.addEventListener("click", () => switchTab(b.dataset.sub)));
 function switchTab(name, push = true) {
@@ -340,6 +340,94 @@ const loadAgents = guard(async () => {
 });
 $("#hide-children").checked = localStorage.getItem("ac_hide_children") !== "false";
 $("#hide-children").onchange = () => { localStorage.setItem("ac_hide_children", String($("#hide-children").checked)); loadAgents(); };
+
+// ---------------------------------------------------------------- system tab (machine usage and how many more agents fit)
+// Polled through refresh() only while this tab is open: GET /api/system/usage runs ps, so nothing asks for it otherwise.
+const fmtMb = (mb) => (mb == null ? "–" : mb >= 1024 ? `${(mb / 1024).toFixed(1)} GB` : `${Math.round(mb)} MB`);
+const fmtCpu = (c) => `${c < 10 ? c.toFixed(1) : Math.round(c)}%`;
+const pct = (a, b) => (b > 0 ? Math.max(0, Math.min(100, (a / b) * 100)) : 0);
+/** A labelled bar: segments are {value, cls, label, text} out of `max`; the ones with a label get a legend entry. */
+function usageMeter(title, value, max, segs, sub) {
+  return h("div", { class: "use-card" },
+    h("div", { class: "use-head" }, h("span", {}, title), h("b", {}, value)),
+    h("div", { class: "use-bar", role: "img", "aria-label": `${title}: ${value}` },
+      ...segs.map((s) => h("span", { class: `seg ${s.cls}`, style: `width:${pct(s.value, max).toFixed(2)}%`, title: s.label ? `${s.label}: ${s.text ?? ""}` : "" }))),
+    segs.some((s) => s.label) ? h("div", { class: "use-legend" }, ...segs.filter((s) => s.label).map((s) => h("span", {}, h("i", { class: `seg ${s.cls}` }), `${s.label} ${s.text ?? ""}`))) : "",
+    sub ? h("div", { class: "use-sub" }, sub) : "",
+  );
+}
+const loadUsage = guard(async () => {
+  const u = await get("/system/usage");
+  if (activeTab !== "system") return;
+  const m = u.machine, lw = u.lofiwave, e = u.estimate;
+
+  // How many more agents: the number and which limit binds, then the arithmetic for each limit.
+  const memLine = h("li", { class: e.limited_by !== "slots" ? "binds" : "" },
+    h("span", {}, "Memory"), `${fmtMb(m.mem_available_mb)} available − ${fmtMb(e.min_free_mem_mb)} kept free (MIN_FREE_MEM_MB) ÷ ${fmtMb(e.per_agent_mb)} = `, h("b", {}, e.by_memory));
+  const slotLine = h("li", { class: e.limited_by !== "memory" && e.by_slots !== null ? "binds" : "" },
+    h("span", {}, "Slots"), ...(e.by_slots === null ? ["no limit (MAX_AGENT_RUNS=0)"] : [`${e.max_agent_runs} (MAX_AGENT_RUNS) − ${e.live_agent_runs} live${e.queued ? ` − ${e.queued} queued` : ""} = `, h("b", {}, e.by_slots)]));
+  const why = e.by_slots === null ? "limited by memory" : e.limited_by === "both" ? "memory and slots run out together" : `limited by ${e.limited_by}`;
+  $("#sys-headline").replaceChildren(
+    h("div", { class: "sys-big" }, h("b", {}, e.can_launch), h("span", {}, `more agent${e.can_launch === 1 ? "" : "s"} can start · ${why}`)),
+    e.blocked ? h("div", { class: "sys-blocked" }, `A new agent run would be refused now: ${e.blocked}.`) : "",
+    h("ul", { class: "sys-math" },
+      h("li", {}, h("span", {}, "Per agent"), e.per_agent_source === "measured"
+        ? `${fmtMb(e.per_agent_mb)}, the average of the ${e.measured_runs} live agent run${e.measured_runs === 1 ? "" : "s"}`
+        : `${fmtMb(e.per_agent_mb)} assumed (no agent run is live to measure)`),
+      memLine, slotLine),
+  );
+
+  // Memory: lofiwave (server + runs), agents started elsewhere, everything else in use, available.
+  const outMem = Math.min(u.outside_total.rss_mb, Math.max(0, m.mem_used_mb - lw.total.rss_mb));
+  const others = Math.max(0, m.mem_used_mb - lw.total.rss_mb - outMem);
+  const cpuPct = m.cpu_busy_pct ?? Math.min(100, (m.load[0] / m.cpus) * 100);
+  const lwCpu = Math.min(cpuPct, lw.total.cpu / m.cpus), outCpu = Math.min(cpuPct - lwCpu, u.outside_total.cpu / m.cpus);
+  $("#sys-meters").replaceChildren(
+    usageMeter("Memory", `${fmtMb(m.mem_used_mb)} of ${fmtMb(m.mem_total_mb)}`, m.mem_total_mb, [
+      { value: lw.total.rss_mb, cls: "lw", label: "lofiwave", text: fmtMb(lw.total.rss_mb) },
+      { value: outMem, cls: "out", label: "other agents", text: fmtMb(u.outside_total.rss_mb) },
+      { value: others, cls: "rest", label: "everything else", text: fmtMb(others) },
+      { value: m.mem_available_mb, cls: "free", label: "available", text: fmtMb(m.mem_available_mb) },
+    ]),
+    usageMeter("CPU", `${Math.round(cpuPct)}% busy`, 100, [
+      { value: lwCpu, cls: "lw", label: "lofiwave", text: fmtCpu(lwCpu) },
+      { value: outCpu, cls: "out", label: "other agents", text: fmtCpu(outCpu) },
+      { value: Math.max(0, cpuPct - lwCpu - outCpu), cls: "rest" },
+    ], `of all ${m.cpus} cores · load ${m.load.map((l) => l.toFixed(1)).join(" · ")}`),
+    m.swap && m.swap.total_mb > 0
+      ? usageMeter("Swap", `${fmtMb(m.swap.used_mb)} of ${fmtMb(m.swap.total_mb)}`, m.swap.total_mb, [{ value: m.swap.used_mb, cls: m.swap.used_mb / m.swap.total_mb > 0.5 ? "warn" : "rest" }],
+        m.swap.used_mb > 0 ? "some memory has been paged out" : "unused")
+      : usageMeter("Swap", "none", 1, [], "no swap: when memory runs out, processes get killed"),
+    m.disk
+      ? usageMeter("Disk", `${fmtMb(m.disk.free_mb)} free`, m.disk.total_mb, [{ value: m.disk.total_mb - m.disk.free_mb, cls: m.disk.free_mb / m.disk.total_mb < 0.1 ? "warn" : "rest" }],
+        h("span", { title: m.disk.path }, `of ${fmtMb(m.disk.total_mb)}, where the data dir is`))
+      : "",
+  );
+
+  const row = (name, t) => h("tr", {},
+    h("td", { class: "full" }, name),
+    h("td", { "data-l": "procs" }, t.procs),
+    h("td", { "data-l": "mem" }, fmtMb(t.rss_mb)),
+    h("td", { "data-l": "cpu" }, fmtCpu(t.cpu)),
+    h("td", { "data-l": "up" }, fmtDur(t.elapsed_sec)));
+  $("#sys-lw-total").textContent = `· ${fmtMb(lw.total.rss_mb)} · ${fmtCpu(lw.total.cpu)} CPU · ${lw.runs.length} live run${lw.runs.length === 1 ? "" : "s"}`;
+  $("#sys-runs-table tbody").replaceChildren(
+    row(h("span", {}, "Server ", h("span", { class: "muted mono" }, `pid ${lw.server.pid}`)), lw.server),
+    lw.tmux ? row(h("span", {}, "tmux server ", h("span", { class: "muted" }, "holds the terminals")), lw.tmux) : "",
+    ...lw.runs.map((r) => row(h("span", {},
+      h("a", { class: "link", href: `#runs/${r.run_id}`, onclick: (ev) => { ev.preventDefault(); openRun(r.run_id); } }, `#${r.run_id}`), ` ${r.workflow_name || r.type} `,
+      r.kind === "app" ? h("span", { class: "pill" }, "app") : "", h("div", { class: "sys-cwd mono", title: r.cwd }, shortCwd(r.cwd))), r)),
+  );
+  $("#sys-outside-total").textContent = u.outside.length ? `· ${u.outside.length} · ${fmtMb(u.outside_total.rss_mb)} · they hold no slot, but their memory is not available` : "";
+  $("#sys-outside-table tbody").replaceChildren(...u.outside.map((p) => h("tr", {},
+    h("td", {}, p.type, h("span", { class: "muted mono" }, ` pid ${p.pid}`)),
+    h("td", { class: "mono trunc", title: p.cmd }, p.cmd),
+    h("td", { "data-l": "procs" }, p.procs),
+    h("td", { "data-l": "mem" }, fmtMb(p.rss_mb)),
+    h("td", { "data-l": "cpu" }, fmtCpu(p.cpu)),
+    h("td", { "data-l": "up" }, fmtDur(p.elapsed_sec)))));
+  if (!u.outside.length) $("#sys-outside-table tbody").replaceChildren(h("tr", {}, h("td", { colspan: 6, class: "muted" }, "None found.")));
+});
 
 // ---------------------------------------------------------------- apps tab
 const loadApps = guard(async () => {
@@ -1736,6 +1824,7 @@ function refresh() {
   else if (activeTab === "settings") renderSettings();
   else if (activeTab === "runs") { loadRuns(); if (selectedRun) refreshRunDetail(); }
   else if (activeTab === "types") loadTypes();
+  else if (activeTab === "system") loadUsage();
 }
 setInterval(refresh, 3000);
 setInterval(loadSystem, 30000);
