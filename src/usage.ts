@@ -14,21 +14,25 @@ const MB = 2 ** 20;
 /** What config.ts assumes one agent needs when it sizes the default MAX_AGENT_RUNS. */
 export const ASSUMED_AGENT_MB = 600;
 
-/** Swap in MB (Linux /proc/meminfo; macOS `sysctl vm.swapusage`), or null where there is none to read. */
+/** Swap from /proc/meminfo text. */
+export function parseMeminfoSwap(m: string): { total_mb: number; used_mb: number } | null {
+  const kb = (k: string) => Number(new RegExp(`^${k}:\\s+(\\d+) kB`, "m").exec(m)?.[1] ?? NaN);
+  const total = kb("SwapTotal"), free = kb("SwapFree");
+  return Number.isFinite(total) && Number.isFinite(free) ? { total_mb: Math.round(total / 1024), used_mb: Math.round((total - free) / 1024) } : null;
+}
+
+/** Swap from macOS `sysctl -n vm.swapusage`: "total = 3072.00M  used = 1623.44M  free = 1448.56M  (encrypted)". */
+export function parseSwapUsage(out: string): { total_mb: number; used_mb: number } | null {
+  const mb = (k: string) => { const m = new RegExp(`${k} = ([\\d.]+)([KMG])`).exec(out); return m ? Number(m[1]) * ({ K: 1 / 1024, M: 1, G: 1024 } as Record<string, number>)[m[2]] : NaN; };
+  const total = mb("total"), used = mb("used");
+  return Number.isFinite(total) && Number.isFinite(used) ? { total_mb: Math.round(total), used_mb: Math.round(used) } : null;
+}
+
+/** Swap in MB, or null where there is none to read. */
 function swapMb(): { total_mb: number; used_mb: number } | null {
   try {
-    if (process.platform === "linux") {
-      const m = readFileSync("/proc/meminfo", "utf8");
-      const kb = (k: string) => Number(new RegExp(`^${k}:\\s+(\\d+) kB`, "m").exec(m)?.[1] ?? NaN);
-      const total = kb("SwapTotal"), free = kb("SwapFree");
-      if (Number.isFinite(total) && Number.isFinite(free)) return { total_mb: Math.round(total / 1024), used_mb: Math.round((total - free) / 1024) };
-    } else if (process.platform === "darwin") {
-      // "total = 3072.00M  used = 1623.44M  free = 1448.56M  (encrypted)"
-      const out = Bun.spawnSync(["sysctl", "-n", "vm.swapusage"], { stdout: "pipe", stderr: "ignore" }).stdout.toString();
-      const mb = (k: string) => { const m = new RegExp(`${k} = ([\\d.]+)([KMG])`).exec(out); return m ? Number(m[1]) * ({ K: 1 / 1024, M: 1, G: 1024 } as any)[m[2]] : NaN; };
-      const total = mb("total"), used = mb("used");
-      if (Number.isFinite(total) && Number.isFinite(used)) return { total_mb: Math.round(total), used_mb: Math.round(used) };
-    }
+    if (process.platform === "linux") return parseMeminfoSwap(readFileSync("/proc/meminfo", "utf8"));
+    if (process.platform === "darwin") return parseSwapUsage(Bun.spawnSync(["sysctl", "-n", "vm.swapusage"], { stdout: "pipe", stderr: "ignore" }).stdout.toString());
   } catch { /* none */ }
   return null;
 }

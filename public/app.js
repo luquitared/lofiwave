@@ -378,13 +378,15 @@ const loadUsage = guard(async () => {
   );
 
   // Memory: lofiwave (server + runs), agents started elsewhere, everything else in use, available.
-  const outMem = Math.min(u.outside_total.rss_mb, Math.max(0, m.mem_used_mb - lw.total.rss_mb));
-  const others = Math.max(0, m.mem_used_mb - lw.total.rss_mb - outMem);
+  // RSS counts shared pages once per process, so the sums can exceed what the machine reports as used: clamp them.
+  const lwMem = Math.min(lw.total.rss_mb, m.mem_used_mb);
+  const outMem = Math.min(u.outside_total.rss_mb, m.mem_used_mb - lwMem);
+  const others = Math.max(0, m.mem_used_mb - lwMem - outMem);
   const cpuPct = m.cpu_busy_pct ?? Math.min(100, (m.load[0] / m.cpus) * 100);
   const lwCpu = Math.min(cpuPct, lw.total.cpu / m.cpus), outCpu = Math.min(cpuPct - lwCpu, u.outside_total.cpu / m.cpus);
   $("#sys-meters").replaceChildren(
     usageMeter("Memory", `${fmtMb(m.mem_used_mb)} of ${fmtMb(m.mem_total_mb)}`, m.mem_total_mb, [
-      { value: lw.total.rss_mb, cls: "lw", label: "lofiwave", text: fmtMb(lw.total.rss_mb) },
+      { value: lwMem, cls: "lw", label: "lofiwave", text: fmtMb(lw.total.rss_mb) },
       { value: outMem, cls: "out", label: "other agents", text: fmtMb(u.outside_total.rss_mb) },
       { value: others, cls: "rest", label: "everything else", text: fmtMb(others) },
       { value: m.mem_available_mb, cls: "free", label: "available", text: fmtMb(m.mem_available_mb) },
