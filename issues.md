@@ -5,6 +5,24 @@ Open work, newest first within each status. One heading per issue; close it by m
 
 ## Open
 
+### #8 Run configs: what's left
+*Opened 2026-10-25 · after the first version of run configs (instructions, env, docker)*
+
+Configs are attached to runs and workflows, and a docker config runs the agent in a container with its volumes,
+verified with `alpine` and a stand-in agent. Not done:
+
+- [ ] Never run with the real `claude` or `codex` in a container: the image needs the agent and its login, which a
+      config's env can carry (`ANTHROPIC_API_KEY`), but nothing has checked a real TUI through `docker run -it`.
+- [ ] In a container the registry and transcripts are inside it: activity comes from the screen, idle-stop is off, and
+      replies to `/message`, Transcript and Resume here don't work. Mount a folder for `~/.claude` (a config volume
+      does it by hand) and read it from there.
+- [ ] `lofiwave`'s own token and the env flags of non-secret variables are still on tmux's command line (`ps`); only a
+      config's env is kept off it (a 0600 file the pane's shell sources and removes).
+- [ ] Env values are stored in the database as plain text, as the brief asked; encrypt them with a key kept outside
+      the data folder if the database is ever shared.
+- [ ] A named volume is root-owned, so `user: host` can't write to it; `docker run` has no flag for that, an init
+      step would have to chown it.
+
 ### #7 E2B sessions: what's left after running them in the sandbox's tmux
 *Opened 2026-10-21 · seen running real claude sessions on an e2b target, with all open PRs merged*
 
