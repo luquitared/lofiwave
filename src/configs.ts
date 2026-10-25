@@ -220,9 +220,9 @@ let dockerCache: { at: number; v: DockerStatus } | null = null;
 export type DockerStatus = { available: boolean; path: string | null; version?: string; error?: string };
 
 /** Is docker installed, and is its daemon answering? Cached for 20 s (a `docker version` takes a moment). */
-export async function dockerStatus(fresh = false): Promise<DockerStatus> {
+export async function dockerStatus(fresh = false, searchPath?: string): Promise<DockerStatus> {
   if (!fresh && dockerCache && Date.now() - dockerCache.at < 20_000) return dockerCache.v;
-  const path = Bun.which("docker");
+  const path = Bun.which("docker", searchPath === undefined ? undefined : { PATH: searchPath });
   let v: DockerStatus;
   if (!path) v = { available: false, path: null, error: "docker is not installed on this machine (no `docker` on PATH)" };
   else {

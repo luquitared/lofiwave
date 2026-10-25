@@ -7,7 +7,7 @@ import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 
 process.env.DATA_DIR = mkdtempSync(join(tmpdir(), "lw-configs-"));
-const { parseDotenv, parseEnvInput, maskValue, maskEnv, parseDocker, parseConfig, dockerArgv, instructionArgs, MASK } = await import("../src/configs");
+const { parseDotenv, parseEnvInput, maskValue, maskEnv, parseDocker, parseConfig, dockerArgv, dockerStatus, instructionArgs, MASK } = await import("../src/configs");
 const { buildCommand, wrapInDocker } = await import("../src/runner");
 const { db } = await import("../src/db");
 
@@ -131,4 +131,11 @@ test("docker: headless runs get no tty, user host is this machine's uid:gid", ()
   expect(a).not.toContain("-it");
   expect(a.slice(a.indexOf("--user"), a.indexOf("--user") + 2)).toEqual(["--user", "501:20"]);
   expect(a.slice(-4)).toEqual(["alpine", "sh", "-c", "env"]);
+});
+
+test("dockerStatus says plainly when docker isn't installed", async () => {
+  const st = await dockerStatus(true, "/nonexistent");
+  expect(st.available).toBe(false);
+  expect(st.error).toMatch(/not installed/);
+  await dockerStatus(true); // don't leave that answer cached
 });
