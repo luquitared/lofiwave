@@ -79,6 +79,23 @@ CREATE TABLE IF NOT EXISTS sessions (
 );
 CREATE INDEX IF NOT EXISTS sessions_run_idx ON sessions(run_id, started_at);
 
+-- Messages sent to a run through POST /api/runs/:id/message, so the caller can ask later what became of one (queued,
+-- read, answered) and get the reply from the transcript (src/messages.ts). transcript_path and offset: where the
+-- session's transcript was, and how long it was, just before the message was typed: the scan for it starts there.
+CREATE TABLE IF NOT EXISTS run_messages (
+  id              INTEGER PRIMARY KEY,
+  run_id          INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+  text            TEXT NOT NULL,
+  sent_at         INTEGER NOT NULL,
+  sent_by         TEXT NOT NULL DEFAULT '',
+  delivered       INTEGER,                   -- 1, 0, or NULL (the TUI's input box can't be read)
+  queued          INTEGER NOT NULL DEFAULT 0, -- the agent was mid-turn when it was sent
+  session_id      TEXT NOT NULL DEFAULT '',
+  transcript_path TEXT NOT NULL DEFAULT '',
+  offset          INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS run_messages_run_idx ON run_messages(run_id, sent_at);
+
 -- Named API keys for agents and scripts, made and revoked from the UI. Only a hash is kept; the key is shown once.
 CREATE TABLE IF NOT EXISTS api_keys (
   id           INTEGER PRIMARY KEY,
@@ -172,6 +189,10 @@ export type WorkflowRow = {
 export type SessionRow = {
   id: number; run_id: number; session_id: string; agent: string; cwd: string; transcript_path: string;
   model: string; source: string; started_at: number; ended_at: number | null; end_reason: string;
+};
+export type MessageRow = {
+  id: number; run_id: number; text: string; sent_at: number; sent_by: string; delivered: number | null; queued: number;
+  session_id: string; transcript_path: string; offset: number;
 };
 export type RunRow = {
   id: number; workflow_id: number | null; workflow_name: string | null; type_name: string; cwd: string;

@@ -249,6 +249,8 @@ dialog { padding:28px; width:min(720px,calc(100vw - 32px)); max-height:calc(100d
   td { display:block; padding:0; border:0; min-width:0; max-width:100% !important; }td.full,td.trunc,td.row { flex-basis:100%; }td.row { padding-top:12px; border-top:1px solid var(--line); }td.status { margin-left:auto; }
   td[data-l]::before { content:attr(data-l) " "; color:var(--muted); font-size:10px; text-transform:uppercase; letter-spacing:.4px; }td.full { overflow-wrap:anywhere; }.proc-table tbody tr { margin:0; }
   tbody tr.selected { border-color:var(--toggle-on); }.split.open #runs-table td:nth-child(n+3) { display:block; }
+  /* markdown tables in chat stay tables (they scroll sideways); the card layout drops their headers */
+  .md thead { display:table-header-group; }.md tbody { display:table-row-group; }.md tbody tr { display:table-row; padding:0; margin:0; border:0; border-radius:0; background:none; }.md th,.md td { display:table-cell; padding:4px 8px; border:1px solid var(--line); }
   button.small { min-height:40px; } .grid { grid-template-columns:1fr; }
   .detail { position:fixed; inset:0; z-index:7; border-radius:0; max-height:100dvh; padding:20px 20px calc(20px + env(safe-area-inset-bottom)); overflow:auto; }
   body.run-open { overflow:hidden; }.detail h3 { position:sticky; top:-20px; background:var(--panel); padding:14px 0; z-index:1; }.detail pre { flex:1 0 45dvh; min-height:240px; }.detail dl { grid-template-columns:1fr; }.detail dt { margin-top:8px; }.detail .keys { position:sticky; bottom:0; background:var(--panel); padding-block:10px; }
@@ -489,8 +491,11 @@ body.term-full .pane .chat { flex:1; height:auto; }
 .md code { font-family:var(--mono); font-size:12.5px; background:var(--panel-2); padding:1px 5px; border-radius:4px; }
 .md pre { overflow-x:auto; padding:10px 12px; background:var(--panel-2); border:1px solid var(--line); border-radius:6px; }
 .md pre code { background:none; padding:0; font-size:12px; }
-.md table { border-collapse:collapse; width:auto; display:block; overflow-x:auto; border:0; background:none; }
+.md table { border-collapse:collapse; table-layout:auto; width:auto; display:block; overflow-x:auto; border:0; background:none; }
 .md th, .md td, .md tbody tr:last-child td { border:1px solid var(--line); padding:4px 8px; font-size:13px; }
+/* the chat's overflow-wrap:anywhere let auto layout squeeze columns to one letter; break-word keeps whole words as the minimum */
+.md th, .md td { overflow-wrap:break-word; min-width:6ch; }
+.md th { color:var(--text); font-weight:600; text-transform:none; letter-spacing:normal; background:var(--panel-2); }
 .md blockquote { padding-left:12px; border-left:3px solid var(--line); color:var(--muted); }
 .md a { color:var(--accent); }
 .md hr { border:0; border-top:1px solid var(--line); }

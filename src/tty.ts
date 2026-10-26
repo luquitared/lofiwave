@@ -3,7 +3,8 @@
  * `terminal` spawn option), raw bytes both ways. Every viewer is a separate tmux client on the same session, so
  * several people can watch and type at once. The window follows the viewer with the latest input (tmux
  * `window-size latest`); the browser keeps that meaningful by not sending bare mouse motion (hovering over a tab
- * must not steal the size) and by reporting focus (focus-events), so clicking into a terminal claims it.
+ * must not steal the size) and by reporting focus (focus-events), so clicking into a terminal claims it. The desktop
+ * window lofiwave opens attaches with ignore-size (src/terminal.ts), so it only sizes the session when it is alone.
  *
  * A run in an E2B sandbox has no tmux here: its socket is bridged to the sandbox's PTY instead (src/e2b.ts,
  * E2BTerm). Viewers share that one PTY the same way, and the last one to resize sets its size.
