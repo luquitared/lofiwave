@@ -436,6 +436,16 @@ dialog .hint { margin:0; font-size:12px; }
 .card > p { margin:6px 0 14px; font-size:13px; }
 .card-head { display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; margin-bottom:14px; }
 .card-head form input { width:240px; min-height:32px; padding:6px 10px; }
+/* Advanced → Usage: a bar per plan-limit window, with a tick at the even-pace point */
+.usage-plan { margin-left:8px; vertical-align:2px; }
+.usage-row + .usage-row { margin-top:16px; }
+.usage-line { display:flex; justify-content:space-between; gap:12px; font-size:13px; margin-bottom:6px; }
+.usage-pct { font-family:var(--mono); } .usage-pct.warn { color:var(--warn); } .usage-pct.bad { color:var(--bad); }
+.usage-bar { position:relative; height:8px; border-radius:4px; background:var(--panel-2); border:1px solid var(--line); }
+.usage-fill { height:100%; border-radius:3px; background:var(--ok); } .usage-fill.warn { background:var(--warn); } .usage-fill.bad { background:var(--bad); }
+.usage-tick { position:absolute; top:-4px; bottom:-4px; width:2px; margin-left:-1px; background:var(--text); opacity:.55; border-radius:1px; }
+.usage-meta { font-size:12px; margin-top:6px; }
+.usage-note { font-size:12px; max-width:980px; }
 .card table { border:1px solid var(--line); }
 .copy-row { display:flex; align-items:center; gap:8px; margin-top:8px; }
 .copy-row code { flex:1; min-width:0; padding:8px 10px; background:var(--sunken); border:1px solid var(--line); border-radius:8px; overflow-wrap:anywhere; font-size:12px; }

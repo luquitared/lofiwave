@@ -149,7 +149,7 @@ export function apiIndex(base: string) {
     docs: `${api}/docs`,
     ui: base,
     endpoints: {
-      system: [`GET ${api}/health`, `GET ${api}/system`, `GET ${api}/paths?q=`],
+      system: [`GET ${api}/health`, `GET ${api}/system`, `GET ${api}/system/limits`, `GET ${api}/paths?q=`],
       process_types: [`GET ${api}/process-types`, `POST ${api}/process-types`, `GET|PUT|DELETE ${api}/process-types/:name`],
       console: [`GET ${api}/console`],
       processes: [`GET ${api}/processes?type=&kind=`, `POST ${api}/processes`, `POST ${api}/processes/preview`, `DELETE ${api}/processes/:pid?force=1`, `POST ${api}/processes/:pid/remote-control {replace?}`],
