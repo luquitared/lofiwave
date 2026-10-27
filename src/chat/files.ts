@@ -7,7 +7,7 @@
  */
 import { closeSync, openSync, readSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { extname, isAbsolute, resolve, sep } from "node:path";
+import { basename, extname, isAbsolute, resolve, sep } from "node:path";
 import { ApiError } from "../runner";
 
 /** Bigger files aren't shown: the panel is for reading what Claude wrote, not for browsing logs. */
@@ -40,9 +40,10 @@ function locate(cwd: string, p: string, rs = roots(cwd)): { abs: string; real: s
 
 /**
  * GET …/chat/file?path=: the file as it is on disk now, as {path, size, mtime, text} (or `binary`/`image` instead of
- * text). With raw=1, an image's bytes, for the panel's preview and for images in a markdown preview.
+ * text). With raw=1, an image's bytes, for the panel's preview and for images in a markdown preview. With download=1,
+ * any file's bytes as an attachment, whatever its size or type, for the panel's Download button.
  */
-export function chatFile(cwd: string, path: string, raw: boolean): Response {
+export function chatFile(cwd: string, path: string, raw: boolean, download = false): Response {
   if (!path || path.includes("\0")) throw new ApiError(400, "path is required");
   const abs = absolute(cwd, path);
   const real = realOrNull(abs);
@@ -51,6 +52,13 @@ export function chatFile(cwd: string, path: string, raw: boolean): Response {
   const st = statSync(real);
   if (st.isDirectory()) throw new ApiError(400, `${abs} is a folder`);
   if (!st.isFile()) throw new ApiError(400, `${abs} is not a regular file`);
+  if (download) {
+    const name = basename(abs);
+    return new Response(Bun.file(real), { headers: {
+      "content-type": "application/octet-stream", "cache-control": "private, no-cache", "x-content-type-options": "nosniff",
+      "content-disposition": `attachment; filename="${name.replace(/[^\x20-\x7e]|["\\]/g, "_")}"; filename*=UTF-8''${encodeURIComponent(name).replace(/'/g, "%27")}`,
+    } });
+  }
   if (st.size > MAX_BYTES) throw new ApiError(413, `${abs} is ${Math.round(st.size / 1024)} KB; the panel shows files up to 1 MB`);
   const mime = IMAGES[extname(real).toLowerCase()];
   if (raw) {
