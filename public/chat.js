@@ -54,6 +54,10 @@ function nextFrame(fn) {
   requestAnimationFrame(run);
   setTimeout(run, 100);
 }
+/** How many files a long "Changed N files" card lists before "Show more". */
+const EDITED_SHOWN = 5;
+/** Claude Code wraps text pasted into its prompt in these; the closing tag may repeat the id. */
+const PASTED = /<pasted_content(?: id="([^"]*)")?>([\s\S]*?)<\/pasted_content(?: id="[^"]*")?>/g;
 const WORK = new Set(["thinking", "command", "file_change", "read", "search", "web", "todo", "tool", "subagent"]);
 const plural = (n, one, many = one + "s") => `${n} ${n === 1 ? one : many}`;
 const isOmitted = (v) => v && typeof v === "object" && v.omitted;
@@ -592,16 +596,17 @@ class ChatView {
       el.append(...this.renderBody(work, turnId, live));
     }
     el.append(...this.renderBody(tail, turnId, live));
-    if (!live) { const card = this.editedCard(body, head); if (card) el.append(card); }
+    if (!live) { const card = this.editedCard(body, head, turnId); if (card) el.append(card); }
     return el;
   }
 
   /**
    * "Edited 3 files": what a finished turn changed, each file with its +/− counts; a click opens the turn's diff.
    * With git checkpoints (runs of ours, in a repo) the list comes from git, so files changed through commands show
-   * too; edits git doesn't see (outside the repo, ignored) are added from the transcript.
+   * too; edits git doesn't see (outside the repo, ignored) are added from the transcript. A long list shows its first
+   * few files until it's opened, so a big change doesn't take over the chat.
    */
-  editedCard(items, head) {
+  editedCard(items, head, turnId) {
     const by = new Map();
     for (const it of items) {
       if (it.kind !== "file_change" || !it.path || it.status !== "completed") continue;
@@ -618,14 +623,18 @@ class ChatView {
     if (!rows.length) return null;
     const agent = this.agent;
     const verb = prompt ? "Changed" : "Edited";
+    const key = `e:${turnId}`, open = rows.length <= EDITED_SHOWN + 2 || this.expanded.has(key);
+    const shown = open ? rows : rows.slice(0, EDITED_SHOWN);
     return h("div", { class: "chat-edited" },
       h("div", { class: "chat-edited-head muted" }, rows.length === 1 ? `${verb} 1 file` : `${verb} ${rows.length}${git?.truncated ? "+" : ""} files`,
         prompt ? h("span", { title: "from git snapshots taken when the prompt was sent and when Claude stopped" }, ` · +${git.added} −${git.removed} in git`) : ""),
-      ...rows.map((f) => h("button", { class: "chat-row", title: f.path, onclick: () => this.files.open({ path: f.path, edits: f.edits, agent, tab: "diff", git: f.git ? { prompt } : null }) },
+      ...shown.map((f) => h("button", { class: "chat-row", title: f.path, onclick: () => this.files.open({ path: f.path, edits: f.edits, agent, tab: "diff", git: f.git ? { prompt } : null }) },
         h("span", { class: "chat-icon" }, f.created ? "+" : f.deleted ? "−" : "✎"), h("span", { class: "chat-label" }, this.rel(f.path)),
         f.viaCommand ? h("span", { class: "chat-badge", title: "changed by a command, not an edit" }, "via a command") : "",
         f.binary ? h("span", { class: "chat-badge" }, "binary")
-          : h("span", { class: "chat-diffstat" }, h("span", { class: "add" }, `+${f.added}`), " ", h("span", { class: "del" }, `−${f.removed}`)))));
+          : h("span", { class: "chat-diffstat" }, h("span", { class: "add" }, `+${f.added}`), " ", h("span", { class: "del" }, `−${f.removed}`)))),
+      rows.length > EDITED_SHOWN + 2 ? h("button", { class: "small chat-edited-more", "aria-expanded": String(open), onclick: () => this.toggle(key, turnId) },
+        open ? "Show fewer" : `Show ${rows.length - EDITED_SHOWN} more`) : "");
   }
 
   /**
@@ -749,10 +758,37 @@ class ChatView {
     if (it.notification) return h("div", { class: "chat-event info" }, h("span", {}, "⚙"), h("span", {}, it.text));
     return h("div", { class: `chat-user${it.queued ? " queued" : ""}`, title: it.queued ? "sent while Claude was working, and read mid-turn" : null },
       it.command ? h("code", { class: "chat-cmd" }, it.command) : "",
-      it.text ? h("div", { class: "chat-user-text" }, it.text) : "",
+      ...(it.text ? this.userText(it) : []),
       it.images?.length ? h("div", { class: "chat-images" }, ...it.images.map((im) => this.image(im))) : "",
       it.output !== undefined ? h("pre", { class: "chat-out" }, textOf(it.output) || "(no output)") : "",
     );
+  }
+
+  /**
+   * A prompt's text, with each <pasted_content> block Claude Code wrapped around pasted text shown as a fold
+   * ("Pasted · 40 lines") instead of the raw tags. Short pastes start open; what's opened stays open across redraws.
+   */
+  userText(it) {
+    const out = [];
+    let at = 0, n = 0;
+    const text = (t) => { t = t.replace(/^\n+|\s+$/g, ""); if (t) out.push(h("div", { class: "chat-user-text" }, t)); };
+    PASTED.lastIndex = 0;
+    for (let m; (m = PASTED.exec(it.text));) {
+      text(it.text.slice(at, m.index)); at = m.index + m[0].length;
+      const body = m[2].replace(/^\n|\n$/g, ""), lines = body.split("\n").length, key = `p:${it.id}:${n++}`;
+      const short = lines <= 3, open = short ? !this.collapsed.has(key) : this.expanded.has(key);
+      const peek = h("span", { class: "chat-pasted-peek" }, open ? "" : body.slice(0, 120).replace(/\s+/g, " "));
+      const d = h("details", { class: "chat-pasted", ...(open ? { open: "" } : {}) },
+        h("summary", { class: "muted" }, h("span", { class: "chev" }), `Pasted · ${plural(lines, "line")}`, peek), h("pre", { class: "chat-out" }, body));
+      d.addEventListener("toggle", () => {
+        const set = short ? this.collapsed : this.expanded;
+        if (d.open === short) set.delete(key); else set.add(key);
+        peek.textContent = d.open ? "" : body.slice(0, 120).replace(/\s+/g, " ");
+      });
+      out.push(d);
+    }
+    text(it.text.slice(at));
+    return out;
   }
 
   renderEvent(it) {
@@ -997,6 +1033,7 @@ class FilesPanel {
       h("div", { class: "chat-files-head" },
         h("div", { class: "chat-files-path", title: p }, h("b", {}, p.split("/").pop()), rel.includes("/") ? h("span", { class: "muted" }, "\u200e" + rel.replace(/\/[^/]*$/, "") + "\u200e") : ""),
         h("button", { class: "small", title: p, onclick: () => navigator.clipboard?.writeText(p).then(() => toast("path copied"), () => toast(p)) }, "Copy path"),
+        h("button", { class: "small", title: "save the file as it is on disk now", onclick: () => this.download(p) }, "Download"),
         h("button", { class: "chat-files-x", "aria-label": "close the file", title: "close (Esc)", onclick: () => this.close() }, "×")),
       h("div", { class: "chat-files-bar" },
         h("div", { class: "seg", role: "tablist" }, ...tabs.map(([k, label]) => h("button", { class: k === this.tab ? "on" : "", role: "tab", "aria-selected": String(k === this.tab), onclick: () => this.show(k) }, label))),
@@ -1038,6 +1075,11 @@ class FilesPanel {
       else box.append(h("div", { class: "muted" }, "no diff recorded"));
       this.body.append(box);
     });
+  }
+
+  download(p) {
+    const q = new URLSearchParams({ path: p, download: "1" }); if (token) q.set("token", token);
+    h("a", { href: `/api${this.view.base}/chat/file?${q}`, download: p.split("/").pop() }).click();
   }
 
   rawUrl(p) {

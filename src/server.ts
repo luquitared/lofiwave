@@ -842,14 +842,14 @@ route("GET", "/api/runs/:id/sessions/:sid/messages", (_r, p, url) =>
 
 // ---- chat view (read-only, from the transcript; the live updates come over the /chat WebSocket, see src/chat)
 // GET …/chat?before=<ordinal>: the turns before what the browser has. GET …/chat/blob?ref=: an image or a long output.
-// GET …/chat/subagent/:agent: a subagent's own conversation. GET …/chat/file?path=[&raw=1]: a file as it is on disk
+// GET …/chat/subagent/:agent: a subagent's own conversation. GET …/chat/file?path=[&raw=1|&download=1]: a file as it is on disk
 // now, for the files panel; POST …/chat/paths {paths}: which paths in Claude's text are files to link (see src/chat/files.ts).
 // The same exist for any session by id.
 for (const [prefix, kind] of [["/api/runs/:id", "run"], ["/api/sessions/:id", "session"]] as const) {
   route("GET", `${prefix}/chat`, (_r, p, url) => json(chatEarlier(kind, p.id, int(url.searchParams.get("before"), "before", Number.MAX_SAFE_INTEGER))));
   route("GET", `${prefix}/chat/blob`, (_r, p, url) => chatBlob(kind, p.id, str(url.searchParams.get("ref") ?? undefined, "ref", { required: true }), url.searchParams.get("agent") ?? ""));
   route("GET", `${prefix}/chat/subagent/:agent`, (_r, p) => json(chatSubagent(kind, p.id, p.agent)));
-  route("GET", `${prefix}/chat/file`, (_r, p, url) => chatFile(chatCwd(kind, p.id), str(url.searchParams.get("path") ?? undefined, "path", { required: true }), url.searchParams.get("raw") === "1"));
+  route("GET", `${prefix}/chat/file`, (_r, p, url) => chatFile(chatCwd(kind, p.id), str(url.searchParams.get("path") ?? undefined, "path", { required: true }), url.searchParams.get("raw") === "1", url.searchParams.get("download") === "1"));
   route("POST", `${prefix}/chat/paths`, async (req, p) => json(chatPaths(chatCwd(kind, p.id), strArray((await body(req)).paths, "paths"))));
 }
 
