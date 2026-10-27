@@ -53,9 +53,11 @@ export async function readDraft(target: string): Promise<string | null> {
   if (top < 0 || bottom - top < 2) return null;
   const first = /^([❯>!])\s?(.*)$/.exec(plain[top + 1]);
   if (!first) return null;
-  // A dim run right after the prompt mark is the placeholder ("Try …", "Press up to edit queued messages").
+  // A dim run right after the prompt mark is the placeholder ("Try …", "Press up to edit queued messages", or a
+  // suggested next prompt). While the terminal has focus, Claude draws its cursor on the placeholder's first
+  // character (inverse), so the dim starts one character later.
   const raw = lines[top + 1];
-  const lead = /^(?:\s|\x1b\[[0-9;]*m)*/.exec(raw.slice(raw.indexOf(first[1]) + first[1].length))![0];
+  const lead = /^(?:\s|\x1b\[[0-9;]*m)*(?:(?<=\x1b\[7m)[^\x1b](?:\x1b\[[0-9;]*m)*)?/u.exec(raw.slice(raw.indexOf(first[1]) + first[1].length))![0];
   if (/\x1b\[(?:[0-9;]*;)?2(?:;[0-9;]*)?m/.test(lead)) return "";
   const body = [first[2], ...plain.slice(top + 2, bottom).map((l) => l.replace(/^  /, ""))].join("\n").replace(/\s+$/, "");
   return first[1] === "!" ? `!${body}` : body;
