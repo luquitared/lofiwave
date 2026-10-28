@@ -50,6 +50,7 @@ export async function runWorkflow(wf: WorkflowRow, trigger: string, target: stri
     // No window popping up on the machine for a cron run; it is in the browser's session list.
     terminal: "none",
     target: target || undefined,
+    config: wf.config || undefined,
   });
 }
 

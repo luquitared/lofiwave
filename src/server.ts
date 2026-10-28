@@ -3,10 +3,11 @@ import { join, dirname, basename } from "node:path";
 import { readdirSync, existsSync, statSync } from "node:fs";
 import { hostname, homedir } from "node:os";
 import { config } from "./config";
-import { db, now, hydrate, type ProcessTypeRow, type WorkflowRow, type RunRow, type SessionRow, type ApiKeyRow, type TargetRow } from "./db";
+import { db, now, hydrate, type ProcessTypeRow, type WorkflowRow, type RunRow, type SessionRow, type ApiKeyRow, type TargetRow, type ConfigRow } from "./db";
 import { getTarget, parseTargetConfig, checkTarget, TargetError, TARGET_KINDS } from "./targets";
+import { parseConfig, configOut, rowToConfig, dockerStatus, ConfigError } from "./configs";
 import { listOsProcesses, cwdOf, killTree, type OsProcess } from "./procs";
-import { ApiError, startRun, killRun, restartRun, getRun, getType, readLogFrom, isLive, buildCommand, screenOf, historyOf, sendKeys, sendMessage, activityOf, waitForRun, tmuxPath, recordSession, resumeSession, resumeAgentSession, enableRemoteControl } from "./runner";
+import { ApiError, startRun, killRun, restartRun, getRun, getType, readLogFrom, isLive, buildCommand, wrapInDocker, configOf, screenOf, historyOf, sendKeys, sendMessage, activityOf, waitForRun, tmuxPath, recordSession, resumeSession, resumeAgentSession, enableRemoteControl } from "./runner";
 import { transcriptMark, recordMessage, messageStatus, runMessages, waitForReply } from "./messages";
 import { describeSession, sessionForPid, locateSession, transcriptMessages, codexThreadNear, type SessionInfo } from "./agents";
 import { startScheduler, refreshNextRun, runWorkflow, computeNext } from "./scheduler";
@@ -23,6 +24,7 @@ import { actor, identify, touch, online, passwordMatches, cleanName, makeSession
 import { startJob, startQueue } from "./jobs";
 import { capacity } from "./capacity";
 import { systemUsage } from "./usage";
+import { planLimits } from "./limits";
 import { insidePath, listDir, writeFiles, decodeContent, extractInto, archiveOf, resultsOf, makeFolder } from "./files";
 
 const PUBLIC_DIR = join(config.root, "public");
@@ -105,7 +107,8 @@ function typeWithAvailability(t: ProcessTypeRow) {
 function workflowOut(w: WorkflowRow) {
   const last = db.query<{ id: number; status: string; started_at: number; ended_at: number | null }, [number]>(
     "SELECT id, status, started_at, ended_at FROM runs WHERE workflow_id = ? ORDER BY started_at DESC LIMIT 1").get(w.id);
-  return { ...hydrate(w), last_run: last ?? null };
+  // config is a name: not parsed as JSON by hydrate (a config called "1" would become a number).
+  return { ...hydrate(w), config: w.config, last_run: last ?? null };
 }
 
 function runOut(r: RunRow, { withOutput = true } = {}) {
@@ -251,6 +254,9 @@ route("GET", "/api/system", async () => {
 
 /** Memory, CPU and disk, what lofiwave and each live run use (whole process trees), outside agents, and how many more fit. */
 route("GET", "/api/system/usage", async () => json(await systemUsage()));
+
+/** Claude and Codex plan limits: used %, resets and pace per window, as of each agent's last request here. */
+route("GET", "/api/system/limits", () => json(planLimits()));
 
 // ---- people (with PASSWORD set: name + shared password login, and who's online)
 route("GET", "/api/auth", () => json({ password_login: Boolean(config.password) }));
@@ -447,6 +453,7 @@ route("POST", "/api/processes", async (req) => {
     trigger: "manual",
     target: str(b.target, "target").trim() || undefined,
     inputDir: str(b.input_dir, "input_dir").trim() || undefined,
+    config: configName(b.config),
   }, {
     queue: bool(b.queue, false),
     // Once it is going to start (or wait in the queue): make its folder and put its files in.
@@ -500,8 +507,13 @@ route("POST", "/api/processes/preview", async (req) => {
   const b = await body(req);
   const type = getType(str(b.type, "type", { required: true }));
   const interactive = bool(b.interactive, type.kind === "agent" && Boolean(tmuxPath()));
-  const { command, args } = buildCommand(type, { cwd: str(b.cwd, "cwd") || type.default_cwd || ".", prompt: str(b.prompt, "prompt"), extraArgs: strArray(b.extra_args, "extra_args"), interactive });
-  return json({ command, args, interactive, tmux: interactive ? tmuxPath() : undefined });
+  const name = configName(b.config);
+  const runConfig = name ? configOf(name) : null;
+  const cwd = str(b.cwd, "cwd") || type.default_cwd || ".";
+  let built = buildCommand(type, { cwd, prompt: str(b.prompt, "prompt"), extraArgs: strArray(b.extra_args, "extra_args"), interactive, runConfig });
+  // The container's name and env keys are picked at start; these stand in for them.
+  if (runConfig?.docker) built = wrapInDocker(runConfig.docker, built, { name: "lofiwave-…", cwd, interactive, envKeys: Object.keys({ LOFIWAVE_OUT_DIR: "", ...JSON.parse(type.env || "{}"), LOFIWAVE_CONFIG: "", ...runConfig.env, ...strMap(b.env, "env"), AGENT_CONSOLE_RUN_ID: "" }) });
+  return json({ command: built.command, args: built.args, interactive, tmux: interactive ? tmuxPath() : undefined, config: runConfig?.name, docker: Boolean(runConfig?.docker) });
 });
 
 route("DELETE", "/api/processes/:pid", async (_r, p, url) => {
@@ -537,13 +549,15 @@ function parseWorkflowBody(b: any, cur?: WorkflowRow) {
   getType(type_name);
   const target = pick("target", (v) => str(v, "target").trim(), cur?.target ?? "");
   if (target) targetOf(target);
+  const cfg = pick("config", (v) => configName(v) ?? "", cur?.config ?? "");
+  if (cfg && target && configOf(cfg).docker) throw new ApiError(400, `config "${cfg}" runs in Docker; it can't be used on target "${target}"`);
   // On a target the process runs in the target's folder; cwd is only kept for running it here.
   const cwd = pick("cwd", (v) => str(v, "cwd"), cur?.cwd ?? "") || getType(type_name).default_cwd;
   if (!cwd && !target) throw new ApiError(400, "cwd is required (the process type has no default_cwd)");
   const schedule = pick("schedule", (v) => str(v, "schedule").trim(), cur?.schedule ?? "");
   if (schedule) { const err = validateCron(schedule); if (err) throw new ApiError(400, `invalid schedule: ${err}`); }
   return {
-    name, type_name, cwd, schedule, target,
+    name, type_name, cwd, schedule, target, config: cfg,
     prompt: pick("prompt", (v) => str(v, "prompt"), cur?.prompt ?? ""),
     extra_args: pick("extra_args", (v) => strArray(v, "extra_args"), cur ? JSON.parse(cur.extra_args) : []),
     env: pick("env", (v) => strMap(v, "env"), cur ? JSON.parse(cur.env) : {}),
@@ -562,10 +576,10 @@ route("POST", "/api/workflows", async (req) => {
   let id: number;
   try {
     id = Number(db.prepare(
-      `INSERT INTO workflows (name, type_name, cwd, prompt, extra_args, env, schedule, enabled, timeout_sec, allow_overlap, target, next_run_at, created_at, updated_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      `INSERT INTO workflows (name, type_name, cwd, prompt, extra_args, env, schedule, enabled, timeout_sec, allow_overlap, target, config, next_run_at, created_at, updated_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     ).run(w.name, w.type_name, w.cwd, w.prompt, JSON.stringify(w.extra_args), JSON.stringify(w.env), w.schedule,
-      w.enabled ? 1 : 0, w.timeout_sec, w.allow_overlap ? 1 : 0, w.target, w.enabled ? computeNext(w.schedule) : null, t, t).lastInsertRowid);
+      w.enabled ? 1 : 0, w.timeout_sec, w.allow_overlap ? 1 : 0, w.target, w.config, w.enabled ? computeNext(w.schedule) : null, t, t).lastInsertRowid);
   } catch (e: any) {
     if (String(e.message).includes("UNIQUE")) throw new ApiError(409, `workflow "${w.name}" already exists`);
     throw e;
@@ -578,9 +592,9 @@ route("PUT", "/api/workflows/:id", async (req, p) => {
   const w = parseWorkflowBody(await body(req), cur);
   try {
     db.prepare(
-      `UPDATE workflows SET name=?, type_name=?, cwd=?, prompt=?, extra_args=?, env=?, schedule=?, enabled=?, timeout_sec=?, allow_overlap=?, target=?, updated_at=? WHERE id=?`,
+      `UPDATE workflows SET name=?, type_name=?, cwd=?, prompt=?, extra_args=?, env=?, schedule=?, enabled=?, timeout_sec=?, allow_overlap=?, target=?, config=?, updated_at=? WHERE id=?`,
     ).run(w.name, w.type_name, w.cwd, w.prompt, JSON.stringify(w.extra_args), JSON.stringify(w.env), w.schedule,
-      w.enabled ? 1 : 0, w.timeout_sec, w.allow_overlap ? 1 : 0, w.target, now(), cur.id);
+      w.enabled ? 1 : 0, w.timeout_sec, w.allow_overlap ? 1 : 0, w.target, w.config, now(), cur.id);
   } catch (e: any) {
     if (String(e.message).includes("UNIQUE")) throw new ApiError(409, `workflow "${w.name}" already exists`);
     throw e;
@@ -650,6 +664,63 @@ route("DELETE", "/api/targets/:name", (_r, p) => {
   return json({ ok: true });
 });
 route("POST", "/api/targets/:name/check", async (_r, p) => json(await checkTarget(targetOf(p.name))));
+
+// ---- run configs: instructions, env (secrets) and Docker settings, attached to runs and workflows (src/configs.ts)
+/** A config name from a request ("" / missing = none); it must exist. */
+function configName(v: unknown): string | undefined {
+  const name = str(v, "config").trim();
+  if (!name) return undefined;
+  configOf(name);
+  return name;
+}
+/** A config body, with docker.args given as one string ("--memory 4g") split like extra_args. */
+function configBody(b: any) {
+  return typeof b?.docker?.args === "string" ? { ...b, docker: { ...b.docker, args: splitArgs(b.docker.args) } } : b;
+}
+function asApiCfg<T>(fn: () => T): T {
+  try { return fn(); } catch (e) { if (e instanceof ConfigError) throw new ApiError(e.status, e.message); throw e; }
+}
+function configRowOf(name: string): ConfigRow {
+  const r = db.query<ConfigRow, [string]>("SELECT * FROM configs WHERE name = ?").get(name);
+  if (!r) throw new ApiError(404, `unknown config "${name}"`);
+  return r;
+}
+route("GET", "/api/configs", async () => json({
+  docker: await dockerStatus(),
+  configs: db.query<ConfigRow, []>("SELECT * FROM configs ORDER BY name").all().map(configOut),
+}));
+route("GET", "/api/configs/:name", (_r, p) => json(configOut(configRowOf(p.name))));
+route("GET", "/api/docker", async () => json(await dockerStatus(true)));
+route("POST", "/api/configs", async (req) => {
+  const b = await body(req);
+  const name = str(b.name, "name", { required: true }).trim();
+  if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,40}$/.test(name)) throw new ApiError(400, "name: letters, digits, . _ - (up to 41)");
+  const c = asApiCfg(() => parseConfig(configBody(b)));
+  const t = now();
+  try {
+    db.prepare("INSERT INTO configs (name, description, instructions, env, docker, created_at, updated_at) VALUES (?,?,?,?,?,?,?)")
+      .run(name, c.description, c.instructions, JSON.stringify(c.env), c.docker ? JSON.stringify(c.docker) : "", t, t);
+  } catch (e: any) {
+    if (String(e.message).includes("UNIQUE")) throw new ApiError(409, `config "${name}" already exists`);
+    throw e;
+  }
+  return json(configOut(configRowOf(name)), 201);
+});
+route("PUT", "/api/configs/:name", async (req, p) => {
+  const cur = configRowOf(p.name);
+  const b = await body(req);
+  const c = asApiCfg(() => parseConfig(configBody(b), rowToConfig(cur)));
+  db.prepare("UPDATE configs SET description = ?, instructions = ?, env = ?, docker = ?, updated_at = ? WHERE id = ?")
+    .run(c.description, c.instructions, JSON.stringify(c.env), c.docker ? JSON.stringify(c.docker) : "", now(), cur.id);
+  return json(configOut(configRowOf(cur.name)));
+});
+route("DELETE", "/api/configs/:name", (_r, p) => {
+  const cur = configRowOf(p.name);
+  const used = db.query<{ n: number }, [string]>("SELECT COUNT(*) n FROM workflows WHERE config = ?").get(cur.name)!.n;
+  if (used) throw new ApiError(409, `config is used by ${used} workflow(s)`);
+  db.prepare("DELETE FROM configs WHERE id = ?").run(cur.id);
+  return json({ ok: true });
+});
 
 // ---- runs
 route("GET", "/api/runs", (_r, _p, url) => {
@@ -846,14 +917,14 @@ route("GET", "/api/runs/:id/sessions/:sid/messages", (_r, p, url) =>
 
 // ---- chat view (read-only, from the transcript; the live updates come over the /chat WebSocket, see src/chat)
 // GET …/chat?before=<ordinal>: the turns before what the browser has. GET …/chat/blob?ref=: an image or a long output.
-// GET …/chat/subagent/:agent: a subagent's own conversation. GET …/chat/file?path=[&raw=1]: a file as it is on disk
+// GET …/chat/subagent/:agent: a subagent's own conversation. GET …/chat/file?path=[&raw=1|&download=1]: a file as it is on disk
 // now, for the files panel; POST …/chat/paths {paths}: which paths in Claude's text are files to link (see src/chat/files.ts).
 // The same exist for any session by id.
 for (const [prefix, kind] of [["/api/runs/:id", "run"], ["/api/sessions/:id", "session"]] as const) {
   route("GET", `${prefix}/chat`, (_r, p, url) => json(chatEarlier(kind, p.id, int(url.searchParams.get("before"), "before", Number.MAX_SAFE_INTEGER))));
   route("GET", `${prefix}/chat/blob`, (_r, p, url) => chatBlob(kind, p.id, str(url.searchParams.get("ref") ?? undefined, "ref", { required: true }), url.searchParams.get("agent") ?? ""));
   route("GET", `${prefix}/chat/subagent/:agent`, (_r, p) => json(chatSubagent(kind, p.id, p.agent)));
-  route("GET", `${prefix}/chat/file`, (_r, p, url) => chatFile(chatCwd(kind, p.id), str(url.searchParams.get("path") ?? undefined, "path", { required: true }), url.searchParams.get("raw") === "1"));
+  route("GET", `${prefix}/chat/file`, (_r, p, url) => chatFile(chatCwd(kind, p.id), str(url.searchParams.get("path") ?? undefined, "path", { required: true }), url.searchParams.get("raw") === "1", url.searchParams.get("download") === "1"));
   route("POST", `${prefix}/chat/paths`, async (req, p) => json(chatPaths(chatCwd(kind, p.id), strArray((await body(req)).paths, "paths"))));
 }
 
