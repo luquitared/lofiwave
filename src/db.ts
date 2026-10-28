@@ -129,6 +129,18 @@ CREATE TABLE IF NOT EXISTS targets (
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
+-- Run configs (src/configs.ts): custom instructions, an env of secrets, optional Docker settings; attached to a run
+-- or a workflow by name. env is a JSON object (its values are never listed in full); docker is JSON or ''.
+CREATE TABLE IF NOT EXISTS configs (
+  id           INTEGER PRIMARY KEY,
+  name         TEXT NOT NULL UNIQUE,
+  description  TEXT NOT NULL DEFAULT '',
+  instructions TEXT NOT NULL DEFAULT '',
+  env          TEXT NOT NULL DEFAULT '{}',
+  docker       TEXT NOT NULL DEFAULT '',
+  created_at   INTEGER NOT NULL,
+  updated_at   INTEGER NOT NULL
+);
 `);
 
 // ---- migrations for columns added after the first release
@@ -151,6 +163,7 @@ if (!typeCols.has("resume_args")) {
 }
 const workflowCols = new Set(db.query<{ name: string }, []>("PRAGMA table_info(workflows)").all().map((c) => c.name));
 if (!workflowCols.has("target")) db.exec("ALTER TABLE workflows ADD COLUMN target TEXT NOT NULL DEFAULT ''"); // a targets.name; '' = this machine
+if (!workflowCols.has("config")) db.exec("ALTER TABLE workflows ADD COLUMN config TEXT NOT NULL DEFAULT ''"); // a configs.name; '' = none
 const runCols = new Set(db.query<{ name: string }, []>("PRAGMA table_info(runs)").all().map((c) => c.name));
 // Pinned to the top of the Sessions rail. A column, not meta: a live run rewrites its meta from memory.
 if (!runCols.has("pinned_at")) db.exec("ALTER TABLE runs ADD COLUMN pinned_at INTEGER");
@@ -183,7 +196,7 @@ export type ProcessTypeRow = {
 };
 export type WorkflowRow = {
   id: number; name: string; type_name: string; cwd: string; prompt: string; extra_args: string; env: string;
-  schedule: string; enabled: number; timeout_sec: number; allow_overlap: number; target: string;
+  schedule: string; enabled: number; timeout_sec: number; allow_overlap: number; target: string; config: string;
   next_run_at: number | null; last_run_at: number | null; created_at: number; updated_at: number;
 };
 export type SessionRow = {
@@ -202,6 +215,7 @@ export type RunRow = {
 };
 
 export type TargetRow = { id: number; name: string; kind: string; config: string; created_at: number; updated_at: number };
+export type ConfigRow = { id: number; name: string; description: string; instructions: string; env: string; docker: string; created_at: number; updated_at: number };
 export type ApiKeyRow = { id: number; name: string; prefix: string; hash: string; created_by: string; created_at: number; last_used_at: number | null };
 
 export const ACTIVE_STATUSES = ["running"];

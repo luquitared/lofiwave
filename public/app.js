@@ -163,7 +163,7 @@ function attachPathPicker(input) {
 $$("input[data-pathpicker]").forEach(attachPathPicker);
 
 // ---------------------------------------------------------------- state
-let types = [], workflows = [], targets = [], selectedRun = null, logOffset = 0, activeTab = "console";
+let types = [], workflows = [], targets = [], configs = [], dockerInfo = null, selectedRun = null, logOffset = 0, activeTab = "console";
 // Console (session-first working view) state.
 let consoleData = { live: [], headless: [], adoptable: [], ended: [] }, consoleRun = null, railSig = "", paneSig = "";
 // The rail shows live sessions or recently ended ones; an ended one opens read-only, with a button to turn it back on.
@@ -377,7 +377,7 @@ function openStartDialog({ kind, type } = {}) {
   const allowed = type ? types.filter((t) => t.name === type) : types.filter((t) => !kind || t.kind === kind);
   sel.replaceChildren(...allowed.map((t) => h("option", { value: t.name }, `${t.name}` + (t.available ? "" : " · not found"))));
   sel.disabled = allowed.length <= 1;
-  sf.prompt.value = ""; sf.extra_args.value = ""; sf.timeout_sec.value = 0; $("#preview").textContent = "";
+  sf.prompt.value = ""; sf.extra_args.value = ""; sf.env.value = ""; sf.timeout_sec.value = 0; $("#preview").textContent = "";
   $("#start-title").textContent = type ? `Start ${type}` : kind === "agent" ? "New session" : "Start a process";
   $(".more", sf).open = false;
   $("#start-feedback").hidden = true;
@@ -386,6 +386,8 @@ function openStartDialog({ kind, type } = {}) {
   sf.target.replaceChildren(h("option", { value: "" }, "This machine"), ...sandboxes.map((t) => h("option", { value: t.name }, `${t.name} (${targetKindLabel(t)})`)));
   sf.target.value = "";
   $("#start-target-label").hidden = !sandboxes.length || kind === "app";
+  fillConfigSelect(sf.config, "");
+  $("#start-config-label").hidden = !configs.length;
   applyStartType();
   dlg.showModal();
   (sf.cwd.value ? sf.prompt : sf.cwd).focus();
@@ -407,12 +409,15 @@ function applyStartType() {
   sf.cwd.value = t?.default_cwd || sf.cwd.value;
   sf.cwd.placeholder = t?.default_cwd ? t.default_cwd : "start typing to search";
   sf.extra_args.placeholder = t?.name === "claude" ? "--permission-mode acceptEdits" : t?.name === "codex" ? "--sandbox workspace-write" : "";
+  const c = configs.find((x) => x.name === sf.config.value);
+  $("#start-config-hint").textContent = c ? configSummary(c) : "";
 }
 sf.type.onchange = applyStartType;
+sf.config.onchange = applyStartType;
 sf.target.onchange = applyStartType;
 $("#start-cancel").onclick = () => dlg.close();
 function startFormBody() {
-  return { type: sf.type.value, cwd: sf.cwd.value.trim(), prompt: sf.prompt.value, extra_args: sf.extra_args.value, timeout_sec: Number(sf.timeout_sec.value || 0), interactive: startsInteractive(typeByName(sf.type.value)), target: sf.target.value || undefined };
+  return { type: sf.type.value, cwd: sf.cwd.value.trim(), prompt: sf.prompt.value, extra_args: sf.extra_args.value, env: parseEnv(sf.env.value), timeout_sec: Number(sf.timeout_sec.value || 0), interactive: startsInteractive(typeByName(sf.type.value)), target: sf.target.value || undefined, config: sf.config.value || undefined };
 }
 $("#preview-btn").onclick = guard(async () => {
   if (!sf.reportValidity()) return;
@@ -519,7 +524,7 @@ const loadWorkflows = guard(async () => {
   $("#wf-table tbody").replaceChildren(...workflows.map((w) => h("tr", {},
     h("td", { class: "full" },
       h("button", { class: "wf-name", onclick: () => editWorkflow(w) }, w.name),
-      h("div", { class: "muted wf-sub", title: w.prompt || "" }, w.target ? h("span", { class: "pill" }, `☁ ${w.target}`) : "", w.target ? " " : "", `${w.type_name}${w.target ? "" : ` · ${shortCwd(w.cwd)}`}`, w.prompt ? ` · ${w.prompt.split("\n")[0]}` : "")),
+      h("div", { class: "muted wf-sub", title: w.prompt || "" }, w.target ? h("span", { class: "pill" }, `☁ ${w.target}`) : "", w.target ? " " : "", w.config ? h("span", { class: "pill" }, `⚙ ${w.config}`) : "", w.config ? " " : "", `${w.type_name}${w.target ? "" : ` · ${shortCwd(w.cwd)}`}`, w.prompt ? ` · ${w.prompt.split("\n")[0]}` : "")),
     h("td", { "data-l": "schedule", title: w.schedule ? `${w.schedule}\nnext: ${fmtTime(w.next_run_at)}` : "" },
       w.schedule ? h("span", {}, presetLabel(w.schedule), h("div", { class: "muted wf-sub" }, w.enabled ? `next ${fmtRel(w.next_run_at)}` : "paused")) : h("span", { class: "muted" }, "Manual")),
     h("td", { "data-l": "last" }, w.last_run ? runLink(w.last_run, [badge(w.last_run.status), ` ${fmtRel(w.last_run.started_at)}`]) : h("span", { class: "muted" }, "never")),
@@ -555,10 +560,12 @@ function openWorkflowDialog(w) {
     wf.extra_args.value = quoteArgs(w.extra_args); wf.env.value = envText(w.env);
     wf.timeout_sec.value = w.timeout_sec; wf.enabled.checked = w.enabled; wf.allow_overlap.checked = w.allow_overlap;
     fillTargetSelect(w.target);
+    fillConfigSelect(wf.config, w.config);
     $(".more", wf).open = Boolean(w.extra_args.length || Object.keys(w.env || {}).length || w.timeout_sec || w.allow_overlap);
   } else {
     wf.type.value = typeByName("claude") ? "claude" : wf.type.options[0]?.value;
     fillTargetSelect("");
+    fillConfigSelect(wf.config, "");
   }
   syncTarget();
   setSchedule(w?.schedule ?? "");
@@ -590,7 +597,7 @@ $("#wf-cancel").onclick = () => wdlg.close();
 async function saveWorkflow() {
   if (!wf.reportValidity()) return null;
   $("#wf-feedback").hidden = true;
-  const body = { name: wf.elements.namedItem("name").value.trim(), type: wf.type.value, cwd: wf.cwd.value.trim(), prompt: wf.prompt.value, target: wf.target.value, extra_args: wf.extra_args.value, env: parseEnv(wf.env.value), schedule: wf.schedule.value.trim(), timeout_sec: Number(wf.timeout_sec.value || 0), enabled: wf.enabled.checked, allow_overlap: wf.allow_overlap.checked };
+  const body = { name: wf.elements.namedItem("name").value.trim(), type: wf.type.value, cwd: wf.cwd.value.trim(), prompt: wf.prompt.value, target: wf.target.value, config: wf.config.value, extra_args: wf.extra_args.value, env: parseEnv(wf.env.value), schedule: wf.schedule.value.trim(), timeout_sec: Number(wf.timeout_sec.value || 0), enabled: wf.enabled.checked, allow_overlap: wf.allow_overlap.checked };
   const id = wf.elements.namedItem("id").value;
   try { return id ? await put(`/workflows/${id}`, body) : await post("/workflows", body); }
   catch (e) { $("#wf-feedback").textContent = e.message; $("#wf-feedback").hidden = false; return null; }
@@ -714,8 +721,82 @@ $("#target-check").onclick = async () => {
   else { $("#target-feedback").textContent = `Saved, but the check failed: ${c.error}`; $("#target-feedback").hidden = false; }
 };
 
+// ---------------------------------------------------------------- run configs (Settings): instructions, env, Docker
+/** A select of configs ("None" first); one that is gone stays selectable as "(missing)" so saving doesn't drop it silently. */
+function fillConfigSelect(sel, cur) {
+  sel.replaceChildren(h("option", { value: "" }, "None"), ...configs.map((c) => h("option", { value: c.name }, c.docker ? `${c.name} (docker: ${c.docker.image})` : c.name)));
+  if (cur && !configs.some((c) => c.name === cur)) sel.append(h("option", { value: cur }, `${cur} (missing)`));
+  sel.value = cur || "";
+}
+const configSummary = (c) => [c.instructions.trim() ? "instructions" : "", c.env_keys.length ? `${c.env_keys.length} env var${c.env_keys.length === 1 ? "" : "s"}` : "", c.docker ? `runs in docker (${c.docker.image})${dockerInfo && !dockerInfo.available ? ": docker isn't available here" : ""}` : ""].filter(Boolean).join(" · ") || "empty";
+const volumeText = (v) => `${v.source}:${v.target}${v.mode === "ro" ? ":ro" : ""}`;
+const loadConfigs = guard(async () => {
+  const r = await get("/configs");
+  configs = r.configs; dockerInfo = r.docker;
+  $("#docker-status").textContent = dockerInfo.available ? `Docker ${dockerInfo.version} is available.` : `Docker: ${dockerInfo.error}.`;
+  $("#config-table tbody").replaceChildren(...configs.map((c) => h("tr", {},
+    h("td", { class: "full" }, h("b", {}, c.name), c.description ? h("div", { class: "muted wf-sub" }, c.description) : ""),
+    h("td", { class: "trunc", "data-l": "instructions", title: c.instructions }, c.instructions.trim() ? c.instructions.split("\n")[0] : h("span", { class: "muted" }, "–")),
+    h("td", { class: "mono trunc", "data-l": "env", title: c.env_keys.join("\n") }, c.env_keys.length ? c.env_keys.join(", ") : h("span", { class: "muted" }, "–")),
+    h("td", { class: "mono trunc", "data-l": "docker", title: c.docker ? [c.docker.image, ...c.docker.volumes.map(volumeText)].join("\n") : "" },
+      c.docker ? [c.docker.image, c.docker.volumes.length ? h("div", { class: "muted wf-sub" }, `${c.docker.volumes.length} volume${c.docker.volumes.length === 1 ? "" : "s"}`) : ""] : h("span", { class: "muted" }, "–")),
+    h("td", { "data-l": "used by" }, c.workflows ? `${c.workflows} workflow${c.workflows === 1 ? "" : "s"}` : h("span", { class: "muted" }, "–")),
+    h("td", { class: "row" },
+      h("button", { class: "small", onclick: () => openConfigDialog(c) }, "Edit"),
+      h("button", { class: "small danger", onclick: () => confirmDo(`Delete config "${c.name}"?`, async () => { await del(`/configs/${encodeURIComponent(c.name)}`); toast("deleted", true); loadConfigs(); }) }, "Delete"),
+    ),
+  )));
+  if (!configs.length) $("#config-table tbody").replaceChildren(h("tr", {}, h("td", { colspan: 6, class: "muted empty" }, "No configs yet.")));
+});
+const cdlg = $("#config-dialog"), cf = $("#config-form");
+function openConfigDialog(c) {
+  cf.reset(); $("#config-feedback").hidden = true;
+  cf.orig.value = c?.name ?? "";
+  cf.elements.namedItem("name").value = c?.name ?? ""; cf.elements.namedItem("name").disabled = Boolean(c);
+  $("#config-title").textContent = c ? `Edit ${c.name}` : "New config";
+  cf.description.value = c?.description ?? "";
+  cf.instructions.value = c?.instructions ?? "";
+  cf.env.value = envText(c?.env);
+  cf.image.value = c?.docker?.image ?? "";
+  cf.volumes.value = (c?.docker?.volumes ?? []).map(volumeText).join("\n");
+  cf.user.value = c?.docker?.user ?? ""; cf.network.value = c?.docker?.network ?? ""; cf.docker_args.value = quoteArgs(c?.docker?.args ?? []);
+  $("#config-docker").open = Boolean(c?.docker);
+  $("#config-docker-status").textContent = !dockerInfo ? "" : dockerInfo.available ? `Docker ${dockerInfo.version} is available on this machine.` : `Docker isn't usable here right now: ${dockerInfo.error}. Runs with an image are refused until it is.`;
+  cdlg.showModal();
+  (c ? cf.instructions : cf.elements.namedItem("name")).focus();
+}
+$("#config-new-btn").onclick = () => openConfigDialog(null);
+$("#config-cancel").onclick = () => cdlg.close();
+$("#config-env-import").onclick = () => $("#config-env-file").click();
+$("#config-env-file").onchange = async (e) => {
+  const f = e.target.files?.[0];
+  if (!f) return;
+  const text = await f.text();
+  cf.env.value = (cf.env.value.trim() ? cf.env.value.replace(/\s+$/, "") + "\n" : "") + text;
+  e.target.value = "";
+};
+cf.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  if (!cf.reportValidity()) return;
+  $("#config-feedback").hidden = true;
+  const image = cf.image.value.trim();
+  const body = {
+    description: cf.description.value.trim(), instructions: cf.instructions.value,
+    // As .env text: the server reads export lines and quotes, and keeps values left masked.
+    env: cf.env.value,
+    docker: image ? { image, volumes: cf.volumes.value.split("\n").map((l) => l.trim()).filter(Boolean), user: cf.user.value.trim(), network: cf.network.value.trim(), args: cf.docker_args.value.trim() } : null,
+  };
+  const orig = cf.orig.value;
+  try {
+    if (orig) await put(`/configs/${encodeURIComponent(orig)}`, body);
+    else await post("/configs", { name: cf.elements.namedItem("name").value.trim(), ...body });
+  } catch (err) { $("#config-feedback").textContent = err.message; $("#config-feedback").hidden = false; return; }
+  toast("saved", true); cdlg.close(); loadConfigs();
+});
+
 function renderSettings() {
   loadTargets();
+  loadConfigs();
   const pref = themePref();
   $("#theme-picker").replaceChildren(...THEMES.map((t) => h("button", { class: "theme", role: "radio", "aria-checked": String(pref === t.id), onclick: () => { try { localStorage.setItem("ac_theme", t.id); } catch {} applyTheme(t.id); renderSettings(); } },
     h("span", { class: "theme-swatch", "aria-hidden": "true" }, ...t.swatch.map((c) => h("span", { style: `background:${c}` }))),
@@ -773,6 +854,7 @@ const refreshRunDetail = guard(async (full = false) => {
         h("summary", { class: "muted" }, `${r.type_name} · ${shortCwd(r.cwd)} · ${r.trigger} · ${fmtRel(r.started_at)}${r.meta?.remote_url ? " · " : ""}`, r.meta?.remote_url ? h("a", { href: r.meta.remote_url, target: "_blank", onclick: (e) => e.stopPropagation() }, "open on web ↗") : ""),
       h("dl", {},
         h("dt", {}, "type"), h("dd", {}, r.type_name),
+        r.meta?.config ? h("dt", {}, "config") : "", r.meta?.config ? h("dd", {}, r.meta.config, r.meta.docker ? h("span", { class: "muted" }, `  in docker: ${r.meta.docker.image} (container ${r.meta.docker.container})`) : "") : "",
         r.meta?.target ? h("dt", {}, "target") : "", r.meta?.target ? h("dd", {}, `${r.meta.target} (E2B)`, r.meta.e2b?.sandbox_id ? h("span", { class: "muted" }, `  sandbox ${r.meta.e2b.sandbox_id}${r.meta.e2b.paused ? " (paused while idle)" : ""}${r.meta.e2b.out_files ? ` · ${r.meta.e2b.out_files} file(s) from out/ in ${r.meta.e2b.out_dir}` : ""}`) : h("span", { class: "muted" }, "  (starting the sandbox…)")) : "",
         h("dt", {}, "cwd"), h("dd", {}, r.cwd),
         h("dt", {}, "command"), h("dd", {}, quoteArgs([r.command, ...r.args])),
@@ -1776,7 +1858,7 @@ document.addEventListener("visibilitychange", () => !document.hidden && refresh(
 
 (async () => {
   applyTheme(); // the page head already set the scheme; this syncs theme-color
-  await Promise.all([loadSystem(), loadTypes(), loadWorkflows(), loadMe(), loadTargets()]);
+  await Promise.all([loadSystem(), loadTypes(), loadWorkflows(), loadMe(), loadTargets(), loadConfigs()]);
   const m = location.hash.match(/^#(\w+)(?:\/(\w+))?/);
   if (m && m[1] === "runs" && m[2]) openRun(Number(m[2]));
   else if (m && (m[1] === "sessions" || m[1] === "console") && /^\d+$/.test(m[2] || "")) openSessionLink(Number(m[2]));

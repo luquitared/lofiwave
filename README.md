@@ -8,6 +8,7 @@ A small web console for the coding agents running on your machine: Claude Code, 
 - **Start, stop and restart** agents in a chosen folder. Every agent session is **interactive**: the real TUI in a tmux session you can watch and type into from the browser, and with Claude Code's Remote Control on, in the Claude app too. (Headless `claude -p` stays available through the API.)
 - **Turn on Remote Control** for a Claude Code session that is already running.
 - **Run targets**: give a session or workflow run its own [E2B](https://e2b.dev) sandbox VM instead of this machine, whose live terminal you still open and type into from the browser.
+- **Run configs**: a reusable bundle of custom instructions, environment variables (API keys, pasted as a `.env` file) and, optionally, a Docker image with volumes, attached to any session or workflow.
 - **Workflows**: a saved agent launch you run by hand or on a cron schedule. Each run is a live session you can watch and step into; it closes itself when the agent is done. Every run is kept: status, duration, full logs.
 - A REST API for all of it, documented at `/api/docs`, so other agents can drive it too. The *Connect* page gives you the URL to hand an agent and makes API keys for it.
 
@@ -114,7 +115,7 @@ Environment variables, or `KEY=VALUE` lines in `.env`:
 
 ```
 lofiwave/
-├── src/       server.ts (HTTP + API), db.ts, runner.ts, targets.ts, e2b.ts, jobs.ts, capacity.ts, files.ts, connect.ts, vtscreen.ts, scheduler.ts, cron.ts, procs.ts, agents.ts, terminal.ts
+├── src/       server.ts (HTTP + API), db.ts, runner.ts, targets.ts, configs.ts, e2b.ts, jobs.ts, capacity.ts, files.ts, connect.ts, vtscreen.ts, scheduler.ts, cron.ts, procs.ts, agents.ts, terminal.ts
 ├── public/    the single-page UI
 ├── scripts/   start.sh, service installers, Claude Code session hook, Tailscale helpers
 └── data/      database, logs, token (created on first start, git-ignored)
@@ -154,6 +155,14 @@ curl -H "authorization: Bearer $TOKEN" -X POST localhost:7770/api/process-types 
 A workflow with an agent type runs **interactive** (when tmux is installed), so you can watch it in *Sessions*, interrupt it or send it a message while it works. It doesn't open a desktop terminal window. A claude run **closes itself** once the agent has finished and stayed idle for `IDLE_STOP_SEC` (default 120s) with nobody watching it (a browser terminal, the simple view, a desktop window or `tmux attach`; the wait starts over while someone is); it is recorded as `success`, with its last screen saved in the log. Other interactive claude runs do the same after `AGENT_IDLE_STOP_SEC` (default 30 minutes) unless started with `stop_when_idle: false`. It is never closed while it waits on a permission prompt. Codex reports no idle state, so a Codex workflow run stays open until you stop it or its `timeout_sec` fires.
 
 **Target** – where a workflow runs. Default: this machine. A workflow keeps its own target; *Run now* takes a different one for a single run (`POST /api/workflows/:id/run {"target": "..."}`).
+
+**Config** – a named, reusable bundle you attach to a run (*Config* in *New session* and in a workflow, `config` in `POST /api/processes` and `POST /api/workflows`); create them under *Settings → Run configs*. It has:
+
+- **instructions**: custom instructions for the agent. `claude` gets them as `--append-system-prompt` (unless the args already pick a system prompt), `codex` as `-c developer_instructions=…`. For any other type, put `{instructions}` in the type's args (one arg, like `--system={instructions}`; it is dropped when the config has none); every run with a config also gets them in `LOFIWAVE_INSTRUCTIONS`, and `LOFIWAVE_CONFIG` holds the config's name.
+- **env**: `KEY=VALUE` pairs such as API keys. Paste or import a `.env` file: plain `FOO=bar` and `export FOO=bar` lines, `#` comments, and "double" or 'single' quoted values are read. The values are secrets: stored in lofiwave's database, listed masked (`••••` plus the last 4 characters of long values), kept off the run record, the log and tmux's command line, and passed to the agent's process only. Saving a masked value back keeps the stored one, so you can change one key and leave the rest. lofiwave's own credentials (`AGENT_CONSOLE_TOKEN`, `AUTH_TOKEN`, …) can't be set from a config.
+- **docker** (optional): `image`, `volumes` (a host path or a named volume → a path in the container, `ro` or `rw`), and `user` (`host` = this machine's uid:gid, so files in the folder stay yours), `network`, and more `docker run` flags. A run with a docker config runs `docker run --rm --init -it …` instead of the agent directly (in tmux, so the terminal works as usual): the run's folder is mounted at the same path and is the working directory, and the env goes in by name (`-e KEY`), never in the command line. The image must have the agent installed (`claude`, `codex`, or the type's command), and its login or API key must reach it, usually through the config's env. In a container lofiwave can't read the agent's registry or transcript, so activity comes from the screen only, idle-stop is off, and what reads transcripts (replies to `/message`, Transcript, Resume here) doesn't work. A docker config can't be combined with an E2B target. If docker isn't installed or its daemon isn't answering, starting a run with such a config is refused with that reason (`GET /api/docker`, and *Settings*, show it too).
+
+**Env precedence**, lowest first: lofiwave's own environment < the type's env < the config's env < the run's (or the workflow's) env. A run's prompt is the message it starts with; the config's instructions ride beside it as the system prompt, unless the run's `extra_args` set one themselves (`--system-prompt`, `--append-system-prompt`), which then wins. Named volumes created by docker are root-owned, so with `user: "host"` they are not writable; leave `user` blank for those.
 
 **E2B target** – an `e2b` target runs each run in its own [E2B](https://e2b.dev) sandbox (a Firecracker microVM) and keeps the live terminal: an interactive run's agent runs in the sandbox, and *Sessions* shows it as a real terminal just like a tmux one (several viewers, colours, resize, Ctrl-keys), plus the simple view (`/screen` and `/keys` work too). Create one under *Settings → Run targets*, or with the API, with `E2B_API_KEY` in lofiwave's environment; then pick it under *Runs on* in *New session*:
 
@@ -219,8 +228,8 @@ API keys are named and revocable; make them on the *Connect* page. Runs started 
 | | |
 |---|---|
 | `GET /api/processes?type=&kind=` | running processes matching any type (filter by type name or kind): `{pid, ppid, user, cmd, cwd, elapsedSec, rssKb, cpu, type, managed, child, run_id, workflow_name, session}` – `session` is `{session_id, agent, title, name, status, model, web_url, resume_cmd, ...}` or null |
-| `POST /api/processes` | start one: `{type, cwd?, prompt?, extra_args?, env?, timeout_sec?, interactive?, stop_when_idle?, idle_stop_sec?, trust?, terminal?, group?, parent_run?, files?, mkdir_cwd?, queue?}` → 201 with the run record. `cwd` falls back to the type's `default_cwd`. `interactive` (default: true for agent types when tmux is installed) starts it in a tmux session that stays open (see Concepts). An interactive claude run ends once it has been idle, with nobody watching, for `AGENT_IDLE_STOP_SEC` (default 1800); `stop_when_idle: true` makes that `IDLE_STOP_SEC` (120, like a workflow run), `false` keeps it open, and `idle_stop_sec` sets the seconds (0 = never). `trust` (default true) marks the folder trusted for claude and answers its trust dialog (see *Security*). A switch in `extra_args` that the type's template already passes (`--remote-control`) is not passed twice. The rest is for running agents as jobs (see *Swarms* below): `group` tags the run, `parent_run` (or an `X-Lofiwave-Run: <run id>` header) names the run that started it, `files` (`{"rel/path": "utf-8 text" or {"base64": "..."}}`) are written into `cwd` before it starts, `mkdir_cwd: true` creates a missing `cwd` (under `CWD_ROOTS`), and when the machine is full an agent run gets **429** unless `queue: true`, which answers **202** with a `queued` run. |
-| `POST /api/processes/preview` | same body; returns the `{command, args}` that would be executed, without running |
+| `POST /api/processes` | start one: `{type, config?, cwd?, prompt?, extra_args?, env?, timeout_sec?, interactive?, stop_when_idle?, idle_stop_sec?, trust?, terminal?, group?, parent_run?, files?, mkdir_cwd?, queue?}` → 201 with the run record. `cwd` falls back to the type's `default_cwd`. `interactive` (default: true for agent types when tmux is installed) starts it in a tmux session that stays open (see Concepts). An interactive claude run ends once it has been idle, with nobody watching, for `AGENT_IDLE_STOP_SEC` (default 1800); `stop_when_idle: true` makes that `IDLE_STOP_SEC` (120, like a workflow run), `false` keeps it open, and `idle_stop_sec` sets the seconds (0 = never). `trust` (default true) marks the folder trusted for claude and answers its trust dialog (see *Security*). A switch in `extra_args` that the type's template already passes (`--remote-control`) is not passed twice. The rest is for running agents as jobs (see *Swarms* below): `group` tags the run, `parent_run` (or an `X-Lofiwave-Run: <run id>` header) names the run that started it, `files` (`{"rel/path": "utf-8 text" or {"base64": "..."}}`) are written into `cwd` before it starts, `mkdir_cwd: true` creates a missing `cwd` (under `CWD_ROOTS`), and when the machine is full an agent run gets **429** unless `queue: true`, which answers **202** with a `queued` run. |
+| `POST /api/processes/preview` | same body; returns the `{command, args}` that would be executed, without running (with a docker config, the whole `docker run …`, secrets by name only) |
 | `DELETE /api/processes/:pid?force=1` | SIGTERM (or SIGKILL with `force`) the process **tree**. Works on unmanaged processes too. If the pid belongs to a run, the run is marked `killed`. |
 | `POST /api/processes/:pid/remote-control` | Turn on Remote Control for a claude session that is already running, so it shows up in the Claude app. If it is in a tmux pane (an interactive run, or any claude started inside tmux), or on macOS in an iTerm or Terminal.app tab (found by its tty; the first time, macOS asks to let lofiwave control that app), the console clears its input box (Ctrl+Y brings a draft back) and types `/remote-control`, so the session keeps running; it refuses while the session is working. → `{status: "enabled"\|"pending"\|"already", web_url}`. Anywhere else there is nothing to type into: `{replace: true, terminal?}` stops the process and reopens the same conversation here in tmux with the type's `resume_args` → 201 `{status: "replaced", run}`; without `replace` it answers 409. |
 
@@ -232,7 +241,7 @@ Restarting is done through the run: `POST /api/runs/:id/restart`.
 |---|---|
 | `GET /api/workflows` | list (includes `next_run_at`, `last_run_at`, `last_run: {id, status, started_at, ended_at}`) |
 | `GET /api/workflows/:id` | one |
-| `POST /api/workflows` | create: `{name, type, cwd?, prompt?, extra_args?, env?, schedule?, enabled?, timeout_sec?, allow_overlap?, target?}` → 201. `target` is a target's name (`""` = this machine); with one, `cwd` is optional: the folder here its claude conversation is filed under, to resume. |
+| `POST /api/workflows` | create: `{name, type, cwd?, prompt?, extra_args?, env?, schedule?, enabled?, timeout_sec?, allow_overlap?, target?, config?}` → 201. `config` is a config's name (`""` = none); its env is overridden by the workflow's own `env`. `target` is a target's name (`""` = this machine); with one, `cwd` is optional: the folder here its claude conversation is filed under, to resume. |
 | `PUT /api/workflows/:id` | partial update of the same fields (e.g. `{"enabled": false}`) |
 | `DELETE /api/workflows/:id` | delete; past runs are kept (their `workflow_id` becomes null, `workflow_name` stays) |
 | `POST /api/workflows/:id/run` | run now → 201 with the run record; 409 if already running and overlap is off. Optional `{target}` runs it there this once (`""` = this machine). |
@@ -249,6 +258,19 @@ Restarting is done through the run: `POST /api/runs/:id/restart`.
 | `POST /api/targets/:name/check` | is it usable from here: `{ok, running, error?}` (the key works; how many sandboxes it has running) |
 
 `POST /api/processes` takes `target` too (and, for an e2b target, `input_dir`; agents start interactive there). A run on a target has `meta.target` and, once started, `meta.e2b: {tag, sandbox_id, pid, tmux?, paused?, out_dir?, out_files?}`.
+
+### Configs
+
+| | |
+|---|---|
+| `GET /api/configs` | `{docker: {available, path, version?, error?}, configs: [{id, name, description, instructions, env, env_keys, docker, workflows, created_at, updated_at}]}`. `env` is `{KEY: "••••abcd"}`, masked; `workflows` = how many use it |
+| `GET /api/configs/:name` | one |
+| `POST /api/configs` | create: `{name, description?, instructions?, env?, docker?}` → 201. `env` is an object of strings or the text of a `.env` file. `docker` is `{image, volumes?: ["source:target[:ro]" or {source, target, mode: "ro"\|"rw"}], user?: "host"\|"uid[:gid]", network?, args?: ["--memory", "2g"] or "--memory 2g"}`, or null/absent for none. `source` is an absolute path, `~/…` or a volume name; `target` an absolute path in the container |
+| `PUT /api/configs/:name` | partial update of the same fields. An `env` value sent back as listed (masked) keeps the stored value; keys left out are removed |
+| `DELETE /api/configs/:name` | delete (refused while a workflow uses it) |
+| `GET /api/docker` | is docker installed and its daemon answering: `{available, path, version?, error?}` |
+
+`POST /api/processes` and `POST /api/workflows` take `config` (a name; 404 if unknown). A run with a config has `meta.config` and, in docker, `meta.docker: {image, container}`; a restart keeps its config.
 
 ### Runs
 
