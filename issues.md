@@ -46,9 +46,12 @@ stream of the agent's PTY stayed silent after a resume, so the terminal went bla
 
 - [ ] A scheduled workflow that finds the machine full is recorded as an `error` run; it could queue instead.
 - [ ] The UI shows `queued` runs in the run list but has no button to cancel one (`POST /api/runs/:id/kill`
-      does) and doesn't show the capacity (`GET /api/system` → `capacity`).
-- [ ] The default `MAX_AGENT_RUNS` assumes ~600 MB per agent. Measure real claude/codex RSS on a small box
-      and count agents the console didn't start (they use memory but hold no slot; only `MIN_FREE_MEM_MB` sees them).
+      does).
+- [x] The UI shows the capacity: *Advanced → System* (`GET /api/system/usage`) has memory, CPU, swap and disk,
+      each live run's whole process tree, and how many more agents fit and which limit binds.
+- [ ] The default `MAX_AGENT_RUNS` assumes ~600 MB per agent. *Advanced → System* now measures the live runs'
+      real RSS (and shows agents the console didn't start, which use memory but hold no slot); still to do: read
+      it on a small box and use the measurement for the default instead of the guess.
 - [ ] No way to delete files in a run's folder over the API, or to write outside `cwd` (e.g. a shared input folder
       for a whole group).
 

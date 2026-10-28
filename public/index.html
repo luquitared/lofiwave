@@ -49,7 +49,7 @@
   <div class="page-top">
     <h1 id="page-title">Sessions</h1>
     <div class="subnav" id="subnav" role="tablist" aria-label="Advanced" hidden>
-      <button data-sub="agents">Processes</button><button data-sub="apps">Apps</button><button data-sub="runs">Runs</button><button data-sub="types">Types</button><button data-sub="usage">Usage</button>
+      <button data-sub="agents">Processes</button><button data-sub="apps">Apps</button><button data-sub="runs">Runs</button><button data-sub="types">Types</button><button data-sub="system">System</button><button data-sub="usage">Usage</button>
     </div>
   </div>
 
@@ -138,6 +138,22 @@
       <p class="muted">Saved in this browser.</p>
       <div class="themes" id="theme-picker" role="radiogroup" aria-label="Color scheme"></div>
     </div>
+  </section>
+
+  <section id="tab-system" class="tab">
+    <div id="sys-headline" class="sys-headline" aria-live="polite"></div>
+    <div id="sys-meters" class="sys-meters"></div>
+    <h3 class="section-title">lofiwave <span id="sys-lw-total" class="muted"></span></h3>
+    <table id="sys-runs-table">
+      <thead><tr><th>Process</th><th>Procs</th><th>Memory</th><th>CPU</th><th>Up</th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <h3 class="section-title">Agents started elsewhere <span id="sys-outside-total" class="muted"></span></h3>
+    <table id="sys-outside-table">
+      <thead><tr><th>Agent</th><th>Command</th><th>Procs</th><th>Memory</th><th>CPU</th><th>Up</th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <p class="muted sys-note">Memory is resident memory (RSS) summed over each process tree: an agent with its node and MCP servers counts as one. Shared pages count in every process that maps them, so the sums can exceed what the machine reports as used. CPU is in % of one core. Updates every few seconds while this page is open.</p>
   </section>
 
   <section id="tab-usage" class="tab">

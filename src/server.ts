@@ -23,6 +23,7 @@ import { turnChanges, turnFileDiff, dropCheckpoints } from "./chat/checkpoints";
 import { actor, identify, touch, online, passwordMatches, cleanName, makeSession, sessionCookie, loginBlocked, loginFailed, TOKEN_ACTOR, KEY_ACTOR_PREFIX, createApiKey } from "./auth";
 import { startJob, startQueue } from "./jobs";
 import { capacity } from "./capacity";
+import { systemUsage } from "./usage";
 import { planLimits } from "./limits";
 import { insidePath, listDir, writeFiles, decodeContent, extractInto, archiveOf, resultsOf, makeFolder } from "./files";
 
@@ -250,6 +251,9 @@ route("GET", "/api/system", async () => {
     uptime_ms: now() - startedAt, addresses, tailscale, server_time: now(), capacity: capacity(),
   });
 });
+
+/** Memory, CPU and disk, what lofiwave and each live run use (whole process trees), outside agents, and how many more fit. */
+route("GET", "/api/system/usage", async () => json(await systemUsage()));
 
 /** Claude and Codex plan limits: used %, resets and pace per window, as of each agent's last request here. */
 route("GET", "/api/system/limits", () => json(planLimits()));
