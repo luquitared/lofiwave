@@ -5,6 +5,34 @@ Open work, newest first within each status. One heading per issue; close it by m
 
 ## Open
 
+### #9 Chat: a message sometimes shows twice while the agent is working
+*Opened 2026-10-27 · seen on a live run with several background agents*
+
+Most likely a streamed copy (`stream:<message_id>`, from `MessageDisplay`) that never matched its transcript
+message. `items()` in `src/chat/index.ts` drops a stream only when (a) a transcript assistant item written no
+earlier than 3s before the stream began starts with its text, or (b) the session isn't busy and the stream
+is over 30s old. Background agents keep the session busy, so if (a) misses, the copy stays until the turn ends.
+
+Ruled out on Claude Code with a test session and the run's transcript:
+- Joined deltas equal the transcript text, markdown included (lists, nested lists, tables, bold, code).
+- Timing: the stream starts with the first paragraph and the transcript line is written at the end, so (a)'s
+  window holds, also for 10-paragraph replies and for replies to a task notification (which get a new
+  `prompt_id` without a `UserPromptSubmit`).
+- Subagent text doesn't fire `MessageDisplay`.
+- The client drops `remove`d ids and re-renders their turn (`public/chat.js`).
+
+Cause, caught on 2026-10-28: `MessageDisplay` flushes only whole lines while a message streams. The rest goes
+out in the final flush, which fires when the whole API message ends, after any tool_use in it has streamed.
+The transcript line is written as soon as the text block is done. So a one-line message followed by a tool call
+streams *after* its transcript line: here 3.3s after it (text at 17:47:52.2, tool_use at 17:47:55.5), past (a)'s
+3s window. Fix: (a) now accepts any assistant item since the stream's turn began (the last non-queued prompt
+or task notification at or before the stream), not 3s before the stream (`streamLanded`, `test/streams.test.ts`).
+
+- [ ] Confirm on a live run, then close.
+- [ ] Catch one live: dump `streamsFor(run)` and the last transcript assistant items when it shows. Log
+      unmatched streams (text head, `at`, nearest assistant item's `startedAt`) to make that easy.
+- [ ] Whatever the cause, match on `message_id` → transcript `message.id` if `MessageDisplay` ever exposes it,
+      and drop a stream once the next assistant item after it lands, busy or not.
 ### #8 Run configs: what's left
 *Opened 2026-10-25 · after the first version of run configs (instructions, env, docker)*
 
