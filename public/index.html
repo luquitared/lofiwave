@@ -49,7 +49,7 @@
   <div class="page-top">
     <h1 id="page-title">Sessions</h1>
     <div class="subnav" id="subnav" role="tablist" aria-label="Advanced" hidden>
-      <button data-sub="agents">Processes</button><button data-sub="apps">Apps</button><button data-sub="runs">Runs</button><button data-sub="types">Types</button>
+      <button data-sub="agents">Processes</button><button data-sub="apps">Apps</button><button data-sub="runs">Runs</button><button data-sub="types">Types</button><button data-sub="usage">Usage</button>
     </div>
   </div>
 
@@ -130,6 +130,11 @@
       <p class="muted">Saved in this browser.</p>
       <div class="themes" id="theme-picker" role="radiogroup" aria-label="Color scheme"></div>
     </div>
+  </section>
+
+  <section id="tab-usage" class="tab">
+    <div id="usage-cards"></div>
+    <p class="muted usage-note">Plan limits as of each agent's last request on this machine. Claude's come from the statusline of sessions lofiwave started; Codex's from its rollouts in <code>~/.codex/sessions</code>, which every Codex session writes. A bar's tick is where an even pace through the window would be by now.</p>
   </section>
 
   <section id="tab-runs" class="tab">

@@ -196,6 +196,7 @@ API keys are named and revocable; make them on the *Connect* page. Runs started 
 |---|---|
 | `GET /api/health` | `{ok, uptime_ms}` |
 | `GET /api/system` | hostname, platform, bun version, bind host/port, data dir, LAN addresses, tailscale `{state, ips, dns_name}` (null if not installed) |
+| `GET /api/system/limits` | Claude and Codex plan limits (*Advanced → Usage*): `{claude, codex, server_time}`, each null or `{plan, at, windows: [{label, used_percent, window_minutes, resets_at, reset, expected_percent}]}`. As of the agent's last request here: Claude's from the statusline of runs lofiwave started, Codex's from the newest rollout in `~/.codex/sessions`. `reset`: the window has started over since (used 0); `expected_percent`: where an even pace would be by now |
 
 ### Paths
 

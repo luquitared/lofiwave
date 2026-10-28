@@ -12,6 +12,7 @@
 import { db, type RunRow } from "../db";
 import { checkpoint } from "./checkpoints";
 import { adoptSession } from "../runner";
+import { recordClaudeLimits } from "../limits";
 
 /** One assistant message as it streams: `parts[index]` is each delta. */
 export type Stream = { messageId: string; promptId: string; parts: string[]; final: boolean; at: number };
@@ -98,6 +99,7 @@ export function statuslineHook(req: Request, p: any) {
   };
   const prev = usage.get(run.id);
   usage.set(run.id, next);
+  recordClaudeLimits(limits); // the plan's limits, for Advanced → Usage (../limits.ts)
   if (!prev || JSON.stringify({ ...prev, at: 0 }) !== JSON.stringify({ ...next, at: 0 })) changed(run.id, "usage");
 }
 

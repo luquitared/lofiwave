@@ -22,6 +22,7 @@ import { turnChanges, turnFileDiff, dropCheckpoints } from "./chat/checkpoints";
 import { actor, identify, touch, online, passwordMatches, cleanName, makeSession, sessionCookie, loginBlocked, loginFailed, TOKEN_ACTOR, KEY_ACTOR_PREFIX, createApiKey } from "./auth";
 import { startJob, startQueue } from "./jobs";
 import { capacity } from "./capacity";
+import { planLimits } from "./limits";
 import { insidePath, listDir, writeFiles, decodeContent, extractInto, archiveOf, resultsOf, makeFolder } from "./files";
 
 const PUBLIC_DIR = join(config.root, "public");
@@ -247,6 +248,9 @@ route("GET", "/api/system", async () => {
     uptime_ms: now() - startedAt, addresses, tailscale, server_time: now(), capacity: capacity(),
   });
 });
+
+/** Claude and Codex plan limits: used %, resets and pace per window, as of each agent's last request here. */
+route("GET", "/api/system/limits", () => json(planLimits()));
 
 // ---- people (with PASSWORD set: name + shared password login, and who's online)
 route("GET", "/api/auth", () => json({ password_login: Boolean(config.password) }));

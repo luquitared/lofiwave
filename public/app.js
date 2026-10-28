@@ -171,9 +171,9 @@ let consoleView = localStorage.getItem("ac_console_view") === "ended" ? "ended" 
 const typeByName = (n) => types.find((t) => t.name === n);
 
 // ---------------------------------------------------------------- tabs
-// Main tabs: Sessions, Workflows, Connect, and Advanced, which holds the rest (processes, apps, runs, types).
-const ADVANCED = ["agents", "apps", "runs", "types"];
-const TITLES = { console: "Sessions", workflows: "Workflows", connect: "Connect", settings: "Settings", agents: "Advanced", apps: "Advanced", runs: "Advanced", types: "Advanced" };
+// Main tabs: Sessions, Workflows, Connect, and Advanced, which holds the rest (processes, apps, runs, types, usage).
+const ADVANCED = ["agents", "apps", "runs", "types", "usage"];
+const TITLES = { console: "Sessions", workflows: "Workflows", connect: "Connect", settings: "Settings", agents: "Advanced", apps: "Advanced", runs: "Advanced", types: "Advanced", usage: "Advanced" };
 $$("nav button").forEach((b) => b.addEventListener("click", () => switchTab(b.dataset.tab)));
 $$("#subnav button").forEach((b) => b.addEventListener("click", () => switchTab(b.dataset.sub)));
 function switchTab(name, push = true) {
@@ -1724,6 +1724,37 @@ function emptyPane() {
   );
 }
 
+// ---------------------------------------------------------------- usage (plan limits, GET /api/system/limits)
+const AGENT_NAMES = { claude: "Claude", codex: "Codex" };
+let limitsAt = 0;
+const loadLimits = guard(async () => {
+  if (Date.now() - limitsAt < 15000 && $("#usage-cards").childElementCount) return; // the numbers change per request, not per second
+  limitsAt = Date.now();
+  const l = await get("/system/limits");
+  $("#usage-cards").replaceChildren(...["claude", "codex"].map((a) => limitsCard(a, l[a])));
+});
+function limitsCard(agent, d) {
+  const head = h("div", { class: "card-head" }, h("h2", {}, AGENT_NAMES[agent], d?.plan ? h("span", { class: "pill usage-plan" }, d.plan) : ""),
+    d ? h("span", { class: "muted", title: fmtTime(d.at) }, `as of ${fmtRel(d.at)}`) : "");
+  if (!d || !d.windows.length) {
+    return h("div", { class: "card" }, head, h("p", { class: "muted" }, agent === "claude"
+      ? "No limits yet. They appear once a Claude session started from lofiwave has made a request."
+      : "No limits yet. They appear once Codex has made a request on this machine."));
+  }
+  return h("div", { class: "card" }, head, ...d.windows.map(limitRow));
+}
+function limitRow(w) {
+  const used = w.used_percent, level = used >= 90 ? "bad" : used >= 70 ? "warn" : "ok";
+  const pace = w.expected_percent == null ? "" : used > w.expected_percent + 5 ? "ahead of pace" : used + 5 < w.expected_percent ? "under pace" : "on pace";
+  const resets = w.reset ? "reset since" : w.resets_at ? `resets ${fmtRel(w.resets_at)} · ${fmtTime(w.resets_at)}` : "";
+  return h("div", { class: "usage-row" },
+    h("div", { class: "usage-line" }, h("b", {}, w.label), h("span", { class: `usage-pct ${level}` }, `${used}% used`)),
+    h("div", { class: "usage-bar", role: "meter", "aria-valuemin": "0", "aria-valuemax": "100", "aria-valuenow": String(used), "aria-label": w.label },
+      h("div", { class: `usage-fill ${level}`, style: `width:${Math.min(100, used)}%` }),
+      w.expected_percent == null ? "" : h("div", { class: "usage-tick", style: `left:${w.expected_percent}%`, title: `even pace: ${w.expected_percent}% by now` })),
+    h("div", { class: "usage-meta muted" }, [resets, pace].filter(Boolean).join(" · ")));
+}
+
 // ---------------------------------------------------------------- refresh loop
 function refresh() {
   if (document.hidden) return;
@@ -1736,6 +1767,7 @@ function refresh() {
   else if (activeTab === "settings") renderSettings();
   else if (activeTab === "runs") { loadRuns(); if (selectedRun) refreshRunDetail(); }
   else if (activeTab === "types") loadTypes();
+  else if (activeTab === "usage") loadLimits();
 }
 setInterval(refresh, 3000);
 setInterval(loadSystem, 30000);
