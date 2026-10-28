@@ -10,6 +10,14 @@ import { config } from "./config";
 
 const MB = 2 ** 20;
 
+/** Available MB from `vm_stat` output (free + inactive + speculative + purgeable pages), or null if it isn't that. */
+export function parseVmStat(out: string): number | null {
+  const page = Number(/page size of (\d+) bytes/.exec(out)?.[1] ?? 4096);
+  const pages = (k: string) => Number(new RegExp(`^Pages ${k}:\\s+(\\d+)`, "m").exec(out)?.[1] ?? 0);
+  const n = pages("free") + pages("inactive") + pages("speculative") + pages("purgeable");
+  return n ? Math.floor((n * page) / MB) : null;
+}
+
 /** Memory that can be handed to a new process without swapping, in MB (Linux MemAvailable; macOS free + inactive + purgeable pages). */
 export function memAvailableMb(): number {
   try {

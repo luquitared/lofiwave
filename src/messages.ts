@@ -223,6 +223,7 @@ function getMessage(runId: number, mid: number): MessageRow {
 function untracked(run: RunRow): string | null {
   const meta = JSON.parse(run.meta || "{}");
   if (meta.target) return "the run is on a target: its transcript is only copied back when it ends";
+  if (meta.docker) return "the run is in a container: its transcript is inside it, not on this machine";
   if (basename(run.command) !== "claude") return "replies are read from Claude Code transcripts; for other agents read GET /api/runs/:id/sessions/:session_id/messages";
   return null;
 }

@@ -150,9 +150,32 @@ export type Todo = { text: string; active: string; status: string };
 
 /** How many of a run's latest turns get their changes sent. */
 const CHANGES_TURNS = 100;
-/** A stream counts as the transcript's message when that message was written no earlier than this before it began. */
+/** A stream may match a transcript message written up to this long before its turn's prompt (clocks, write order). */
 const STREAM_MATCH_SLACK_MS = 3000;
 const norm = (s: string) => s.replace(/\s+/g, " ").trim();
+
+/**
+ * Whether the transcript has a stream's message: an assistant item written since the stream's turn began whose text
+ * starts with what streamed. Bounding by the turn, not by the stream's own start: text that doesn't end on a newline
+ * streams only when the whole API message ends, after any tool call in it, so a one-line message followed by a
+ * tool call starts streaming well after the transcript has it.
+ */
+export function streamLanded(items: Item[], text: string, at: number): boolean {
+  const n = norm(text);
+  let since = at - STREAM_MATCH_SLACK_MS;
+  for (let i = items.length - 1; i >= 0; i--) {
+    const it = items[i] as any;
+    if (it.kind !== "user" || it.queued || (it.startedAt ?? 0) > at) continue;
+    since = Math.min(since, (it.startedAt ?? 0) - STREAM_MATCH_SLACK_MS);
+    break;
+  }
+  for (let i = items.length - 1; i >= 0; i--) {
+    const it = items[i] as any;
+    if ((it.startedAt ?? 0) < since) break;
+    if (it.kind === "assistant" && !it.streaming && norm(it.text).startsWith(n)) return true;
+  }
+  return false;
+}
 
 class Feed {
   subs = new Set<ServerWebSocket<ChatData>>();
@@ -233,14 +256,12 @@ class Feed {
     if (!runId || !this.source.live) return base;
     const list = streamsFor(runId);
     if (!list.length) return base;
-    const said = base.filter((i) => i.kind === "assistant").slice(-40).map((i) => ({ text: norm((i as any).text), at: i.startedAt ?? 0 }));
     const last = base.at(-1);
     const out: Item[] = [];
     for (const s of list) {
       const text = s.parts.join("");
-      const n = norm(text);
-      if (!n) continue;
-      const landed = said.some((a) => a.at >= s.at - STREAM_MATCH_SLACK_MS && a.text.startsWith(n));
+      if (!norm(text)) continue;
+      const landed = streamLanded(base, text, s.at);
       const stale = this.status.status !== "busy" && Date.now() - s.at > 30_000;
       if (landed || stale) { dropStream(runId, s.messageId); continue; }
       out.push({ id: `stream:${s.messageId}`, kind: "assistant", text, streaming: true, status: "running", turnId: last?.turnId ?? "start",

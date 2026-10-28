@@ -5,6 +5,52 @@ Open work, newest first within each status. One heading per issue; close it by m
 
 ## Open
 
+### #9 Chat: a message sometimes shows twice while the agent is working
+*Opened 2026-10-27 · seen on a live run with several background agents*
+
+Most likely a streamed copy (`stream:<message_id>`, from `MessageDisplay`) that never matched its transcript
+message. `items()` in `src/chat/index.ts` drops a stream only when (a) a transcript assistant item written no
+earlier than 3s before the stream began starts with its text, or (b) the session isn't busy and the stream
+is over 30s old. Background agents keep the session busy, so if (a) misses, the copy stays until the turn ends.
+
+Ruled out on Claude Code with a test session and the run's transcript:
+- Joined deltas equal the transcript text, markdown included (lists, nested lists, tables, bold, code).
+- Timing: the stream starts with the first paragraph and the transcript line is written at the end, so (a)'s
+  window holds, also for 10-paragraph replies and for replies to a task notification (which get a new
+  `prompt_id` without a `UserPromptSubmit`).
+- Subagent text doesn't fire `MessageDisplay`.
+- The client drops `remove`d ids and re-renders their turn (`public/chat.js`).
+
+Cause, caught on 2026-10-28: `MessageDisplay` flushes only whole lines while a message streams. The rest goes
+out in the final flush, which fires when the whole API message ends, after any tool_use in it has streamed.
+The transcript line is written as soon as the text block is done. So a one-line message followed by a tool call
+streams *after* its transcript line: here 3.3s after it (text at 17:47:52.2, tool_use at 17:47:55.5), past (a)'s
+3s window. Fix: (a) now accepts any assistant item since the stream's turn began (the last non-queued prompt
+or task notification at or before the stream), not 3s before the stream (`streamLanded`, `test/streams.test.ts`).
+
+- [ ] Confirm on a live run, then close.
+- [ ] Catch one live: dump `streamsFor(run)` and the last transcript assistant items when it shows. Log
+      unmatched streams (text head, `at`, nearest assistant item's `startedAt`) to make that easy.
+- [ ] Whatever the cause, match on `message_id` → transcript `message.id` if `MessageDisplay` ever exposes it,
+      and drop a stream once the next assistant item after it lands, busy or not.
+### #8 Run configs: what's left
+*Opened 2026-10-25 · after the first version of run configs (instructions, env, docker)*
+
+Configs are attached to runs and workflows, and a docker config runs the agent in a container with its volumes,
+verified with `alpine` and a stand-in agent. Not done:
+
+- [ ] Never run with the real `claude` or `codex` in a container: the image needs the agent and its login, which a
+      config's env can carry (`ANTHROPIC_API_KEY`), but nothing has checked a real TUI through `docker run -it`.
+- [ ] In a container the registry and transcripts are inside it: activity comes from the screen, idle-stop is off, and
+      replies to `/message`, Transcript and Resume here don't work. Mount a folder for `~/.claude` (a config volume
+      does it by hand) and read it from there.
+- [ ] `lofiwave`'s own token and the env flags of non-secret variables are still on tmux's command line (`ps`); only a
+      config's env is kept off it (a 0600 file the pane's shell sources and removes).
+- [ ] Env values are stored in the database as plain text (needed to start a run); encrypt them with a key kept outside
+      the data folder if the database is ever shared.
+- [ ] A named volume is root-owned, so `user: host` can't write to it; `docker run` has no flag for that, an init
+      step would have to chown it.
+
 ### #7 E2B sessions: what's left after running them in the sandbox's tmux
 *Opened 2026-10-21 · seen running real claude sessions on an e2b target, with all open PRs merged*
 
@@ -28,9 +74,12 @@ stream of the agent's PTY stayed silent after a resume, so the terminal went bla
 
 - [ ] A scheduled workflow that finds the machine full is recorded as an `error` run; it could queue instead.
 - [ ] The UI shows `queued` runs in the run list but has no button to cancel one (`POST /api/runs/:id/kill`
-      does) and doesn't show the capacity (`GET /api/system` → `capacity`).
-- [ ] The default `MAX_AGENT_RUNS` assumes ~600 MB per agent. Measure real claude/codex RSS on a small box
-      and count agents the console didn't start (they use memory but hold no slot; only `MIN_FREE_MEM_MB` sees them).
+      does).
+- [x] The UI shows the capacity: *Advanced → System* (`GET /api/system/usage`) has memory, CPU, swap and disk,
+      each live run's whole process tree, and how many more agents fit and which limit binds.
+- [ ] The default `MAX_AGENT_RUNS` assumes ~600 MB per agent. *Advanced → System* now measures the live runs'
+      real RSS (and shows agents the console didn't start, which use memory but hold no slot); still to do: read
+      it on a small box and use the measurement for the default instead of the guess.
 - [ ] No way to delete files in a run's folder over the API, or to write outside `cwd` (e.g. a shared input folder
       for a whole group).
 

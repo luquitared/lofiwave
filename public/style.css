@@ -438,6 +438,16 @@ dialog .hint { margin:0; font-size:12px; }
 .card > p { margin:6px 0 14px; font-size:13px; }
 .card-head { display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; margin-bottom:14px; }
 .card-head form input { width:240px; min-height:32px; padding:6px 10px; }
+/* Advanced → Usage: a bar per plan-limit window, with a tick at the even-pace point */
+.usage-plan { margin-left:8px; vertical-align:2px; }
+.usage-row + .usage-row { margin-top:16px; }
+.usage-line { display:flex; justify-content:space-between; gap:12px; font-size:13px; margin-bottom:6px; }
+.usage-pct { font-family:var(--mono); } .usage-pct.warn { color:var(--warn); } .usage-pct.bad { color:var(--bad); }
+.usage-bar { position:relative; height:8px; border-radius:4px; background:var(--panel-2); border:1px solid var(--line); }
+.usage-fill { height:100%; border-radius:3px; background:var(--ok); } .usage-fill.warn { background:var(--warn); } .usage-fill.bad { background:var(--bad); }
+.usage-tick { position:absolute; top:-4px; bottom:-4px; width:2px; margin-left:-1px; background:var(--text); opacity:.55; border-radius:1px; }
+.usage-meta { font-size:12px; margin-top:6px; }
+.usage-note { font-size:12px; max-width:980px; }
 .card table { border:1px solid var(--line); }
 .copy-row { display:flex; align-items:center; gap:8px; margin-top:8px; }
 .copy-row code { flex:1; min-width:0; padding:8px 10px; background:var(--sunken); border:1px solid var(--line); border-radius:8px; overflow-wrap:anywhere; font-size:12px; }
@@ -587,6 +597,13 @@ a.chat-path:hover { border-bottom-style:solid; }
 .chat-edited { display:flex; flex-direction:column; gap:1px; padding:6px; background:var(--panel); border:1px solid var(--line); border-radius:8px; }
 .chat-edited-head { padding:1px 8px 4px; font-size:12px; }
 .chat-edited .chat-icon { color:var(--accent); }
+.chat-edited-more { align-self:flex-start; margin:4px 8px 2px; }
+.chat-pasted { min-width:0; }
+.chat-pasted > summary { list-style:none; cursor:pointer; display:flex; gap:8px; align-items:baseline; font-size:12px; min-width:0; }
+.chat-pasted-peek { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-family:var(--mono); color:var(--dim); }
+.chat-pasted > summary::-webkit-details-marker { display:none; }
+.chat-pasted[open] > summary .chev::before { transform:rotate(45deg); }
+.chat-pasted > pre { margin-top:6px; }
 .chat-jump { position:absolute; right:16px; bottom:12px; z-index:3; box-shadow:0 6px 18px rgba(0,0,0,.5); }
 .chat-jump[hidden], .chat-banner[hidden] { display:none; }
 .chat-banner { display:flex; align-items:center; justify-content:space-between; gap:12px; margin:0 10px 8px; padding:9px 12px; font-size:13px; border:1px solid color-mix(in srgb, var(--warn) 40%, transparent); background:var(--warn-bg); color:var(--warn); border-radius:8px; }
@@ -761,3 +778,33 @@ dialog h3, .card h2 { font-family:var(--display); font-weight:700; letter-spacin
   .chat-foot { padding-top:2px; }
 }
 
+
+/* ---------------------------------------------------------------- Advanced → System: machine usage and capacity */
+.sys-headline { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:20px; margin-bottom:16px; }
+.sys-big { display:flex; align-items:baseline; gap:12px; flex-wrap:wrap; }
+.sys-big b { font-size:40px; line-height:1; font-weight:600; letter-spacing:-1px; color:var(--accent); font-variant-numeric:tabular-nums; }
+.sys-big span { color:var(--muted); font-size:14px; }
+.sys-blocked { margin-top:12px; padding:9px 12px; border-radius:8px; background:var(--warn-bg); color:var(--warn); font-size:12.5px; }
+.sys-math { list-style:none; margin:14px 0 0; padding:0; display:grid; gap:6px; font-size:12.5px; color:var(--muted); font-variant-numeric:tabular-nums; }
+.sys-math li > span:first-child { display:inline-block; min-width:76px; color:var(--dim); font-size:10px; text-transform:uppercase; letter-spacing:.6px; }
+.sys-math li.binds { color:var(--text); }.sys-math li.binds > span:first-child { color:var(--accent); }
+.sys-math b { color:var(--text); }
+.sys-meters { display:grid; grid-template-columns:repeat(auto-fit,minmax(230px,1fr)); gap:14px; }
+.use-card { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:16px 18px; min-width:0; }
+.use-head { display:flex; justify-content:space-between; align-items:baseline; gap:10px; margin-bottom:10px; }
+.use-head span { color:var(--muted); font-size:10px; text-transform:uppercase; letter-spacing:.8px; }
+.use-head b { font-size:14px; font-weight:560; font-variant-numeric:tabular-nums; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.use-bar { display:flex; height:10px; border-radius:6px; overflow:hidden; background:var(--sunken); border:1px solid var(--line); }
+.use-bar .seg { display:block; height:100%; transition:width .4s ease; }
+.seg.lw { background:var(--accent); }.seg.out { background:var(--warn); }.seg.rest { background:var(--toggle); }.seg.free { background:transparent; }.seg.warn { background:var(--bad); }
+.use-legend { display:flex; flex-wrap:wrap; gap:4px 12px; margin-top:10px; font-size:11px; color:var(--muted); font-variant-numeric:tabular-nums; }
+.use-legend span { display:inline-flex; align-items:center; gap:5px; }
+.use-legend i { width:8px; height:8px; border-radius:2px; display:inline-block; }.use-legend i.free { border:1px solid var(--line); background:var(--sunken); }
+.use-sub { margin-top:8px; font-size:11px; color:var(--dim); font-variant-numeric:tabular-nums; overflow-wrap:anywhere; }
+#sys-runs-table th:first-child, #sys-outside-table th:first-child { width:46%; }
+#sys-outside-table th:first-child { width:22%; }#sys-outside-table th:nth-child(2) { width:34%; }
+#sys-runs-table td, #sys-outside-table td { font-variant-numeric:tabular-nums; }
+#sys-outside-table td.trunc { max-width:none; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.sys-note { font-size:11.5px; margin:14px 2px 0; }
+@media (max-width:540px) { .sys-headline { padding:16px; } .sys-big b { font-size:34px; } .use-card { padding:14px 16px; } .sys-meters { grid-template-columns:1fr; } }
+.sys-cwd { color:var(--dim); font-size:11px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; margin-top:2px; }
