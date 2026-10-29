@@ -311,7 +311,7 @@ route("GET", "/api/paths", async (_r, _p, url) => {
   const dirsOnly = url.searchParams.get("dirs") === "1";
   const limit = Math.min(int(url.searchParams.get("limit"), "limit", 20), dirsOnly ? 1000 : 100);
   const home = homedir();
-  const expand = (p: string) => (p === "~" ? home : p.startsWith("~/") ? join(home, p.slice(2)) : p);
+  const expand = (p: string) => (p === "~" ? home : p.startsWith("~/") ? home + p.slice(1) : p); // keeps a trailing / (join drops it)
   const seen = new Map<string, { path: string; source: string; last_used: number }>();
   const add = (path: string | null, source: string, last_used: number) => {
     if (!path) return;
