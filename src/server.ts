@@ -307,7 +307,9 @@ route("DELETE", "/api/keys/:id", (_r, p) => {
 // ---- paths (recent working directories + filesystem completion, for the UI's path picker)
 route("GET", "/api/paths", async (_r, _p, url) => {
   const q = (url.searchParams.get("q") ?? "").trim();
-  const limit = Math.min(int(url.searchParams.get("limit"), "limit", 20), 100);
+  // dirs=1: only the folders in q (the folder browser), not the recent ones that match it.
+  const dirsOnly = url.searchParams.get("dirs") === "1";
+  const limit = Math.min(int(url.searchParams.get("limit"), "limit", 20), dirsOnly ? 1000 : 100);
   const home = homedir();
   const expand = (p: string) => (p === "~" ? home : p.startsWith("~/") ? join(home, p.slice(2)) : p);
   const seen = new Map<string, { path: string; source: string; last_used: number }>();
@@ -316,9 +318,11 @@ route("GET", "/api/paths", async (_r, _p, url) => {
     const cur = seen.get(path);
     if (!cur || cur.last_used < last_used || (cur.source === "process" && source !== "process")) seen.set(path, { path, source, last_used });
   };
-  for (const r of db.query<{ cwd: string; t: number }, []>("SELECT cwd, MAX(started_at) t FROM runs GROUP BY cwd ORDER BY t DESC LIMIT 200").all()) add(r.cwd, "run", r.t);
-  for (const w of db.query<{ cwd: string; t: number }, []>("SELECT cwd, COALESCE(last_run_at, updated_at) t FROM workflows").all()) add(w.cwd, "workflow", w.t);
-  for (const p of await listConsoleProcesses()) add(p.cwd, "process", 0);
+  if (!dirsOnly) {
+    for (const r of db.query<{ cwd: string; t: number }, []>("SELECT cwd, MAX(started_at) t FROM runs GROUP BY cwd ORDER BY t DESC LIMIT 200").all()) add(r.cwd, "run", r.t);
+    for (const w of db.query<{ cwd: string; t: number }, []>("SELECT cwd, COALESCE(last_run_at, updated_at) t FROM workflows").all()) add(w.cwd, "workflow", w.t);
+    for (const p of await listConsoleProcesses()) add(p.cwd, "process", 0);
+  }
   const needle = expand(q).toLowerCase();
   let known = [...seen.values()].filter((e) => !needle || e.path.toLowerCase().includes(needle) || fuzzy(needle, e.path.toLowerCase()));
   known.sort((a, b) => b.last_used - a.last_used);

@@ -146,6 +146,7 @@ function attachPathPicker(input) {
     $$(".pp-item", menu).forEach((el, j) => el.classList.toggle("active", j === active));
     $$(".pp-item", menu)[active]?.scrollIntoView({ block: "nearest" });
   };
+  wrap.append(h("button", { type: "button", class: "pp-browse", title: "Browse folders", "aria-label": "Browse folders", onclick: () => { close(); openDirPicker(input); } }));
   input.addEventListener("focus", () => search(true));
   input.addEventListener("click", () => { if (closed) search(true); });
   input.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(search, 120); });
@@ -161,6 +162,81 @@ function attachPathPicker(input) {
   });
 }
 $$("input[data-pathpicker]").forEach(attachPathPicker);
+
+// ---------------------------------------------------------------- folder browser (the 📁 beside a path field)
+// Typing paths is slow on a phone: this sheet lists recent folders to tap, or walks the disk one folder at a time.
+const ddlg = $("#dir-dialog");
+let dirInput = null, dirView = "recent", dirAt = "", dirHome = "", dirEntries = [], dirSeq = 0;
+function openDirPicker(input) {
+  dirInput = input;
+  const v = input.value.trim();
+  dirView = v ? "browse" : "recent";
+  dirAt = v;
+  $("#dir-filter").value = "";
+  ddlg.showModal();
+  $("#dir-close").focus();
+  loadDirs();
+}
+async function loadDirs() {
+  const seq = ++dirSeq;
+  $$(".dir-tabs button").forEach((b) => { b.classList.toggle("active", b.dataset.dv === dirView); b.setAttribute("aria-selected", String(b.dataset.dv === dirView)); });
+  $("#dir-list").replaceChildren(h("div", { class: "pp-empty" }, "Loading…"));
+  try {
+    if (dirView === "recent") {
+      const { paths, home } = await get("/paths?limit=100");
+      dirHome = home || dirHome;
+      // ~/x and ~/x/ are the same folder: keep the first (most recent)
+      const seen = new Set();
+      if (seq === dirSeq) { dirEntries = paths.filter((e) => { const k = e.path.replace(/(.)\/+$/, "$1"); return !seen.has(k) && seen.add(k); }); renderDirs(); }
+      return;
+    }
+    // The server expands ~ and says where home is, so ~ paths become absolute on the way back.
+    if (!dirAt) dirAt = dirHome || "~";
+    const q = dirAt.endsWith("/") ? dirAt : `${dirAt}/`;
+    const { paths, home } = await get(`/paths?dirs=1&limit=1000&q=${encodeURIComponent(q)}`);
+    if (seq !== dirSeq) return;
+    dirHome = home || dirHome;
+    if (dirAt === "~" || dirAt.startsWith("~/")) dirAt = dirHome + dirAt.slice(1);
+    dirEntries = paths; renderDirs();
+  } catch (e) { if (seq === dirSeq) $("#dir-list").replaceChildren(h("div", { class: "pp-empty" }, e.message)); }
+}
+const baseName = (p) => p.replace(/\/+$/, "").split("/").pop() || "/";
+function renderDirs() {
+  const browse = dirView === "browse";
+  const at = dirAt.replace(/(.)\/+$/, "$1");
+  $("#dir-crumbs").hidden = !browse;
+  $("#dir-use").hidden = !browse;
+  if (browse) {
+    // ~/a/b as tappable segments, each one jumps up to that folder
+    const home = dirHome && (at === dirHome || at.startsWith(`${dirHome}/`)) ? dirHome : "";
+    const rest = (home ? at.slice(home.length) : at).split("/").filter(Boolean);
+    const crumbs = [[home || "/", home ? "~" : "/"]];
+    rest.forEach((seg, i) => crumbs.push([`${home}/${rest.slice(0, i + 1).join("/")}`, seg]));
+    $("#dir-crumbs").replaceChildren(...crumbs.flatMap(([path, label], i) => [i > 1 || (i === 1 && home) ? h("span", { class: "dir-sep" }, "/") : "",
+      h("button", { type: "button", class: i === crumbs.length - 1 ? "here" : "", onclick: () => { dirAt = path; $("#dir-filter").value = ""; loadDirs(); } }, label)]));
+    $("#dir-crumbs").scrollLeft = 1e6;
+    $("#dir-use").textContent = `Use ${shortCwd(at) || "/"}`;
+  }
+  const f = $("#dir-filter").value.trim().toLowerCase();
+  const list = dirEntries.filter((e) => !f || (browse ? baseName(e.path) : e.path).toLowerCase().includes(f));
+  if (!list.length) return $("#dir-list").replaceChildren(h("div", { class: "pp-empty" }, f ? "Nothing matches" : browse ? "No folders in here" : "No recent folders yet"));
+  $("#dir-list").replaceChildren(...list.map((e) => browse
+    ? h("button", { type: "button", class: "dir-item", onclick: () => { dirAt = e.path; $("#dir-filter").value = ""; loadDirs(); } },
+        h("span", { class: "dir-name" }, baseName(e.path)), h("span", { class: "dir-go", "aria-hidden": "true" }, "›"))
+    : h("div", { class: "dir-row" },
+        h("button", { type: "button", class: "dir-item", onclick: () => useDir(e.path) },
+          h("span", { class: "dir-name" }, baseName(e.path), h("small", {}, shortCwd(e.path))),
+          h("span", { class: "dir-src" }, e.source === "run" ? fmtRel(e.last_used) : e.source)),
+        h("button", { type: "button", class: "dir-into", title: "Browse inside", "aria-label": `Browse inside ${baseName(e.path)}`, onclick: () => { dirView = "browse"; dirAt = e.path; $("#dir-filter").value = ""; loadDirs(); } }, "›"))));
+}
+function useDir(path) {
+  if (dirInput) { dirInput.value = path; dirInput.dispatchEvent(new Event("input", { bubbles: true })); }
+  ddlg.close();
+}
+$$(".dir-tabs button").forEach((b) => (b.onclick = () => { if (dirView === b.dataset.dv) return; dirView = b.dataset.dv; $("#dir-filter").value = ""; if (dirView === "browse" && !dirAt) dirAt = dirInput?.value.trim() || ""; loadDirs(); }));
+$("#dir-filter").addEventListener("input", renderDirs);
+$("#dir-use").onclick = () => useDir(dirAt.replace(/(.)\/+$/, "$1"));
+$("#dir-close").onclick = () => ddlg.close();
 
 // ---------------------------------------------------------------- state
 let types = [], workflows = [], targets = [], configs = [], dockerInfo = null, selectedRun = null, logOffset = 0, activeTab = "console";
@@ -480,7 +556,8 @@ function openStartDialog({ kind, type } = {}) {
   $("#start-config-label").hidden = !configs.length;
   applyStartType();
   dlg.showModal();
-  (sf.cwd.value ? sf.prompt : sf.cwd).focus();
+  // On a phone, focusing a field pops the keyboard over the form: leave it until a field is tapped.
+  if (!matchMedia("(pointer: coarse)").matches) (sf.cwd.value ? sf.prompt : sf.cwd).focus();
   // Prefill the folder with the one most recently used, so a test start is a single click.
   if (!sf.cwd.value) get("/paths?limit=1").then(({ paths }) => { if (dlg.open && !sf.cwd.value && paths?.[0]) sf.cwd.value = paths[0].path; }).catch(() => {});
 }
@@ -1162,6 +1239,45 @@ $("#drawer-btn").onclick = () => { const open = !drawerShown(); setDrawer(open);
 $("#drawer-backdrop").onclick = () => setDrawer(false);
 document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !docked.matches && document.body.classList.contains("drawer-open") && !$("dialog[open]")) { setDrawer(false); $("#drawer-btn").focus(); } });
 docked.addEventListener("change", () => setDrawer(docked.matches && dockedPref(), false));
+// On a phone the list also follows the finger: swipe right from the left edge to pull it out, swipe it left to put
+// it away. Once the swipe is clearly sideways it is ours, so the terminal or chat under it doesn't scroll as well.
+{
+  const rail = $("#session-rail"), back = $("#drawer-backdrop"), EDGE = 28;
+  let sw = null;
+  const at = (dx) => { const w = rail.offsetWidth; return sw.open ? Math.min(0, dx) : Math.min(0, dx - w); };
+  document.addEventListener("touchstart", (e) => {
+    if (docked.matches || e.touches.length > 1 || $("dialog[open]")) return sw = null;
+    const t = e.touches[0], open = drawerShown();
+    if (open ? !(rail.contains(e.target) || e.target === back) : t.clientX > EDGE) return sw = null;
+    sw = { open, x: t.clientX, y: t.clientY, dx: 0, t: e.timeStamp, live: false };
+  }, { capture: true, passive: true });
+  document.addEventListener("touchmove", (e) => {
+    if (!sw) return;
+    const t = e.touches[0], dx = t.clientX - sw.x, dy = t.clientY - sw.y;
+    if (!sw.live) {
+      if (Math.abs(dx) < 10 && Math.abs(dy) < 10) return;
+      if (Math.abs(dx) < Math.abs(dy) * 1.3 || (sw.open ? dx > 0 : dx < 0)) return sw = null;
+      sw.live = true;
+      rail.style.transition = "none"; rail.style.visibility = "visible"; back.hidden = false; back.style.transition = "none";
+    }
+    e.preventDefault(); e.stopPropagation();
+    sw.dx = dx; sw.v = (dx - (sw.lastDx ?? 0)) / Math.max(1, e.timeStamp - (sw.lastT ?? sw.t)); sw.lastDx = dx; sw.lastT = e.timeStamp;
+    const x = at(dx);
+    rail.style.transform = `translateX(${x}px)`;
+    back.style.opacity = String(1 + x / rail.offsetWidth);
+  }, { capture: true, passive: false });
+  const end = () => {
+    if (!sw?.live) return sw = null;
+    const w = rail.offsetWidth, shown = w + at(sw.dx), fling = Math.abs(sw.v || 0) > 0.4 ? Math.sign(sw.v) : 0;
+    const open = fling ? fling > 0 : shown > w / 2;
+    rail.style.transition = rail.style.transform = rail.style.visibility = back.style.transition = back.style.opacity = "";
+    sw = null;
+    setDrawer(open);
+    if (open && activeTab !== "console") loadConsole();
+  };
+  document.addEventListener("touchend", end, { capture: true });
+  document.addEventListener("touchcancel", end, { capture: true });
+}
 setDrawer(docked.matches && dockedPref(), false);
 
 /** Pinned runs first, in the order they were pinned; the rest keep the server's order (newest first). */
