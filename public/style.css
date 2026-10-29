@@ -489,8 +489,9 @@ body.term-full .pane .chat { flex:1; height:auto; }
 .chat-list { display:flex; flex-direction:column; gap:22px; max-width:900px; margin:0 auto; }
 .chat-state { max-width:900px; margin:30px auto; text-align:center; font-size:13px; }
 .chat-state[hidden] { display:none; }
-.chat-turn { display:flex; flex-direction:column; gap:8px; content-visibility:auto; contain-intrinsic-size:auto 320px; }
-.chat-turn.live { content-visibility:visible; }
+/* No content-visibility:auto here: a turn scrolled into view for the first time would change from its placeholder
+   height to its real one, and on a phone that shifts the chat under a scrolling finger. The window is 30 turns. */
+.chat-turn { display:flex; flex-direction:column; gap:8px; }
 .chat-user { align-self:flex-end; max-width:min(85%, 720px); display:flex; flex-direction:column; gap:8px; padding:10px 14px; background:var(--panel-2); border:1px solid var(--line); border-radius:14px 14px 4px 14px; }
 .chat-user-text { white-space:pre-wrap; overflow-wrap:anywhere; }
 .chat-cmd { align-self:flex-start; font-family:var(--mono); font-size:12.5px; color:var(--accent); }

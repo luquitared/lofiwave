@@ -206,7 +206,9 @@ class ChatView {
       this.sessionId = m.session_id; this.cwd = m.cwd || this.cwd;
       this.items = new Map(m.items.map((i) => [i.id, i]));
       this.floor = m.floor; this.hasEarlier = m.has_earlier;
-      this.turnEls.clear(); this.list.replaceChildren();
+      // Not emptied here but swapped in render(): an empty list for a frame clamps the scroll to the top, and that
+      // scroll event would record "at the bottom" and lose where the reader was across a reconnect.
+      this.turnEls.clear();
       this.readOnly = m.read_only;
       this.requests = m.requests || [];
       this.renderCards();

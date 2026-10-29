@@ -209,8 +209,8 @@ adding:
 - **highlight.js** with a handful of languages.
 - **A small diff renderer** working from `structuredPatch`.
 
-Long sessions use `content-visibility: auto` on turn containers, plus showing only the last N turns with "Load
-earlier", rather than a virtualization library.
+Long sessions show only the last N turns with "Load earlier", rather than a virtualization library. (Turns
+once had `content-visibility: auto` as well; it made the chat jump while scrolling on phones, so it's gone.)
 
 **Rows,** following claude.ai/code's design:
 - **Assistant text** is shown at full contrast. Everything else is a muted one-line row with a chevron.
