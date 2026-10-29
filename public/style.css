@@ -809,3 +809,44 @@ dialog h3, .card h2 { font-family:var(--display); font-weight:700; letter-spacin
 .sys-note { font-size:11.5px; margin:14px 2px 0; }
 @media (max-width:540px) { .sys-headline { padding:16px; } .sys-big b { font-size:34px; } .use-card { padding:14px 16px; } .sys-meters { grid-template-columns:1fr; } }
 .sys-cwd { color:var(--dim); font-size:11px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; margin-top:2px; }
+
+/* ---------------------------------------------------------------- folder browser */
+/* The 📁 inside a path field opens it: recent folders to tap, or the disk one folder at a time. */
+.pp input { padding-right:40px; }
+.pp-browse { position:absolute; top:50%; right:3px; transform:translateY(-50%); width:34px; height:30px; min-height:0; padding:0; display:grid; place-items:center; color:var(--muted); background:transparent; border:0; border-radius:6px; }
+.pp-browse::before { content:""; width:17px; height:17px; background:currentColor; -webkit-mask:var(--folder-icon) center / contain no-repeat; mask:var(--folder-icon) center / contain no-repeat; }
+.pp-browse { --folder-icon:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.4' stroke-linejoin='round'%3E%3Cpath d='M1.75 4.25a1 1 0 0 1 1-1h3.5l1.5 1.5h5.5a1 1 0 0 1 1 1v6.75a1 1 0 0 1-1 1H2.75a1 1 0 0 1-1-1z'/%3E%3C/svg%3E"); }
+.pp-browse:hover { color:var(--text); background:var(--hover); }
+@media (pointer:coarse) {
+  .pp-browse { width:42px; height:36px; color:var(--accent); }
+  .pp input { padding-right:48px; }
+  .pp-item { padding:12px; font-size:13.5px; white-space:normal; overflow-wrap:anywhere; }
+}
+.dir-dialog[open] { display:flex; flex-direction:column; gap:12px; width:min(560px, calc(100vw - 32px)); height:min(80dvh, 680px); padding:20px; }
+.dir-head { display:flex; align-items:center; justify-content:space-between; gap:12px; }
+.dir-head h3 { margin:0; }
+.dir-tabs { flex:none; align-self:flex-start; }
+.dir-tabs button { min-height:34px; padding:6px 18px; font-size:13px; }
+.dir-crumbs { flex:none; display:flex; align-items:center; gap:2px; overflow-x:auto; scrollbar-width:none; white-space:nowrap; font-size:13px; }
+.dir-crumbs::-webkit-scrollbar { display:none; }
+.dir-crumbs[hidden] { display:none; }
+.dir-crumbs button { flex:none; min-height:32px; padding:4px 8px; font:inherit; color:var(--accent); background:transparent; border:0; border-radius:6px; }
+.dir-crumbs button:hover { background:var(--hover); }
+.dir-crumbs button.here { color:var(--text); font-weight:600; }
+.dir-sep { color:var(--dim); }
+#dir-filter { flex:none; width:100%; font-size:16px; }
+.dir-list { flex:1; min-height:0; overflow-y:auto; overscroll-behavior:contain; display:flex; flex-direction:column; gap:2px; margin:0 -6px; padding:0 6px; }
+.dir-row { display:flex; align-items:stretch; gap:2px; }
+.dir-item { flex:1; min-width:0; min-height:48px; display:flex; align-items:center; gap:12px; padding:8px 12px; text-align:left; font:inherit; color:var(--text); background:transparent; border:0; border-radius:10px; }
+.dir-item:hover, .dir-into:hover { background:var(--hover); }
+.dir-name { flex:1; min-width:0; display:flex; flex-direction:column; gap:2px; font-size:15px; font-weight:500; overflow-wrap:anywhere; }
+.dir-name small { color:var(--muted); font-family:var(--mono); font-size:11.5px; font-weight:400; }
+.dir-src { flex:none; color:var(--dim); font-size:11.5px; }
+.dir-go { flex:none; color:var(--dim); font-size:20px; }
+.dir-into { flex:none; width:48px; min-height:48px; padding:0; font-size:20px; color:var(--dim); background:transparent; border:0; border-radius:10px; }
+.dir-foot { flex:none; display:flex; }
+.dir-foot button { flex:1; min-height:46px; font-size:15px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.dir-foot button[hidden] { display:none; }
+@media (max-width:700px) {
+  .dir-dialog[open] { width:100%; max-width:100%; height:100dvh; max-height:100dvh; margin:0; border-radius:0; padding:max(16px, env(safe-area-inset-top)) 14px max(16px, env(safe-area-inset-bottom)); }
+}

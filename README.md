@@ -212,7 +212,7 @@ API keys are named and revocable; make them on the *Connect* page. Runs started 
 
 | | |
 |---|---|
-| `GET /api/paths?q=&limit=20` | working directories for the UI's path picker: `{paths: [{path, source, last_used}], home}`. With no `q`, recent directories from runs, workflows and live processes. With `q`, substring/fuzzy matches on those, plus directory completion on disk when `q` starts with `/`, `~` or `.` (`source: "fs"`). |
+| `GET /api/paths?q=&limit=20` | working directories for the UI's path picker: `{paths: [{path, source, last_used}], home}`. With no `q`, recent directories from runs, workflows and live processes. With `q`, substring/fuzzy matches on those, plus directory completion on disk when `q` starts with `/`, `~` or `.` (`source: "fs"`). `dirs=1` returns only those directories (up to `limit`, max 1000): the folder browser. |
 
 ### Process types
 
