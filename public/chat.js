@@ -39,12 +39,12 @@ function highlightBlocks(el) {
 
 // ---------------------------------------------------------------- paths in Claude's text
 /** A whole string that is a path, with an optional :line or #L12. Groups: path, line, line. */
-const PATH_WHOLE = /^((?:~\/|\.{0,2}\/)?[\w@.+-]+(?:\/[\w@.+-]+)*)(?:#L(\d+)(?:-L?\d+)?|:(\d+)(?::\d+)?)?$/;
+const PATH_WHOLE = /^((?:~\/|\.{0,3}\/|…\/)?[\w@.+-]+(?:\/[\w@.+-]+)*)(?:#L(\d+)(?:-L?\d+)?|:(\d+)(?::\d+)?)?$/;
 const EXTS = "md|markdown|mdx|txt|ts|tsx|js|jsx|mjs|cjs|json|jsonc|jsonl|py|rb|go|rs|java|kt|swift|c|h|cc|cpp|hpp|cs|php|sh|bash|zsh|ya?ml|toml|ini|cfg|conf|css|scss|html|xml|svg|sql|lua|vue|svelte|env|lock|png|jpe?g|gif|webp";
 /** Paths inside prose: anything with a slash, or a bare file name with a known extension. */
-const PATH_IN_TEXT = new RegExp(`(?<![\\w@.+/:~-])((?:~/|\\.{0,2}/)?(?:[\\w@.+-]+/)+[\\w@.+-]+|[\\w@+-][\\w@.+-]*\\.(?:${EXTS}))(?::(\\d+)(?::\\d+)?|#L(\\d+))?(?![\\w/])`, "g");
+const PATH_IN_TEXT = new RegExp(`(?<![\\w@.+/:~…-])((?:~/|\\.{0,3}/|…/)?(?:[\\w@.+-]+/)+[\\w@.+-]+|[\\w@+-][\\w@.+-]*\\.(?:${EXTS}))(?::(\\d+)(?::\\d+)?|#L(\\d+))?(?![\\w/])`, "g");
 /** Worth asking the server about: not a version number, a URL piece, or a lone word. */
-const looksLikePath = (p) => p.length >= 3 && p.length <= 400 && /[/.]/.test(p) && !/^[\d.]+$/.test(p) && !p.includes("//") && !/^\.+$/.test(p);
+const looksLikePath = (p) => p.length >= 3 && p.length <= 400 && /[/.]/.test(p) && !/^[\d.]+$/.test(p) && !p.includes("//") && !/^[.…]+\/?$/.test(p);
 
 // ---------------------------------------------------------------- small pieces
 /** Next frame, or a short timer when frames don't come (a background tab gets none). */
@@ -145,6 +145,8 @@ class ChatView {
       this.files.el), this.footer());
     /** Which paths in Claude's text are files (from the server): path as written → absolute path, or false. */
     this.paths = new Map();
+    /** Paths Claude shortened that the server matched from context (path as written → how), shown as such. */
+    this.guessed = new Map();
     this.list.addEventListener("click", (e) => {
       const a = e.target.closest?.("a[data-path]");
       if (!a || e.metaKey || e.ctrlKey) return;
@@ -671,15 +673,18 @@ class ChatView {
       for (const f of found.reverse()) {
         const abs = this.paths.get(f.path);
         if (!abs) continue;
+        const how = this.guessed.get(f.path);
+        const title = how ? `${abs}\n(${f.path} matched from the conversation${how.via === "jev" ? ` by Jev, ${Math.round((how.confidence || 0) * 100)}% sure` : ""})` : abs;
+        const cls = how ? "chat-path chat-path-guess" : "chat-path";
         if (f.whole) {
-          if (f.node.tagName === "A") { f.node.dataset.path = abs; f.node.dataset.line = f.line; f.node.removeAttribute("target"); f.node.classList.add("chat-path"); f.node.title = abs; }
-          else f.node.replaceWith(h("a", { href: "#", class: "chat-path", "data-path": abs, "data-line": f.line, title: abs }, f.node.cloneNode(true)));
+          if (f.node.tagName === "A") { f.node.dataset.path = abs; f.node.dataset.line = f.line; f.node.removeAttribute("target"); f.node.classList.add(...cls.split(" ")); f.node.title = title; }
+          else f.node.replaceWith(h("a", { href: "#", class: cls, "data-path": abs, "data-line": f.line, title }, f.node.cloneNode(true)));
           continue;
         }
         if (!f.node.parentNode) continue;
         const after = f.node.splitText(f.at);
         after.splitText(f.text.length);
-        after.replaceWith(h("a", { href: "#", class: "chat-path", "data-path": abs, "data-line": f.line, title: abs }, f.text));
+        after.replaceWith(h("a", { href: "#", class: cls, "data-path": abs, "data-line": f.line, title }, f.text));
       }
     };
     const unknown = [...new Set(found.map((f) => f.path))].filter((p) => !this.paths.has(p));
@@ -696,7 +701,10 @@ class ChatView {
         this.pathAsk = null;
         const list = [...ask.paths].slice(0, 300);
         return call("POST", `${this.base}/chat/paths`, { paths: list })
-          .then((r) => { for (const [p, abs] of Object.entries(r.files || {})) this.paths.set(p, abs); })
+          .then((r) => {
+            for (const [p, abs] of Object.entries(r.files || {})) this.paths.set(p, abs);
+            for (const [p, how] of Object.entries(r.resolved || {})) this.guessed.set(p, how);
+          })
           .catch(() => { for (const p of list) this.paths.delete(p); });
       });
     }

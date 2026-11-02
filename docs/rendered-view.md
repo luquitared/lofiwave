@@ -395,7 +395,15 @@ Checked against a live TUI in tmux while building the files panel:
   phase 1 bug). `activeChain` now puts a result whose parent is on the chain back right after that parent.
 - **Paths in Claude's text** come as inline code (`` `src/x.ts:12` ``), plain text, or markdown links to a
   relative path (`[x.ts](src/x.ts#L12)`). All three are linked, but only after the server says the file exists
-  (one batched `POST …/chat/paths` per render), so `and/or` or a path in another worktree stays plain text.
+  (one batched `POST …/chat/paths` per render), so `and/or` stays plain text.
+- **Shortened paths** (`chat.js` for `public/chat.js`, `…/resolve.ts`, a file in another repo the session worked
+  in) are resolved from context by `src/chat/resolve.ts`: files whose path ends with what was written, from the
+  files the session touched and a `git ls-files` index of the repos it worked in. One match links. Several go to
+  TypeSafe's Jev (with `TYPESAFE_API_KEY`) in two batched calls per render: a Choice ranks every candidate per
+  mention, then Nouls re-check the top three with each file's opening lines, plus one asking whether a particular
+  file is meant at all (not "each package's info.json"). Only a clear winner links, dashed so it reads as a guess.
+  Measured on 30 real transcripts: 27 mentions linked by the index alone, 16 more by Jev, ~150–350 ms a render
+  (1–2 s cold when the cwd is a folder of many repos). Without a key, the one candidate the session touched wins.
 - **Edits made through Bash** (`printf >> file`, `sed -i`) leave no `file_change` item, so they don't show in the
   turn's "Edited N files" card. Git checkpoints (phase 5) would catch them.
 - **The panel is opened, not inline:** an edit row now opens the panel on its diff instead of expanding in

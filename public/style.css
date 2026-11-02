@@ -595,6 +595,7 @@ button.chat-row:hover { background:var(--hover); border-color:var(--line); color
 .chat-diff .ln.go { cursor:pointer; } .chat-diff .ln.go:hover { color:var(--accent); text-decoration:underline; }
 a.chat-path { color:var(--accent); text-decoration:none; border-bottom:1px dotted color-mix(in srgb, var(--accent) 60%, transparent); cursor:pointer; }
 a.chat-path:hover { border-bottom-style:solid; }
+a.chat-path-guess:not(:hover) { border-bottom-style:dashed; }
 .chat-edited { display:flex; flex-direction:column; gap:1px; padding:6px; background:var(--panel); border:1px solid var(--line); border-radius:8px; }
 .chat-edited-head { padding:1px 8px 4px; font-size:12px; }
 .chat-edited .chat-icon { color:var(--accent); }
