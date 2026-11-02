@@ -380,8 +380,14 @@ export async function startRun(opts: StartOptions): Promise<RunRow> {
   sink.write(header);
   sink.flush();
 
+  // lofiwave's own CLAUDE_CODE_OAUTH_TOKEN (from .env, kept for E2B sandboxes) is an inference-only token: a local
+  // claude that inherits it skips the user's login and loses their claude.ai MCP connectors. Local runs only get it
+  // when the run type or run config sets it on purpose.
+  const stripEnv = ["CLAUDE_CODE_OAUTH_TOKEN"].filter((k) => !(k in launchEnv));
+  const inherited: Record<string, string | undefined> = { ...process.env };
+  for (const k of stripEnv) delete inherited[k];
   const childEnv = {
-    ...process.env, ...gitEnv, ...launchEnv,
+    ...inherited, ...gitEnv, ...launchEnv,
     AGENT_CONSOLE_RUN_ID: String(id),
     // Lets scripts/claude-session-hook.sh (a Claude Code SessionStart/SessionEnd hook) report the session back.
     AGENT_CONSOLE_URL: `http://127.0.0.1:${config.port}`,
@@ -436,7 +442,9 @@ export async function startRun(opts: StartOptions): Promise<RunRow> {
     }
     const envFlags = Object.entries({ ...gitEnv, ...launchEnv, PATH: childEnv.PATH ?? "", AGENT_CONSOLE_RUN_ID: childEnv.AGENT_CONSOLE_RUN_ID, AGENT_CONSOLE_URL: childEnv.AGENT_CONSOLE_URL, AGENT_CONSOLE_TOKEN: childEnv.AGENT_CONSOLE_TOKEN })
       .filter(([k]) => !secretKeys.includes(k)).flatMap(([k, v]) => ["-e", `${k}=${v}`]);
-    const paneCmd = secretFile ? ["sh", "-c", '. "$0"; rm -f "$0"; exec "$@"', secretFile, command, ...args] : [command, ...args];
+    // A tmux pane inherits the tmux server's environment (started by lofiwave, so it has the stripped vars too): unset them in the pane.
+    const runCmd = stripEnv.length ? ["env", ...stripEnv.flatMap((k) => ["-u", k]), command, ...args] : [command, ...args];
+    const paneCmd = secretFile ? ["sh", "-c", '. "$0"; rm -f "$0"; exec "$@"', secretFile, ...runCmd] : runCmd;
     const created = await tmux("new-session", "-d", "-s", sess, "-c", cwd, "-x", "180", "-y", "48", ...envFlags, "--", ...paneCmd);
     if (created.code !== 0) { if (secretFile) rmSync(secretFile, { force: true }); await fail(`failed to start tmux session: ${created.err || created.out}`); }
     await tmux("set-option", "-t", tmuxTarget(sess), "remain-on-exit", "on");
