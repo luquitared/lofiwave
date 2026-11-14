@@ -40,6 +40,16 @@ export const config = {
   /** Shared team password. Set: people log in with a name + this password (a session cookie); the token still works. */
   password: process.env.PASSWORD?.trim() || "",
   /**
+   * Sign in with Google (see *Team login*), on when the client and GOOGLE_ALLOWED are set. `allowed`: domains and
+   * addresses, lowercase. `redirectUri`: a shared relay's callback (auth-relay/); empty = this console's own.
+   */
+  google: {
+    clientId: process.env.GOOGLE_CLIENT_ID?.trim() || "",
+    clientSecret: process.env.GOOGLE_CLIENT_SECRET?.trim() || "",
+    allowed: (process.env.GOOGLE_ALLOWED ?? "").split(",").map((s) => s.trim().toLowerCase().replace(/^@/, "")).filter(Boolean),
+    redirectUri: process.env.GOOGLE_REDIRECT_URI?.trim() || "",
+  },
+  /**
    * Git identity per signed-in person, so commits made in their runs carry their name:
    * GIT_AUTHORS="lucas=Lucas N <lucas@x.com>, seth=Seth N <seth@x.com>". Keys match the first word of the
    * sign-in name, case-insensitively. Anyone else (and scheduled/API runs) gets git's own config.
@@ -64,10 +74,12 @@ export const config = {
   claudeTui: process.env.CLAUDE_TUI?.trim() || "default",
   /**
    * What signed-in people and API keys find through /api/ccx (the console token, the machine's owner, always finds
-   * everything). "all": every conversation on the machine, the default on a console a team shares (PASSWORD set).
+   * everything). "all": every conversation on the machine, the default on a console a team shares (team login:
+   * PASSWORD or Google sign-in).
    * "picked": only the conversations the owner shared one by one with `ccx share`, the default on a personal machine.
    */
-  ccxShare: parseCcxShare(process.env.CCX_SHARE ?? "", Boolean(process.env.PASSWORD?.trim())),
+  ccxShare: parseCcxShare(process.env.CCX_SHARE ?? "",
+    Boolean(process.env.PASSWORD?.trim()) || Boolean(process.env.GOOGLE_CLIENT_ID?.trim() && process.env.GOOGLE_CLIENT_SECRET?.trim() && process.env.GOOGLE_ALLOWED?.trim())),
   schedulerIntervalMs: Number(process.env.SCHEDULER_INTERVAL_MS ?? 15_000),
   /**
    * A workflow's interactive claude run ends once the agent has finished and stayed idle this long, with nobody

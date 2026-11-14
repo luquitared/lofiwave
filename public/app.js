@@ -37,16 +37,22 @@ async function api(method, path, body) {
   return data;
 }
 /**
- * With a team password on the server, a 401 opens the sign-in dialog (name + password → session cookie) instead of
- * asking for the token. Every request that hits a 401 meanwhile waits on the same dialog.
+ * With team login on the server (a team password, Google sign-in, or both), a 401 opens the sign-in dialog instead of
+ * asking for the token: name + password → session cookie, or off to Google and back. Every request that hits a 401
+ * meanwhile waits on the same dialog.
  */
 let loginWait = null;
 function passwordLogin() {
   return (loginWait ??= (async () => {
     const info = await fetch("/api/auth").then((r) => r.json()).catch(() => ({}));
-    if (!info.password_login) return false;
+    if (!info.password_login && !info.google_login) return false;
     if (token) { token = ""; localStorage.removeItem("ac_token"); }
     const dlg = $("#login-dialog"), form = $("#login-form"), err = $("#login-error");
+    $("#login-google").hidden = !info.google_login;
+    $("#login-google button").onclick = () => { location.href = "/api/auth/google/start"; };
+    $("#login-or").hidden = !(info.google_login && info.password_login);
+    for (const el of form.querySelectorAll(".login-pw")) el.hidden = !info.password_login;
+    for (const input of form.querySelectorAll(".login-pw input")) input.required = Boolean(info.password_login);
     form.elements.name.value = localStorage.getItem("ac_name") || "";
     return new Promise((resolve) => {
       form.onsubmit = async (e) => {
@@ -63,7 +69,8 @@ function passwordLogin() {
       };
       dlg.oncancel = (e) => e.preventDefault();
       if (!dlg.open) dlg.showModal();
-      (form.elements.name.value ? form.elements.password : form.elements.name).focus();
+      if (info.password_login) (form.elements.name.value ? form.elements.password : form.elements.name).focus();
+      else $("#login-google button").focus();
     });
   })());
 }
@@ -278,7 +285,7 @@ function switchTab(name, push = true) {
 const loadMe = guard(async () => {
   const me = await get("/me");
   const el = $("#people");
-  if (!me.password_login) { el.hidden = true; return; }
+  if (!me.password_login && !me.google_login) { el.hidden = true; return; }
   const others = me.online.map((p) => p.name).filter((n) => n !== me.name);
   el.replaceChildren(
     "you: ", h("b", {}, me.name || "?"),
