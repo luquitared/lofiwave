@@ -337,6 +337,21 @@
   </form>
 </dialog>
 
+<dialog id="dir-dialog" class="dir-dialog" aria-labelledby="dir-title">
+  <div class="dir-head">
+    <h3 id="dir-title">Choose a folder</h3>
+    <button type="button" class="drawer-x" id="dir-close" aria-label="Close">×</button>
+  </div>
+  <div class="subnav dir-tabs" role="tablist" aria-label="Folders">
+    <button type="button" role="tab" data-dv="recent">Recent</button>
+    <button type="button" role="tab" data-dv="browse">Browse</button>
+  </div>
+  <div class="dir-crumbs mono" id="dir-crumbs" role="navigation" aria-label="Current folder"></div>
+  <input id="dir-filter" type="search" placeholder="Filter" autocomplete="off" spellcheck="false" aria-label="Filter folders">
+  <div class="dir-list" id="dir-list"></div>
+  <div class="dir-foot"><button type="button" class="primary" id="dir-use"></button></div>
+</dialog>
+
 <dialog id="login-dialog" class="login" aria-labelledby="login-title">
   <form id="login-form" class="grid" method="dialog">
     <h3 id="login-title" class="wide">Sign in</h3>

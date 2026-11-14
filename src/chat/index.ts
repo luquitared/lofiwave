@@ -478,6 +478,11 @@ function subagentTranscript(feed: Feed, agentId: string) {
   return out;
 }
 
+/** The session's items as the chat view has them (for resolving shortened paths against the conversation). */
+export function chatItems(kind: "run" | "session", id: string): Item[] {
+  return feedFor(chatSource(kind, id)).items();
+}
+
 /** The folder the session's relative paths are in: Claude's cwd from the transcript, else the run's (for ./files.ts). */
 export function chatCwd(kind: "run" | "session", id: string): string {
   const feed = feedFor(chatSource(kind, id));

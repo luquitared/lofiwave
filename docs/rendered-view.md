@@ -209,8 +209,8 @@ adding:
 - **highlight.js** with a handful of languages.
 - **A small diff renderer** working from `structuredPatch`.
 
-Long sessions use `content-visibility: auto` on turn containers, plus showing only the last N turns with "Load
-earlier", rather than a virtualization library.
+Long sessions show only the last N turns with "Load earlier", rather than a virtualization library. (Turns
+once had `content-visibility: auto` as well; it made the chat jump while scrolling on phones, so it's gone.)
 
 **Rows,** following claude.ai/code's design:
 - **Assistant text** is shown at full contrast. Everything else is a muted one-line row with a chevron.
@@ -395,7 +395,12 @@ Checked against a live TUI in tmux while building the files panel:
   phase 1 bug). `activeChain` now puts a result whose parent is on the chain back right after that parent.
 - **Paths in Claude's text** come as inline code (`` `src/x.ts:12` ``), plain text, or markdown links to a
   relative path (`[x.ts](src/x.ts#L12)`). All three are linked, but only after the server says the file exists
-  (one batched `POST …/chat/paths` per render), so `and/or` or a path in another worktree stays plain text.
+  (one batched `POST …/chat/paths` per render), so `and/or` stays plain text.
+- **Shortened paths** (`chat.js` for `public/chat.js`, `…/resolve.ts`, a file in another repo the session worked
+  in) are resolved from context by `src/chat/resolve.ts`: files whose path ends with what was written, from the
+  files the session touched and a `git ls-files` index of the repos it worked in. One match links. Of several,
+  the one the session touched links, if only one was; otherwise none. A resolved path is dashed so it reads as a
+  guess. ~150–350 ms a render (1–2 s cold when the cwd is a folder of many repos).
 - **Edits made through Bash** (`printf >> file`, `sed -i`) leave no `file_change` item, so they don't show in the
   turn's "Edited N files" card. Git checkpoints (phase 5) would catch them.
 - **The panel is opened, not inline:** an edit row now opens the panel on its diff instead of expanding in

@@ -9,6 +9,8 @@ import { closeSync, openSync, readSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, extname, isAbsolute, resolve, sep } from "node:path";
 import { ApiError } from "../runner";
+import type { Item } from "./claude";
+import { resolveMentions, type Resolved } from "./resolve";
 
 /** Bigger files aren't shown: the panel is for reading what Claude wrote, not for browsing logs. */
 const MAX_BYTES = 1024 * 1024;
@@ -81,15 +83,37 @@ export function chatFile(cwd: string, path: string, raw: boolean, download = fal
   return Response.json(out);
 }
 
-/** POST …/chat/paths {paths}: which of them are files we'd show, as {files: {<as given>: <absolute path>}}. */
-export function chatPaths(cwd: string, paths: string[]): { files: Record<string, string> } {
+/** Shortened paths already resolved, per session: a render doesn't search the repos again for the same mention. */
+const resolvedCache = new Map<string, { at: number; value: Resolved | null }>();
+const RESOLVED_TTL_MS = 10 * 60_000;
+
+/**
+ * POST …/chat/paths {paths}: which of them are files we'd show, as {files: {<as given>: <absolute path>}}. A path that
+ * isn't a file as written may still be one Claude shortened (`chat.js` for public/chat.js): those are resolved from
+ * the session's context (see ./resolve.ts) and also listed in `resolved: {<as given>: {via}}`.
+ */
+export async function chatPaths(cwd: string, paths: string[], items: Item[] = [], session = cwd):
+  Promise<{ files: Record<string, string>; resolved: Record<string, { via: string }> }> {
   if (paths.length > MAX_PATHS) throw new ApiError(400, `at most ${MAX_PATHS} paths at a time`);
   const rs = roots(cwd);
   const files: Record<string, string> = {};
+  const resolved: Record<string, { via: string }> = {};
+  const misses: string[] = [];
   for (const p of new Set(paths)) {
     const at = locate(cwd, p, rs);
-    if (!at) continue;
-    try { if (statSync(at.real).isFile()) files[p] = at.abs; } catch { /* gone in between */ }
+    try { if (at && statSync(at.real).isFile()) { files[p] = at.abs; continue; } } catch { /* gone in between */ }
+    const hit = resolvedCache.get(`${session}\0${p}`);
+    if (hit && Date.now() - hit.at < RESOLVED_TTL_MS) { if (hit.value) { files[p] = hit.value.abs; resolved[p] = { via: hit.value.via }; } }
+    else misses.push(p);
   }
-  return { files };
+  if (misses.length) {
+    if (resolvedCache.size > 5000) for (const [k, v] of resolvedCache) if (Date.now() - v.at >= RESOLVED_TTL_MS) resolvedCache.delete(k);
+    const got = await resolveMentions({ cwd, mentions: misses, items, allowed: (real) => inside(real, rs) });
+    for (const p of misses) {
+      const r = got[p] ?? null;
+      resolvedCache.set(`${session}\0${p}`, { at: Date.now(), value: r });
+      if (r) { files[p] = r.abs; resolved[p] = { via: r.via }; }
+    }
+  }
+  return { files, resolved };
 }
