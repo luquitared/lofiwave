@@ -100,6 +100,7 @@ Environment variables, or `KEY=VALUE` lines in `.env`:
 | `HOST` | `127.0.0.1` | Bind address. `0.0.0.0` makes it reachable from other machines. |
 | `AUTH_TOKEN` | *(generated)* | The access token. Unset: generated once into `data/auth-token`. |
 | `PASSWORD` | *(unset)* | Team password. Set: people sign in with a name and this password (see *Team login*); the token keeps working for agents and scripts. |
+| `CCX_SHARE` | *(unset)* | `team` lets signed-in people and API keys search this machine's conversations through `/api/ccx` (see *API → Conversation search*). Unset: only the console token can. |
 | `GIT_AUTHORS` | *(unset)* | Git identity per signed-in person: `"lucas=Lucas N <lucas@x.com>, seth=Seth N <seth@x.com>"` (key = first word of the sign-in name, any case). Runs they start get `GIT_AUTHOR_*`/`GIT_COMMITTER_*` set, so commits carry their name; everyone else uses git's own config. |
 | `DATA_DIR` | `./data` | SQLite database, run logs, generated token |
 | `CLAUDE_PERMISSION_MODE` | *(unset)* | Permission mode every `claude` run starts in — new, restarted and resumed, headless or interactive: adds `--permission-mode <mode>` (`acceptEdits`, `bypassPermissions`, …) unless the run's args already choose one. Unset: Claude Code's own default (prompts on). |
@@ -387,11 +388,13 @@ The Console's **Chat** view, and **View chat** on Claude sessions lofiwave didn'
 
 [ccx](https://github.com/luquitared/ccx) is a full-text index of every Claude Code conversation on a machine. With it installed next to lofiwave (`bun link` in a clone; or `CCX_BIN=/path/to/ccx`), these search this machine's conversations from another one, and say whose each is. On the other machine: `ccx remote add <name> <this console's URL> --token <an API key>`, then `ccx search "<query>" -m <name>` and `--user <name>`.
 
+**Off for the team until you turn it on.** These reach every Claude conversation on the machine, not only the sessions lofiwave started, so by default only the console token may call them: you, from your other machines. Set `CCX_SHARE=team` in `.env` and restart to let signed-in people and API keys search too, as on a box a team shares; everyone it lets in can search everyone's sessions there (`user=` narrows a search, it doesn't restrict one). Without it they get 403.
+
 A session's **user** is the person who started its run here: the sign-in name (*Team login*), or for a run started with an API key, whoever made the key. Every other session (one started in a terminal, by a schedule or with the token) belongs to the OS user lofiwave runs as. `user=` matches a whole name or its first word, ignoring case.
 
 | Method & path | Description |
 |---|---|
-| `GET /api/ccx` | `{available, path, install?, machine, os_user, users}`: whether ccx is installed here (`install` says how when it isn't), this machine's hostname, and the users its sessions have |
+| `GET /api/ccx` | `{available, path, install?, machine, os_user, users, shared}`: whether ccx is installed here (`install` says how when it isn't), this machine's hostname, the users its sessions have, and whether the team may search (`CCX_SHARE=team`) |
 | `GET /api/ccx/search?q=&project=&since=&until=&kind=&tool=&session=&main=1&raw=1&limit=15&user=` | `ccx search`: `{machine, results: [{session, project, title, kind, tool, timestamp, file, line, sidechain, snippet, show, user}]}`, best match first. The filters are ccx's (`since`/`until`: `12h`, `3d`, `2w`, `1m` or a date; `kind`: `user`, `assistant`, `thinking`, `tool_use`, `tool_result`, …); `limit` is at most 200 |
 | `GET /api/ccx/sessions?project=&since=&query=&limit=25&user=` | `ccx sessions`: `{machine, sessions: [{session, project, cwd, branch, model, title, first_prompt, first_ts, last_ts, entries, user}]}`, newest first |
 | `GET /api/ccx/show?target=&line=&around=&context=6&head=&tail=&full=1` | `ccx show`, a slice of one conversation: `{machine, file, total_blocks, blocks: [{line, uuid, kind, tool, timestamp, text}]}`. `target` is a session id (or its first characters) or a hit's `file`; only Claude transcripts are read |

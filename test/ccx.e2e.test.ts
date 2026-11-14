@@ -13,6 +13,8 @@ const DANA = "11111111-1111-4111-8111-111111111111", KEYED = "22222222-2222-4222
 
 let tmp = "", base = "";
 let server: Bun.Subprocess | null = null;
+let serverEnv: Record<string, string> = {};
+let dana: Record<string, string> = {}, key: Record<string, string> = {};
 
 const call = async (method: string, path: string, auth: Record<string, string>, body?: any) => {
   const res = await fetch(`${base}/api${path}`, { method, headers: { ...auth, "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
@@ -31,13 +33,14 @@ beforeAll(async () => {
   const env = { ...process.env as Record<string, string>, HOME: join(tmp, "home"), DATA_DIR: join(tmp, "data"), PORT: String(port), HOST: "127.0.0.1",
     AUTH_TOKEN: TOKEN, OPEN_TERMINAL: "none", PASSWORD: "pw", MIN_FREE_MEM_MB: "0", CCX_BIN: join(ROOT, "test", "fake-ccx", "ccx"), FAKE_CCX_SESSIONS: [TERMINAL, DANA, KEYED].join(",") };
   delete env.CLAUDE_CONFIG_DIR; delete env.CCX_CLAUDE_DIRS;
+  serverEnv = env;
   server = Bun.spawn(["bun", "run", join(ROOT, "src", "server.ts")], { cwd: ROOT, env, stdout: "ignore", stderr: "inherit" });
   for (let i = 0; i < 80; i++) { if ((await call("GET", "/health", token).catch(() => null))?.status === 200) break; await Bun.sleep(250); }
 
   await call("POST", "/process-types", token, { name: "nap", kind: "app", command: "sleep", args: ["30"] });
   // Signed in like the console's own pages: the cookie, and an Origin that is this console.
-  const dana = { cookie: (await call("POST", "/login", {}, { name: "Dana K", password: "pw" })).cookie, origin: base };
-  const key = { authorization: `Bearer ${(await call("POST", "/keys", dana, { name: "bot" })).data.key}` };
+  dana = { cookie: (await call("POST", "/login", {}, { name: "Dana K", password: "pw" })).cookie, origin: base };
+  key = { authorization: `Bearer ${(await call("POST", "/keys", dana, { name: "bot" })).data.key}` };
   for (const [auth, session_id] of [[dana, DANA], [key, KEYED]] as const) {
     const run = (await call("POST", "/processes", auth, { type: "nap", cwd: join(tmp, "work") })).data;
     await call("POST", `/runs/${run.id}/sessions`, token, { session_id });
@@ -98,3 +101,24 @@ test("ccx's refusal comes back as a 400 with its message, a missing q too, and n
   expect((await call("GET", "/ccx/search?q=x", {})).status).toBe(401);
   expect(readdirSync(join(tmp, "data", "ccx"))).toEqual([]);
 });
+
+test("only the console token searches until CCX_SHARE=team lets the team in", async () => {
+  for (const who of [dana, key]) {
+    for (const path of ["/ccx", "/ccx/search?q=x", "/ccx/sessions", `/ccx/show?target=${DANA}`]) {
+      const r = await call("GET", path, who);
+      expect(r.status).toBe(403);
+      expect(r.data.error).toContain("CCX_SHARE=team");
+    }
+  }
+  expect((await get("/ccx")).shared).toBe(false);
+
+  // The same console with sharing on (the same data dir, so the same key and sessions).
+  server?.kill();
+  await server?.exited;
+  server = Bun.spawn(["bun", "run", join(ROOT, "src", "server.ts")], { cwd: ROOT, env: { ...serverEnv, CCX_SHARE: "team" }, stdout: "ignore", stderr: "inherit" });
+  for (let i = 0; i < 80; i++) { if ((await call("GET", "/health", token).catch(() => null))?.status === 200) break; await Bun.sleep(250); }
+  expect((await call("GET", "/ccx", key)).data.shared).toBe(true);
+  expect((await call("GET", "/ccx/search?q=x&limit=1", dana)).data.results.length).toBe(1);
+  expect((await call("GET", "/ccx/sessions?user=dana", key)).data.sessions.length).toBe(2);
+  expect((await call("GET", "/ccx/search?q=x", {})).status).toBe(401);
+}, 30_000);

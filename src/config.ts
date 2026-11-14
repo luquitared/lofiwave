@@ -62,6 +62,11 @@ export const config = {
    * claude, shared by all viewers. "keep" leaves the user's own setting alone.
    */
   claudeTui: process.env.CLAUDE_TUI?.trim() || "default",
+  /**
+   * Who may search this machine's conversations through /api/ccx. Always the console token (the machine's owner, from
+   * their other machines). "team" also lets signed-in people and API keys: off unless the owner turns it on.
+   */
+  ccxShare: parseCcxShare(process.env.CCX_SHARE ?? ""),
   schedulerIntervalMs: Number(process.env.SCHEDULER_INTERVAL_MS ?? 15_000),
   /**
    * A workflow's interactive claude run ends once the agent has finished and stayed idle this long, with nobody
@@ -86,6 +91,13 @@ export const config = {
   /** `mkdir_cwd` on POST /api/processes may only create folders under these (colon-separated; default: home and temp dirs). */
   cwdRoots: (process.env.CWD_ROOTS ?? `${homedir()}:${tmpdir()}`).split(":").map((p) => p.trim()).filter(Boolean).map((p) => resolve(p)),
 };
+
+function parseCcxShare(v: string): "" | "team" {
+  const mode = v.trim().toLowerCase();
+  if (!mode || mode === "team") return mode as "" | "team";
+  console.warn(`CCX_SHARE: "${v.trim()}" isn't team; conversation search stays with the console token`);
+  return "";
+}
 
 function parseSandbox(v: string): string {
   const mode = v.trim();
