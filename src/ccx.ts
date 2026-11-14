@@ -1,6 +1,7 @@
 /**
  * Conversation search over this machine's Claude transcripts, for ccx (https://github.com/luquitared/ccx) on other
- * machines: `ccx search … -m <this machine>`. lofiwave runs the ccx installed here and adds what only it knows:
+ * machines: `ccx search … -m <this machine>`. The console token finds everything; signed-in people and API keys find
+ * what CCX_SHARE lets them (see config). lofiwave runs the ccx installed here and adds what only it knows:
  * who each session belongs to. That is the person who started the run in the console; a session nobody started
  * here (one from a terminal, a scheduled run, the token) belongs to the OS user lofiwave runs as.
  */
@@ -19,7 +20,7 @@ const RUN_TIMEOUT_MS = 60_000;
 const INDEX_WAIT_MS = 10_000;
 const INDEX_EVERY_MS = 30_000;
 const MAX_LIMIT = 200;
-/** With `user`, hits are filtered after ccx ranked them: ask for more until enough are that person's, up to this many. */
+/** Hits are filtered (by user, by what is shared) after ccx ranked them: ask for more until enough are kept, up to this many. */
 const MAX_SCAN = 6400;
 
 /** ccx as an argv prefix. It is a bun script, so lofiwave's own bun runs it: bun needn't be on the service's PATH. */
@@ -96,14 +97,28 @@ const sameUser = (name: string, user: string) => {
   return n === u || n.split(/\s+/)[0] === u;
 };
 
-/** Tag each row with its user; with `user`, keep only that person's, asking ccx for more rows until `limit` are found. */
-async function byUser<T extends { session: string }>(fetch: (limit: number) => Promise<T[]>, limit: number, user: string): Promise<(T & { user: string })[]> {
+/**
+ * The sessions a caller may find, or null for all of them: the owner always, and everyone when CCX_SHARE is "all".
+ * With "picked" it is what the owner shared with `ccx share` (kept by ccx; a ccx too old to know `shared` shares nothing).
+ */
+async function visibleSessions(owner: boolean): Promise<Set<string> | null> {
+  if (owner || config.ccxShare === "all") return null;
+  try { return new Set<string>((await ccxJson(["shared"])).sessions ?? []); } catch (e) { if (e instanceof ApiError && e.status === 503) throw e; return new Set(); }
+}
+
+/**
+ * Tag each row with its user and keep the ones this caller may find and, with `user`, that person's. Rows are
+ * filtered after ccx ranked them, so ccx is asked for more until `limit` are kept.
+ */
+async function pick<T extends { session: string }>(fetch: (limit: number) => Promise<T[]>, limit: number, user: string, owner: boolean): Promise<(T & { user: string })[]> {
   const people = sessionPeople();
+  const visible = await visibleSessions(owner);
   const tag = (rows: T[]) => rows.map((r) => ({ ...r, user: people.get(r.session) ?? osUser }));
-  if (!user) return tag(await fetch(limit));
+  if (!user && !visible) return tag(await fetch(limit));
+  if (visible?.size === 0) return [];
   for (let n = Math.max(limit * 4, 100); ; n *= 4) {
     const all = await fetch(n);
-    const mine = tag(all).filter((r) => sameUser(r.user, user));
+    const mine = tag(all).filter((r) => (!visible || visible.has(r.session)) && (!user || sameUser(r.user, user)));
     if (mine.length >= limit || all.length < n || n >= MAX_SCAN) return mine.slice(0, limit);
   }
 }
@@ -124,26 +139,26 @@ export function ccxStatus() {
   const cmd = ccxCommand();
   return {
     available: Boolean(cmd), path: cmd ? cmd[cmd.length - 1] : null, install: cmd ? undefined : INSTALL,
-    machine: hostname(), os_user: osUser, users: [...new Set([osUser, ...sessionPeople().values()])],
+    machine: hostname(), os_user: osUser, users: [...new Set([osUser, ...sessionPeople().values()])], sharing: config.ccxShare,
   };
 }
 
 /** GET /api/ccx/search?q=&project=&since=&until=&kind=&tool=&session=&main=&raw=&limit=&user= */
-export async function ccxSearch(url: URL) {
+export async function ccxSearch(url: URL, owner: boolean) {
   const q = param(url, "q");
   if (!q) throw new ApiError(400, "q is required");
   await refreshIndex();
   const args = ["search", ...options(url, { project: "project", since: "since", until: "until", kind: "kind", tool: "tool", session: "session" }),
     ...(flag(url, "main") ? ["--main"] : []), ...(flag(url, "raw") ? ["--raw"] : [])];
-  const results = await byUser(async (n) => (await ccxJson([...args, `--limit=${n}`], q)).results ?? [], limitOf(url, 15), param(url, "user"));
+  const results = await pick(async (n) => (await ccxJson([...args, `--limit=${n}`], q)).results ?? [], limitOf(url, 15), param(url, "user"), owner);
   return { machine: hostname(), results };
 }
 
 /** GET /api/ccx/sessions?project=&since=&query=&limit=&user= */
-export async function ccxSessions(url: URL) {
+export async function ccxSessions(url: URL, owner: boolean) {
   await refreshIndex();
   const args = ["sessions", ...options(url, { project: "project", since: "since", query: "query" })];
-  const sessions = await byUser(async (n) => (await ccxJson([...args, `--limit=${n}`])).sessions ?? [], limitOf(url, 25), param(url, "user"));
+  const sessions = await pick(async (n) => (await ccxJson([...args, `--limit=${n}`])).sessions ?? [], limitOf(url, 25), param(url, "user"), owner);
   return { machine: hostname(), sessions };
 }
 
@@ -154,16 +169,26 @@ function transcriptRoots(): string[] {
 }
 
 /** GET /api/ccx/show?target=&line=&around=&context=&head=&tail=&full= — a slice of one conversation. */
-export async function ccxShow(url: URL) {
+export async function ccxShow(url: URL, owner: boolean) {
   let target = param(url, "target");
   if (!target) throw new ApiError(400, "target is required (a session id or prefix, or a transcript path from a search hit)");
+  const visible = await visibleSessions(owner);
+  const hidden = new ApiError(404, `no shared session matching "${target}" on this machine (its owner shares one with: ccx share <session>)`);
   if (/^[0-9a-f-]{1,36}$/i.test(target)) {
     await refreshIndex();
+    if (visible) {
+      // Only among the shared ones, by its full id: a prefix must not reach a session that isn't.
+      const found = [...visible].filter((id) => id.toLowerCase().startsWith(target.toLowerCase()));
+      if (found.length !== 1) throw hidden;
+      target = found[0];
+    }
   } else {
     // A subagent's hit names its file. ccx reads any path it is given, so only transcripts get through.
     let real = "";
     try { real = realpathSync(target); } catch { throw new ApiError(404, `no transcript at ${target}`); }
     if (!real.endsWith(".jsonl") || !transcriptRoots().some((root) => real.startsWith(root + "/"))) throw new ApiError(403, "target must be a session id or a Claude transcript on this machine");
+    // <session>.jsonl, or a subagent's file under a folder named after its session.
+    if (visible && !real.replace(/\.jsonl$/, "").split("/").some((part) => visible.has(part))) throw hidden;
     target = real;
   }
   const args = ["show", ...options(url, { line: "line", around: "around", context: "context", head: "head", tail: "tail" }), ...(flag(url, "full") ? ["--full"] : [])];

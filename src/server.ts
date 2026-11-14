@@ -932,15 +932,12 @@ for (const [prefix, kind] of [["/api/runs/:id", "run"], ["/api/sessions/:id", "s
 // ---- chat composer (runs only: it types into the run's tmux pane, see src/chat/input.ts)
 // POST …/chat/send {text, files: [upload ids], draft?: "replace"|"append"}: 409 with {draft} when the terminal has an unsent draft.
 // Conversation search for ccx on other machines (`ccx search … -m <this machine>`): this machine's ccx, plus each session's user.
-// It reaches every Claude conversation on the machine, so it is the owner's (the console token) unless CCX_SHARE=team.
-function ccxAllowed() {
-  if (actor.getStore() === TOKEN_ACTOR || config.ccxShare === "team") return;
-  throw new ApiError(403, "this machine's conversations aren't shared with the team (its owner turns that on with CCX_SHARE=team); the console token can still search them");
-}
-route("GET", "/api/ccx", () => { ccxAllowed(); return json({ ...ccxStatus(), shared: config.ccxShare === "team" }); });
-route("GET", "/api/ccx/search", async (_r, _p, url) => { ccxAllowed(); return json(await ccxSearch(url)); });
-route("GET", "/api/ccx/sessions", async (_r, _p, url) => { ccxAllowed(); return json(await ccxSessions(url)); });
-route("GET", "/api/ccx/show", async (_r, _p, url) => { ccxAllowed(); return json(await ccxShow(url)); });
+// The console token is the machine's owner and finds everything; everyone else finds what CCX_SHARE lets them.
+const ccxOwner = () => actor.getStore() === TOKEN_ACTOR;
+route("GET", "/api/ccx", () => json(ccxStatus()));
+route("GET", "/api/ccx/search", async (_r, _p, url) => json(await ccxSearch(url, ccxOwner())));
+route("GET", "/api/ccx/sessions", async (_r, _p, url) => json(await ccxSessions(url, ccxOwner())));
+route("GET", "/api/ccx/show", async (_r, _p, url) => json(await ccxShow(url, ccxOwner())));
 
 route("POST", "/api/runs/:id/chat/send", async (req, p) => {
   const b = await body(req);

@@ -63,10 +63,11 @@ export const config = {
    */
   claudeTui: process.env.CLAUDE_TUI?.trim() || "default",
   /**
-   * Who may search this machine's conversations through /api/ccx. Always the console token (the machine's owner, from
-   * their other machines). "team" also lets signed-in people and API keys: off unless the owner turns it on.
+   * What signed-in people and API keys find through /api/ccx (the console token, the machine's owner, always finds
+   * everything). "all": every conversation on the machine, the default on a console a team shares (PASSWORD set).
+   * "picked": only the conversations the owner shared one by one with `ccx share`, the default on a personal machine.
    */
-  ccxShare: parseCcxShare(process.env.CCX_SHARE ?? ""),
+  ccxShare: parseCcxShare(process.env.CCX_SHARE ?? "", Boolean(process.env.PASSWORD?.trim())),
   schedulerIntervalMs: Number(process.env.SCHEDULER_INTERVAL_MS ?? 15_000),
   /**
    * A workflow's interactive claude run ends once the agent has finished and stayed idle this long, with nobody
@@ -92,11 +93,11 @@ export const config = {
   cwdRoots: (process.env.CWD_ROOTS ?? `${homedir()}:${tmpdir()}`).split(":").map((p) => p.trim()).filter(Boolean).map((p) => resolve(p)),
 };
 
-function parseCcxShare(v: string): "" | "team" {
+function parseCcxShare(v: string, teamLogin: boolean): "all" | "picked" {
   const mode = v.trim().toLowerCase();
-  if (!mode || mode === "team") return mode as "" | "team";
-  console.warn(`CCX_SHARE: "${v.trim()}" isn't team; conversation search stays with the console token`);
-  return "";
+  if (mode === "all" || mode === "picked") return mode;
+  if (mode) console.warn(`CCX_SHARE: "${v.trim()}" isn't all or picked; ignored`);
+  return teamLogin ? "all" : "picked";
 }
 
 function parseSandbox(v: string): string {

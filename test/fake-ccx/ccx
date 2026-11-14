@@ -7,6 +7,12 @@ const opt = (name: string) => argv.find((a) => a.startsWith(`--${name}=`))?.spli
 const sessions = (process.env.FAKE_CCX_SESSIONS ?? "").split(",").filter(Boolean);
 const limit = Number(opt("limit") ?? 15);
 if (cmd === "index") process.exit(0);
+if (cmd === "shared") {
+  // What the owner picked with `ccx share`: the lines of FAKE_CCX_SHARED_FILE.
+  const f = Bun.file(process.env.FAKE_CCX_SHARED_FILE ?? "/nonexistent");
+  console.log(JSON.stringify({ sessions: (await f.exists()) ? (await f.text()).split("\n").filter(Boolean) : [] }));
+  process.exit(0);
+}
 if (cmd === "search") {
   const q = argv[argv.indexOf("--") + 1];
   if (q === "boom") { console.error("ccx: fts5: syntax error"); process.exit(1); }

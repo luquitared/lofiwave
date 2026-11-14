@@ -102,23 +102,39 @@ test("ccx's refusal comes back as a 400 with its message, a missing q too, and n
   expect(readdirSync(join(tmp, "data", "ccx"))).toEqual([]);
 });
 
-test("only the console token searches until CCX_SHARE=team lets the team in", async () => {
-  for (const who of [dana, key]) {
-    for (const path of ["/ccx", "/ccx/search?q=x", "/ccx/sessions", `/ccx/show?target=${DANA}`]) {
-      const r = await call("GET", path, who);
-      expect(r.status).toBe(403);
-      expect(r.data.error).toContain("CCX_SHARE=team");
-    }
-  }
-  expect((await get("/ccx")).shared).toBe(false);
+test("the team finds everything on a shared console, and only what was picked on a personal one", async () => {
+  // Team login is on here, so sharing defaults to all.
+  expect((await call("GET", "/ccx", key)).data.sharing).toBe("all");
+  expect((await call("GET", "/ccx/search?q=x&limit=3", dana)).data.results.map((h: any) => h.session)).toEqual([TERMINAL, DANA, KEYED]);
+  expect((await call("GET", `/ccx/show?target=${TERMINAL}`, key)).status).toBe(200);
 
-  // The same console with sharing on (the same data dir, so the same key and sessions).
+  // The same console as a personal machine (the same data dir, so the same key and sessions).
   server?.kill();
   await server?.exited;
-  server = Bun.spawn(["bun", "run", join(ROOT, "src", "server.ts")], { cwd: ROOT, env: { ...serverEnv, CCX_SHARE: "team" }, stdout: "ignore", stderr: "inherit" });
+  const picked = join(tmp, "picked");
+  server = Bun.spawn(["bun", "run", join(ROOT, "src", "server.ts")], { cwd: ROOT, env: { ...serverEnv, CCX_SHARE: "picked", FAKE_CCX_SHARED_FILE: picked }, stdout: "ignore", stderr: "inherit" });
   for (let i = 0; i < 80; i++) { if ((await call("GET", "/health", token).catch(() => null))?.status === 200) break; await Bun.sleep(250); }
-  expect((await call("GET", "/ccx", key)).data.shared).toBe(true);
-  expect((await call("GET", "/ccx/search?q=x&limit=1", dana)).data.results.length).toBe(1);
-  expect((await call("GET", "/ccx/sessions?user=dana", key)).data.sessions.length).toBe(2);
+  const sub = join(tmp, `home/.claude/projects/-work/${TERMINAL}/subagents`);
+  mkdirSync(sub, { recursive: true });
+  writeFileSync(join(sub, "agent-1.jsonl"), "{}\n");
+  const find = async (who: Record<string, string>) => (await call("GET", "/ccx/search?q=x&limit=4", who)).data.results.map((h: any) => h.session);
+  const showOf = async (target: string) => (await call("GET", `/ccx/show?target=${encodeURIComponent(target)}`, key)).status;
+
+  // Nothing is shared to begin with, sessions lofiwave started included; the owner still finds all of it.
+  expect((await call("GET", "/ccx", key)).data.sharing).toBe("picked");
+  expect(await find(key)).toEqual([]);
+  expect((await call("GET", "/ccx/sessions", dana)).data.sessions).toEqual([]);
+  for (const target of [TERMINAL, DANA.slice(0, 4), join(sub, "agent-1.jsonl"), join(tmp, "home/.claude/projects/-work/sub.jsonl")]) expect(await showOf(target)).toBe(404);
+  expect(await find(token)).toEqual([TERMINAL, DANA, KEYED, TERMINAL]);
+  expect((await call("GET", `/ccx/show?target=${TERMINAL}`, token)).status).toBe(200);
+
+  // One picked: that one, and its subagents, and no other.
+  writeFileSync(picked, TERMINAL + "\n");
+  expect(await find(key)).toEqual(Array(4).fill(TERMINAL));
+  expect((await call("GET", "/ccx/sessions", dana)).data.sessions.map((s: any) => s.session)).toEqual([TERMINAL]);
+  expect(await showOf(TERMINAL.slice(0, 8))).toBe(200);
+  expect(await showOf(join(sub, "agent-1.jsonl"))).toBe(200);
+  expect(await showOf(DANA)).toBe(404);
+  expect((await call("GET", "/ccx/search?q=x&user=dana", key)).data.results).toEqual([]);
   expect((await call("GET", "/ccx/search?q=x", {})).status).toBe(401);
 }, 30_000);
