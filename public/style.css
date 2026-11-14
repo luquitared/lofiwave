@@ -391,6 +391,7 @@ body.term-full .term-hint { margin-top:-4px; }
 .people b { color:var(--text); font-weight:600; }
 .people button { margin-left:8px; }
 dialog.login { width:min(420px, calc(100vw - 32px)); }
+dialog.login [hidden] { display:none; }
 .by { color:var(--muted); }
 
 /* live terminal (xterm.js over a websocket to tmux) */

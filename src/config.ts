@@ -40,6 +40,16 @@ export const config = {
   /** Shared team password. Set: people log in with a name + this password (a session cookie); the token still works. */
   password: process.env.PASSWORD?.trim() || "",
   /**
+   * Sign in with Google (see *Team login*), on when the client and GOOGLE_ALLOWED are set. `allowed`: domains and
+   * addresses, lowercase. `redirectUri`: a shared relay's callback (auth-relay/); empty = this console's own.
+   */
+  google: {
+    clientId: process.env.GOOGLE_CLIENT_ID?.trim() || "",
+    clientSecret: process.env.GOOGLE_CLIENT_SECRET?.trim() || "",
+    allowed: (process.env.GOOGLE_ALLOWED ?? "").split(",").map((s) => s.trim().toLowerCase().replace(/^@/, "")).filter(Boolean),
+    redirectUri: process.env.GOOGLE_REDIRECT_URI?.trim() || "",
+  },
+  /**
    * Git identity per signed-in person, so commits made in their runs carry their name:
    * GIT_AUTHORS="lucas=Lucas N <lucas@x.com>, seth=Seth N <seth@x.com>". Keys match the first word of the
    * sign-in name, case-insensitively. Anyone else (and scheduled/API runs) gets git's own config.

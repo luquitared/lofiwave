@@ -79,7 +79,7 @@ Linux helpers: `scripts/install-tailscale-linux.sh` installs Tailscale and print
 
 ## Team login
 
-For a console several people share (e.g. on a VM), set `PASSWORD` in `.env`. The UI then asks for **your name and the team password** instead of the token, and keeps you signed in for 30 days (an HttpOnly, SameSite=Strict cookie; `Secure` behind HTTPS). It's multiplayer:
+For a console several people share (e.g. on a VM), set `PASSWORD` in `.env` (or set up *Sign in with Google*, below). The UI then asks for **your name and the team password** instead of the token, and keeps you signed in for 30 days (an HttpOnly, SameSite=Strict cookie; `Secure` behind HTTPS). It's multiplayer:
 
 - every run records who started it (`meta.started_by`: the name, or `api` for token calls; scheduled runs have none), shown on the session rail, the runs list and the run page;
 - the header shows who else is here (anyone who used the console in the last ~45 s);
@@ -87,7 +87,24 @@ For a console several people share (e.g. on a VM), set `PASSWORD` in `.env`. The
 
 Wrong passwords are throttled (10 per address per 10 minutes; behind a reverse proxy on the same machine, the `X-Forwarded-For` address). Changing `PASSWORD` signs everyone out. Serve it over HTTPS, e.g. with Caddy in front (`reverse_proxy 127.0.0.1:7770`).
 
-API: `GET /api/auth` → `{password_login}` (public), `POST /api/login {name, password}` (public, sets the cookie), `POST /api/logout`, `GET /api/me` → `{name, password_login, online: [{name, last_seen}]}`.
+### Sign in with Google
+
+Instead of the team password, or next to it, people can sign in with a Google account you allow. Make an OAuth client (Google Cloud → *APIs & Services* → *Credentials* → *OAuth client ID*, type *Web application*) and set:
+
+```bash
+GOOGLE_CLIENT_ID=….apps.googleusercontent.com
+GOOGLE_CLIENT_SECRET=…
+GOOGLE_ALLOWED=example.com            # Workspace domains and/or single addresses: example.com, someone@gmail.com
+```
+
+The sign-in dialog then has a **Sign in with Google** button; with no `PASSWORD`, it's the only way in besides the token. The name shown on runs is the Google account's name. `GOOGLE_ALLOWED` is required: a domain lets in that Google Workspace's accounts (Google's `hd` claim, so a personal account that merely has an address at the domain doesn't count), an address lets in that one account.
+
+**The redirect URI.** Google sends people back only to URIs registered on the client, exactly. For one console, register `https://<its address>/api/auth/google/callback`. For many consoles on one client (a VM per team, a Mac on the tailnet, a new box next week), register one URI on a small relay instead and set it on every console as `GOOGLE_REDIRECT_URI`:
+
+- `auth-relay/worker.js` is a Cloudflare Worker: `cp auth-relay/wrangler.example.jsonc auth-relay/wrangler.jsonc`, set its domain and `ALLOWED_ORIGINS` (the consoles it may send people back to, e.g. `https://*.example.com`), `npx wrangler deploy`, and register `https://<its domain>/callback` on the client.
+- Each console says in `state` where it is; the relay forwards Google's answer there and nothing else, only to `/api/auth/google/callback` on an allowed origin. It holds no secret. The code is exchanged by the console, with the client secret and a PKCE verifier, and `state` is tied to the browser that started (a cookie), so a code that ends up anywhere else can't be used.
+
+API: `GET /api/auth` → `{password_login, google_login}` (public), `POST /api/login {name, password}` (public, sets the cookie), `GET /api/auth/google/start` (public, off to Google) and `GET /api/auth/google/callback` (public, back from it: sets the cookie), `POST /api/logout`, `GET /api/me` → `{name, password_login, google_login, online: [{name, last_seen}]}`.
 
 ## Configuration
 
@@ -99,6 +116,9 @@ Environment variables, or `KEY=VALUE` lines in `.env`:
 | `HOST` | `127.0.0.1` | Bind address. `0.0.0.0` makes it reachable from other machines. |
 | `AUTH_TOKEN` | *(generated)* | The access token. Unset: generated once into `data/auth-token`. |
 | `PASSWORD` | *(unset)* | Team password. Set: people sign in with a name and this password (see *Team login*); the token keeps working for agents and scripts. |
+| `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | *(unset)* | A Google OAuth client: people sign in with Google (see *Sign in with Google*). Needs `GOOGLE_ALLOWED`. |
+| `GOOGLE_ALLOWED` | *(unset)* | Who may sign in with Google: Workspace domains and single addresses, comma-separated (`example.com, someone@gmail.com`). |
+| `GOOGLE_REDIRECT_URI` | this console's `/api/auth/google/callback` | A shared relay's callback (`auth-relay/`), so many consoles can use one OAuth client without registering each. |
 | `GIT_AUTHORS` | *(unset)* | Git identity per signed-in person: `"lucas=Lucas N <lucas@x.com>, seth=Seth N <seth@x.com>"` (key = first word of the sign-in name, any case). Runs they start get `GIT_AUTHOR_*`/`GIT_COMMITTER_*` set, so commits carry their name; everyone else uses git's own config. |
 | `DATA_DIR` | `./data` | SQLite database, run logs, generated token |
 | `CLAUDE_PERMISSION_MODE` | *(unset)* | Permission mode every `claude` run starts in — new, restarted and resumed, headless or interactive: adds `--permission-mode <mode>` (`acceptEdits`, `bypassPermissions`, …) unless the run's args already choose one. Unset: Claude Code's own default (prompts on). |

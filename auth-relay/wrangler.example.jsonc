@@ -1,0 +1,12 @@
+// Copy to wrangler.jsonc (or keep your copy elsewhere), set the route and ALLOWED_ORIGINS, then: npx wrangler deploy
+{
+  "name": "lofiwave-auth-relay",
+  "main": "worker.js",
+  "compatibility_date": "2026-10-01",
+  "workers_dev": false,
+  "routes": [{ "pattern": "auth.example.com", "custom_domain": true }],
+  "vars": {
+    // Consoles this relay forwards to. Keep it to hosts you run.
+    "ALLOWED_ORIGINS": "https://*.example.com, http://localhost:*, http://127.0.0.1:*"
+  }
+}

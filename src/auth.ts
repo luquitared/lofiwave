@@ -1,13 +1,17 @@
 /**
  * Who is calling. Two ways in:
  *  - the API token (agents, scripts, the session hook): always works;
- *  - with PASSWORD set, people log in with a name and the shared password and get a signed session cookie.
+ *  - with PASSWORD set, people log in with a name and the shared password and get a signed session cookie;
+ *    with Google sign-in set up (GOOGLE_*), with an allowed Google account, and get the same cookie.
  *    That makes the console multiplayer: runs record who started them, and everyone sees who else is online.
  */
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { config } from "./config";
 import { db, now, type ApiKeyRow } from "./db";
+
+/** People sign in (name + team password, or Google): sessions, names on runs, who's online. Read lazily: config loads first. */
+export const teamLogin = () => Boolean(config.password) || Boolean(config.google.clientId && config.google.clientSecret && config.google.allowed.length);
 
 export const COOKIE = "ac_session";
 const SESSION_DAYS = 30;
@@ -67,7 +71,7 @@ export function makeSession(name: string): { value: string; maxAge: number } {
 }
 
 function readSession(value: string | undefined): string | null {
-  if (!value || !config.password) return null;
+  if (!value || !teamLogin()) return null;
   const [payload, sig] = value.split(".");
   if (!payload || !sig || !safeEq(sig, sign(payload))) return null;
   try {

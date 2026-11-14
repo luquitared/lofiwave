@@ -340,11 +340,13 @@
 <dialog id="login-dialog" class="login" aria-labelledby="login-title">
   <form id="login-form" class="grid" method="dialog">
     <h3 id="login-title" class="wide">Sign in</h3>
-    <p class="wide muted">Everyone signs in with the team password. Your name shows on the runs you start and in who's online.</p>
-    <label class="wide">Your name <input name="name" autocomplete="username" maxlength="32" required></label>
-    <label class="wide">Team password <input name="password" type="password" autocomplete="current-password" required></label>
+    <p class="wide muted">Your name shows on the runs you start and in who's online.</p>
+    <div id="login-google" class="wide row" hidden><button type="button" class="primary">Sign in with Google</button></div>
+    <p id="login-or" class="wide muted" hidden>or with the team password:</p>
+    <label class="wide login-pw">Your name <input name="name" autocomplete="username" maxlength="32" required></label>
+    <label class="wide login-pw">Team password <input name="password" type="password" autocomplete="current-password" required></label>
     <p id="login-error" class="wide" style="color:var(--bad)" hidden></p>
-    <div class="wide row"><button type="submit" class="primary">Sign in</button></div>
+    <div class="wide row login-pw"><button type="submit" class="primary">Sign in</button></div>
   </form>
 </dialog>
 <dialog id="chat-dialog" class="chat-dialog" aria-labelledby="chat-dialog-title">

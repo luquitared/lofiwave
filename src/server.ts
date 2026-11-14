@@ -20,7 +20,8 @@ import { chatSend, chatInterrupt, chatScreen, chatCommands, chatUpload, deleteUp
 import { permissionHook, answerRequest, requestsFor } from "./chat/approvals";
 import { messageHook, statuslineHook, turnHook } from "./chat/live";
 import { turnChanges, turnFileDiff, dropCheckpoints } from "./chat/checkpoints";
-import { actor, identify, touch, online, passwordMatches, cleanName, makeSession, sessionCookie, loginBlocked, loginFailed, TOKEN_ACTOR, KEY_ACTOR_PREFIX, createApiKey } from "./auth";
+import { actor, identify, touch, online, passwordMatches, cleanName, makeSession, sessionCookie, cookieOf, loginBlocked, loginFailed, TOKEN_ACTOR, KEY_ACTOR_PREFIX, createApiKey } from "./auth";
+import { googleLogin, googleStart, googleFinish, GoogleError, STATE_COOKIE } from "./google";
 import { startJob, startQueue } from "./jobs";
 import { capacity } from "./capacity";
 import { systemUsage } from "./usage";
@@ -258,8 +259,36 @@ route("GET", "/api/system/usage", async () => json(await systemUsage()));
 /** Claude and Codex plan limits: used %, resets and pace per window, as of each agent's last request here. */
 route("GET", "/api/system/limits", () => json(planLimits()));
 
-// ---- people (with PASSWORD set: name + shared password login, and who's online)
-route("GET", "/api/auth", () => json({ password_login: Boolean(config.password) }));
+// ---- people (with PASSWORD set: name + shared password login; with GOOGLE_*: Google sign-in; and who's online)
+route("GET", "/api/auth", () => json({ password_login: Boolean(config.password), google_login: googleLogin() }));
+
+/** Sign in with Google: off to Google's account picker, and back (directly or through the relay) to the callback. */
+route("GET", "/api/auth/google/start", (req) => {
+  if (!googleLogin()) throw new ApiError(404, "Google sign-in is off (set GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET and GOOGLE_ALLOWED)");
+  const { location, nonce } = googleStart(baseUrl(req));
+  const secure = new URL(baseUrl(req)).protocol === "https:";
+  return new Response(null, { status: 302, headers: { location, "set-cookie": `${STATE_COOKIE}=${nonce}; Path=/api/auth/google; Max-Age=600; HttpOnly; SameSite=Lax${secure ? "; Secure" : ""}` } });
+});
+route("GET", "/api/auth/google/callback", async (req, _p, url) => {
+  const clear = `${STATE_COOKIE}=; Path=/api/auth/google; Max-Age=0; HttpOnly; SameSite=Lax`;
+  try {
+    if (!googleLogin()) throw new GoogleError("Google sign-in is off here.");
+    let { name } = await googleFinish(url, cookieOf(req, STATE_COOKIE));
+    if (name === TOKEN_ACTOR || name.startsWith(KEY_ACTOR_PREFIX)) name = `${name} (google)`;
+    const { value, maxAge } = makeSession(name);
+    touch(name);
+    const headers = new Headers({ location: "/" });
+    headers.append("set-cookie", sessionCookie(req, value, maxAge));
+    headers.append("set-cookie", clear);
+    return new Response(null, { status: 302, headers });
+  } catch (e) {
+    if (!(e instanceof GoogleError)) throw e;
+    const page = `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Sign-in failed</title>` +
+      `<body style="font:16px system-ui;max-width:32rem;margin:15vh auto;padding:0 16px"><h1 style="font-size:1.3rem">Couldn't sign you in</h1>` +
+      `<p>${Bun.escapeHTML(e.message)}</p><p><a href="/">Back to the console</a></p>`;
+    return new Response(page, { status: 403, headers: { "content-type": "text/html; charset=utf-8", "set-cookie": clear } });
+  }
+});
 
 route("POST", "/api/login", async (req) => {
   const ip = clientIp(req);
@@ -283,7 +312,7 @@ route("POST", "/api/logout", (req) => {
   return res;
 });
 
-route("GET", "/api/me", () => json({ name: actor.getStore() ?? null, password_login: Boolean(config.password), online: online() }));
+route("GET", "/api/me", () => json({ name: actor.getStore() ?? null, password_login: Boolean(config.password), google_login: googleLogin(), online: online() }));
 
 // ---- API keys (for agents and scripts). An API key can use the API but not make or revoke keys.
 const keyOut = ({ hash: _h, ...k }: ApiKeyRow) => k;
@@ -996,7 +1025,7 @@ function baseUrl(req: Request): string {
   return `${proto}://${host}`;
 }
 
-const PUBLIC_API = new Set(["GET /api", "GET /api/", "GET /api/docs", "GET /api/auth", "POST /api/login", "POST /api/logout"]);
+const PUBLIC_API = new Set(["GET /api", "GET /api/", "GET /api/docs", "GET /api/auth", "POST /api/login", "POST /api/logout", "GET /api/auth/google/start", "GET /api/auth/google/callback"]);
 
 /** On every response: no framing (clickjacking a console that kills processes), and no Referer, since links can carry ?token=. */
 function harden(res: Response): Response {
@@ -1113,6 +1142,8 @@ if (config.tokenGenerated) {
 }
 if (!["127.0.0.1", "::1", "localhost"].includes(config.host)) console.log(`note: HOST=${config.host} — reachable from other machines on this network (token required)`);
 if (config.password) console.log("password login: on (name + PASSWORD)");
+if (googleLogin()) console.log(`Google sign-in: on (${config.google.allowed.join(", ")}${config.google.redirectUri ? ` · via ${config.google.redirectUri}` : ""})`);
+else if (config.google.clientId && !config.google.allowed.length) console.warn("Google sign-in: off until GOOGLE_ALLOWED says who may sign in (e.g. GOOGLE_ALLOWED=example.com)");
 
 for (const sig of ["SIGINT", "SIGTERM"] as const) {
   process.on(sig, () => { console.log(`\n${sig} received, shutting down (managed processes keep running)`); server.stop(true); process.exit(0); });
