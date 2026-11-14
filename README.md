@@ -21,6 +21,7 @@ It runs on [Bun](https://bun.sh) with SQLite and no other dependencies. Linux an
 - [Bun](https://bun.sh) 1.1+
 - [tmux](https://github.com/tmux/tmux), for interactive runs (`brew install tmux` / `apt install tmux`)
 - The agents you want to drive, on `PATH`: [Claude Code](https://docs.claude.com/en/docs/claude-code) (`claude`), [Codex](https://github.com/openai/codex) (`codex`), …
+- Optional: [ccx](https://github.com/luquitared/ccx), to search this machine's conversations from another one (*API → Conversation search*)
 
 ## Install
 
@@ -99,6 +100,7 @@ Environment variables, or `KEY=VALUE` lines in `.env`:
 | `HOST` | `127.0.0.1` | Bind address. `0.0.0.0` makes it reachable from other machines. |
 | `AUTH_TOKEN` | *(generated)* | The access token. Unset: generated once into `data/auth-token`. |
 | `PASSWORD` | *(unset)* | Team password. Set: people sign in with a name and this password (see *Team login*); the token keeps working for agents and scripts. |
+| `CCX_SHARE` | `all` with `PASSWORD`, else `picked` | Which of this machine's conversations signed-in people and API keys find through `/api/ccx` (see *API → Conversation search*): `all`, or `picked` = only the ones shared with `ccx share <session>`. The console token always finds all. |
 | `GIT_AUTHORS` | *(unset)* | Git identity per signed-in person: `"lucas=Lucas N <lucas@x.com>, seth=Seth N <seth@x.com>"` (key = first word of the sign-in name, any case). Runs they start get `GIT_AUTHOR_*`/`GIT_COMMITTER_*` set, so commits carry their name; everyone else uses git's own config. |
 | `DATA_DIR` | `./data` | SQLite database, run logs, generated token |
 | `CLAUDE_PERMISSION_MODE` | *(unset)* | Permission mode every `claude` run starts in — new, restarted and resumed, headless or interactive: adds `--permission-mode <mode>` (`acceptEdits`, `bypassPermissions`, …) unless the run's args already choose one. Unset: Claude Code's own default (prompts on). |
@@ -382,6 +384,26 @@ The Console's **Chat** view, and **View chat** on Claude sessions lofiwave didn'
 | `GET /api/runs/:id/chat/changes?prompt=` | what a turn changed in git: `{root, files: [{path, status, added, removed, binary?}], added, removed, truncated, live}`; 404 without checkpoints |
 | `GET /api/runs/:id/chat/changes/file?prompt=&path=` | one file's change in that turn: `{hunks, binary}` (hunks as in `structuredPatch`) |
 | `POST /api/hooks/message`, `/api/hooks/turn`, `/api/hooks/statusline` | called by Claude's `MessageDisplay`, `UserPromptSubmit`/`Stop` hooks and by `scripts/claude-statusline.ts` (same headers as above); all reply `{}` |
+
+### Conversation search (ccx)
+
+[ccx](https://github.com/luquitared/ccx) is a full-text index of every Claude Code conversation on a machine. With it installed next to lofiwave (`bun link` in a clone; or `CCX_BIN=/path/to/ccx`), these search this machine's conversations from another one, and say whose each is. On the other machine: `ccx remote add <name> <this console's URL> --token <an API key>`, then `ccx search "<query>" -m <name>` and `--user <name>`.
+
+**Who finds what.** The console token is the machine's owner and finds every conversation, so your own machines can search each other. Signed-in people and API keys find what `CCX_SHARE` allows:
+
+- `all`: every Claude conversation on the machine, not only the sessions lofiwave started. The default on a console a team shares (`PASSWORD` set, see *Team login*). `user=` narrows a search there; it doesn't restrict one.
+- `picked`: only the conversations the owner shared one by one, on that machine: `ccx share <session>` (`ccx unshare <session>` takes it back, `ccx shared` lists them). Nothing is shared to begin with. The default on a personal machine (no `PASSWORD`).
+
+A session's **user** is the person who started its run here: the sign-in name (*Team login*), or for a run started with an API key, whoever made the key. Every other session (one started in a terminal, by a schedule or with the token) belongs to the OS user lofiwave runs as. `user=` matches a whole name or its first word, ignoring case.
+
+| Method & path | Description |
+|---|---|
+| `GET /api/ccx` | `{available, path, install?, machine, os_user, users, sharing}`: whether ccx is installed here (`install` says how when it isn't), this machine's hostname, the users its sessions have, and `sharing` (`all` or `picked`) |
+| `GET /api/ccx/search?q=&project=&since=&until=&kind=&tool=&session=&main=1&raw=1&limit=15&user=` | `ccx search`: `{machine, results: [{session, project, title, kind, tool, timestamp, file, line, sidechain, snippet, show, user}]}`, best match first. The filters are ccx's (`since`/`until`: `12h`, `3d`, `2w`, `1m` or a date; `kind`: `user`, `assistant`, `thinking`, `tool_use`, `tool_result`, …); `limit` is at most 200 |
+| `GET /api/ccx/sessions?project=&since=&query=&limit=25&user=` | `ccx sessions`: `{machine, sessions: [{session, project, cwd, branch, model, title, first_prompt, first_ts, last_ts, entries, user}]}`, newest first |
+| `GET /api/ccx/show?target=&line=&around=&context=6&head=&tail=&full=1` | `ccx show`, a slice of one conversation: `{machine, file, total_blocks, blocks: [{line, uuid, kind, tool, timestamp, text}]}`. `target` is a session id (or its first characters) or a hit's `file`; only Claude transcripts are read, and with `picked` only shared ones (404 otherwise) |
+
+The index is brought up to date before a search (at most every 30 s). The first build on a machine with a long history takes minutes; a search doesn't wait more than 10 s for it and answers from what is indexed so far. 503 when ccx isn't installed, 400 with ccx's own message when it refuses a request.
 
 ### Examples
 

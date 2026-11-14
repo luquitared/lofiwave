@@ -62,6 +62,12 @@ export const config = {
    * claude, shared by all viewers. "keep" leaves the user's own setting alone.
    */
   claudeTui: process.env.CLAUDE_TUI?.trim() || "default",
+  /**
+   * What signed-in people and API keys find through /api/ccx (the console token, the machine's owner, always finds
+   * everything). "all": every conversation on the machine, the default on a console a team shares (PASSWORD set).
+   * "picked": only the conversations the owner shared one by one with `ccx share`, the default on a personal machine.
+   */
+  ccxShare: parseCcxShare(process.env.CCX_SHARE ?? "", Boolean(process.env.PASSWORD?.trim())),
   schedulerIntervalMs: Number(process.env.SCHEDULER_INTERVAL_MS ?? 15_000),
   /**
    * A workflow's interactive claude run ends once the agent has finished and stayed idle this long, with nobody
@@ -86,6 +92,13 @@ export const config = {
   /** `mkdir_cwd` on POST /api/processes may only create folders under these (colon-separated; default: home and temp dirs). */
   cwdRoots: (process.env.CWD_ROOTS ?? `${homedir()}:${tmpdir()}`).split(":").map((p) => p.trim()).filter(Boolean).map((p) => resolve(p)),
 };
+
+function parseCcxShare(v: string, teamLogin: boolean): "all" | "picked" {
+  const mode = v.trim().toLowerCase();
+  if (mode === "all" || mode === "picked") return mode;
+  if (mode) console.warn(`CCX_SHARE: "${v.trim()}" isn't all or picked; ignored`);
+  return teamLogin ? "all" : "picked";
+}
 
 function parseSandbox(v: string): string {
   const mode = v.trim();
