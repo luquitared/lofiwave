@@ -21,6 +21,7 @@ It runs on [Bun](https://bun.sh) with SQLite and no other dependencies. Linux an
 - [Bun](https://bun.sh) 1.1+
 - [tmux](https://github.com/tmux/tmux), for interactive runs (`brew install tmux` / `apt install tmux`)
 - The agents you want to drive, on `PATH`: [Claude Code](https://docs.claude.com/en/docs/claude-code) (`claude`), [Codex](https://github.com/openai/codex) (`codex`), …
+- Optional: [ccx](https://github.com/luquitared/ccx), to search this machine's conversations from another one (*API → Conversation search*)
 
 ## Install
 
@@ -381,6 +382,21 @@ The Console's **Chat** view, and **View chat** on Claude sessions lofiwave didn'
 | `GET /api/runs/:id/chat/changes?prompt=` | what a turn changed in git: `{root, files: [{path, status, added, removed, binary?}], added, removed, truncated, live}`; 404 without checkpoints |
 | `GET /api/runs/:id/chat/changes/file?prompt=&path=` | one file's change in that turn: `{hunks, binary}` (hunks as in `structuredPatch`) |
 | `POST /api/hooks/message`, `/api/hooks/turn`, `/api/hooks/statusline` | called by Claude's `MessageDisplay`, `UserPromptSubmit`/`Stop` hooks and by `scripts/claude-statusline.ts` (same headers as above); all reply `{}` |
+
+### Conversation search (ccx)
+
+[ccx](https://github.com/luquitared/ccx) is a full-text index of every Claude Code conversation on a machine. With it installed next to lofiwave (`bun link` in a clone; or `CCX_BIN=/path/to/ccx`), these search this machine's conversations from another one, and say whose each is. On the other machine: `ccx remote add <name> <this console's URL> --token <an API key>`, then `ccx search "<query>" -m <name>` and `--user <name>`.
+
+A session's **user** is the person who started its run here: the sign-in name (*Team login*), or for a run started with an API key, whoever made the key. Every other session (one started in a terminal, by a schedule or with the token) belongs to the OS user lofiwave runs as. `user=` matches a whole name or its first word, ignoring case.
+
+| Method & path | Description |
+|---|---|
+| `GET /api/ccx` | `{available, path, install?, machine, os_user, users}`: whether ccx is installed here (`install` says how when it isn't), this machine's hostname, and the users its sessions have |
+| `GET /api/ccx/search?q=&project=&since=&until=&kind=&tool=&session=&main=1&raw=1&limit=15&user=` | `ccx search`: `{machine, results: [{session, project, title, kind, tool, timestamp, file, line, sidechain, snippet, show, user}]}`, best match first. The filters are ccx's (`since`/`until`: `12h`, `3d`, `2w`, `1m` or a date; `kind`: `user`, `assistant`, `thinking`, `tool_use`, `tool_result`, …); `limit` is at most 200 |
+| `GET /api/ccx/sessions?project=&since=&query=&limit=25&user=` | `ccx sessions`: `{machine, sessions: [{session, project, cwd, branch, model, title, first_prompt, first_ts, last_ts, entries, user}]}`, newest first |
+| `GET /api/ccx/show?target=&line=&around=&context=6&head=&tail=&full=1` | `ccx show`, a slice of one conversation: `{machine, file, total_blocks, blocks: [{line, uuid, kind, tool, timestamp, text}]}`. `target` is a session id (or its first characters) or a hit's `file`; only Claude transcripts are read |
+
+The index is brought up to date before a search (at most every 30 s). The first build on a machine with a long history takes minutes; a search doesn't wait more than 10 s for it and answers from what is indexed so far. 503 when ccx isn't installed, 400 with ccx's own message when it refuses a request.
 
 ### Examples
 

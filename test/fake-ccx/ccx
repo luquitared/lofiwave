@@ -1,0 +1,24 @@
+#!/usr/bin/env bun
+// Stand-in for ccx in test/ccx.e2e.test.ts: answers `--json` with rows for the sessions named in FAKE_CCX_SESSIONS
+// (best match first, one hit each, repeated to fill --limit), and echoes the arguments it was given.
+const argv = process.argv.slice(2);
+const cmd = argv[0];
+const opt = (name: string) => argv.find((a) => a.startsWith(`--${name}=`))?.split("=").slice(1).join("=");
+const sessions = (process.env.FAKE_CCX_SESSIONS ?? "").split(",").filter(Boolean);
+const limit = Number(opt("limit") ?? 15);
+if (cmd === "index") process.exit(0);
+if (cmd === "search") {
+  const q = argv[argv.indexOf("--") + 1];
+  if (q === "boom") { console.error("ccx: fts5: syntax error"); process.exit(1); }
+  // 300 hits in all, cycling through the sessions, so a user filter has to ask past the first page.
+  const results = Array.from({ length: 300 }, (_, i) => ({ session: sessions[i % sessions.length], line: i + 1, snippet: `${q} #${i + 1}`, args: argv })).slice(0, limit);
+  console.log(JSON.stringify({ results }));
+} else if (cmd === "sessions") {
+  console.log(JSON.stringify({ sessions: sessions.slice(0, limit).map((session) => ({ session, title: `title of ${session}`, args: argv })) }));
+} else if (cmd === "show") {
+  // Bigger than a pipe buffer: lofiwave must get all of it.
+  console.log(JSON.stringify({ file: argv[argv.indexOf("--") + 1], total_blocks: 1, blocks: [{ line: 1, kind: "user", text: "x".repeat(200_000) }], args: argv }));
+} else {
+  console.error(`ccx: unknown command "${cmd}"`);
+  process.exit(1);
+}

@@ -25,6 +25,7 @@ import { startJob, startQueue } from "./jobs";
 import { capacity } from "./capacity";
 import { systemUsage } from "./usage";
 import { planLimits } from "./limits";
+import { ccxStatus, ccxSearch, ccxSessions, ccxShow } from "./ccx";
 import { insidePath, listDir, writeFiles, decodeContent, extractInto, archiveOf, resultsOf, makeFolder } from "./files";
 
 const PUBLIC_DIR = join(config.root, "public");
@@ -930,6 +931,12 @@ for (const [prefix, kind] of [["/api/runs/:id", "run"], ["/api/sessions/:id", "s
 
 // ---- chat composer (runs only: it types into the run's tmux pane, see src/chat/input.ts)
 // POST …/chat/send {text, files: [upload ids], draft?: "replace"|"append"}: 409 with {draft} when the terminal has an unsent draft.
+// Conversation search for ccx on other machines (`ccx search … -m <this machine>`): this machine's ccx, plus each session's user.
+route("GET", "/api/ccx", () => json(ccxStatus()));
+route("GET", "/api/ccx/search", async (_r, _p, url) => json(await ccxSearch(url)));
+route("GET", "/api/ccx/sessions", async (_r, _p, url) => json(await ccxSessions(url)));
+route("GET", "/api/ccx/show", async (_r, _p, url) => json(await ccxShow(url)));
+
 route("POST", "/api/runs/:id/chat/send", async (req, p) => {
   const b = await body(req);
   const draft = str(b.draft, "draft");
