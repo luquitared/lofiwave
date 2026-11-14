@@ -8,32 +8,21 @@
  *      the session touched and from a file index of the git repos it worked in (the cwd's, and each touched file's);
  *      copies of one file in several worktrees of a repo count once;
  *   2. one candidate: that's it;
- *   3. several: Jev, in two batched calls for every mention a render turned up. The first ranks all candidates for
- *      each mention (a Choice) given the passage the mention is in, the last prompt and the files the session touched;
- *      the second re-checks the top three with a Noul each, now with each file's opening lines. A winner needs a high
- *      Noul and a clear lead over the runner-up (a little less when both calls picked it); anything less stays
- *      unlinked. A companion Noul in the same call asks whether one particular file is meant at all (not "each
- *      package's info.json"); if not, nothing is linked. A wrong link is worse than none.
- *   Without Jev (no TYPESAFE_API_KEY, or it fails), step 3 takes the one candidate the session touched, if only one was.
+ *   3. several: the one the session touched (read, edited, mentioned), if only one was. Otherwise it stays unlinked:
+ *      a wrong link is worse than none.
  */
-import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, realpathSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { Item } from "./claude";
-import type { ChoiceAnswer, JevAsk, NoulAnswer, Question } from "../jev";
 
-export type Resolved = { abs: string; via: "unique" | "session" | "jev"; confidence?: number };
+export type Resolved = { abs: string; via: "unique" | "session" };
 
 type How = "edited" | "read" | "mentioned";
 type Touch = { abs: string; how: How };
 type Candidate = { abs: string; real: string; how?: How; root: number };
 
-/** Choice questions take at most 255 options. */
 const MAX_CANDIDATES = 255;
-const SHORTLIST = 3;
-/** Up to this many candidates, the ranking call sees each one's opening lines too (Jev input costs ~$0.04/Mtok). */
-const RANK_WITH_OPENING = 80;
-const ACCEPT = 0.7, LEAD = 0.25, AGREE = 0.55, AGREE_LEAD = 0.3, SPECIFIC = 0.35;
 const INDEX_TTL_MS = 120_000;
 const INDEX_MAX = 100_000, WALK_MAX = 20_000, MAX_NESTED = 40;
 const SKIP_DIRS = new Set(["node_modules", ".git", "dist", "build", ".venv", "venv", "__pycache__", ".next", "target", ".cache"]);
@@ -200,142 +189,24 @@ export function candidatesFor(written: string, touched: Touch[], roots: string[]
     .slice(0, MAX_CANDIDATES);
 }
 
-/** The text around the newest place Claude wrote `written`, and the last prompt: what Jev reads the mention against. */
-export function contextFor(written: string, items: Item[]): { passage: string; prompt: string } {
-  let passage = "", prompt = "";
-  for (let i = items.length - 1; i >= 0 && (!passage || !prompt); i--) {
-    const it = items[i] as any;
-    const text: string = it.kind === "assistant" ? it.text : it.kind === "plan" ? it.markdown : "";
-    if (!passage && text) {
-      const at = text.lastIndexOf(written);
-      if (at >= 0) passage = text.slice(Math.max(0, at - 400), at + written.length + 300).trim();
-    }
-    if (!prompt && it.kind === "user" && !it.notification && it.text) prompt = String(it.text).slice(0, 600);
-  }
-  return { passage, prompt };
-}
-
-/** A file's first lines, for the re-check: what it is, beyond its name. */
-function opening(real: string, max = 700): string {
-  try {
-    const fd = openSync(real, "r");
-    const buf = Buffer.alloc(max);
-    const n = (() => { try { return readSync(fd, buf, 0, buf.length, 0); } finally { closeSync(fd); } })();
-    const s = buf.subarray(0, n);
-    return s.includes(0) ? "(binary)" : s.toString("utf8").split("\n").slice(0, 14).join("\n");
-  } catch { return ""; }
-}
-
-const describe = (c: Candidate) => (c.how ? `${c.how} in this session` : "not touched in this session");
-
 /**
  * Resolve each mention (paths that didn't resolve as written). `allowed` says which real paths may be served.
  * Mentions nothing is sure about are left out of the result.
  */
 export async function resolveMentions(opts: {
-  cwd: string; mentions: string[]; items: Item[]; allowed: (real: string) => boolean; jev: JevAsk | null;
+  cwd: string; mentions: string[]; items: Item[]; allowed: (real: string) => boolean;
 }): Promise<Record<string, Resolved>> {
-  const { cwd, items, allowed, jev } = opts;
+  const { cwd, items, allowed } = opts;
   const out: Record<string, Resolved> = {};
   const mentions = [...new Set(opts.mentions)].filter((m) => suffixPattern(m));
   if (!mentions.length) return out;
   const touched = touchedFiles(items);
   const roots = searchRoots(cwd, touched, allowed);
-
-  const open: { written: string; cands: Candidate[]; passage: string }[] = [];
-  let prompt = "";
   for (const written of mentions) {
     const cands = candidatesFor(written, touched, roots, allowed);
     if (cands.length === 1) { out[written] = { abs: cands[0].abs, via: "unique" }; continue; }
-    if (cands.length > 1) {
-      const ctx = contextFor(written, items);
-      prompt ||= ctx.prompt;
-      open.push({ written, cands, passage: ctx.passage });
-    }
-  }
-  if (!open.length) return out;
-
-  const fallback = (o: (typeof open)[number]) => {
-    const t = o.cands.filter((c) => c.how);
-    if (t.length === 1) out[o.written] = { abs: t[0].abs, via: "session" };
-  };
-  if (!jev) { open.forEach(fallback); return out; }
-
-  const recent = touched.slice(0, 25).map((t) => `${tilde(t.abs)} (${t.how})`);
-  // Option names are the paths themselves (Jev reads them); `~` keeps them short.
-  const keyOf = (c: Candidate) => tilde(c.abs);
-
-  // Call 1: rank every candidate, one Choice per mention.
-  let shortlists: Candidate[][];
-  try {
-    const qs: Record<string, Question> = {};
-    open.forEach((o, i) => {
-      qs[`m${i}`] = {
-        type: "choice",
-        instructions: `An AI coding assistant wrote the shortened path "${o.written}" in its reply. Which file on disk did it mean? ` +
-          `Use the passage it appears in, what the user asked, and which files the session worked on.\n\nPassage:\n${o.passage || "(not found)"}`,
-        // With few enough candidates, each brings its opening lines: a path alone rarely says which package.json it is.
-        criteria: Object.fromEntries(o.cands.map((c) => [keyOf(c), o.cands.length <= RANK_WITH_OPENING
-          ? { session: describe(c), opening_lines: opening(c.real, 300) } : describe(c)])),
-      };
-    });
-    const ans = await jev({ working_folder: tilde(cwd), user_request: prompt, files_touched_recently: recent }, qs);
-    shortlists = open.map((o, i) => {
-      const a = ans[`m${i}`] as ChoiceAnswer | undefined;
-      if (!a?.probabilities) return [];
-      return [...o.cands].sort((x, y) => (a.probabilities[keyOf(y)] ?? 0) - (a.probabilities[keyOf(x)] ?? 0)).slice(0, SHORTLIST);
-    });
-  } catch (e) {
-    console.warn(`[paths] jev rank failed: ${(e as Error).message}`);
-    open.forEach(fallback);
-    return out;
-  }
-
-  // Call 2: re-check the shortlist, one Noul per candidate, with each file's opening lines.
-  try {
-    const state: Record<string, unknown> = { working_folder: tilde(cwd), user_request: prompt, mentions: {} };
-    const qs: Record<string, Question> = {};
-    open.forEach((o, i) => {
-      if (!shortlists[i].length) return;
-      (state.mentions as any)[`m${i}`] = {
-        written_as: o.written,
-        passage: o.passage,
-        candidates: Object.fromEntries(shortlists[i].map((c, j) => [`c${j}`, { path: keyOf(c), session: describe(c), opening_lines: opening(c.real) }])),
-      };
-      // Companion: is one file meant at all, or a kind of file ("each package's info.json")?
-      qs[`m${i}_specific`] = {
-        type: "noul",
-        instructions: `In \`mentions.m${i}.passage\`, does \`mentions.m${i}.written_as\` name one particular file the assistant worked with or is pointing the user to?`,
-        criteria: {
-          true: "One particular file, e.g. a file it read, edited, created or is telling the user to open",
-          false: "A kind of file or a file name in general, e.g. every package's info.json, a file some tool writes, a file on another machine",
-        },
-      };
-      shortlists[i].forEach((_c, j) => {
-        qs[`m${i}_c${j}`] = {
-          type: "noul",
-          instructions: `Does the shortened path \`mentions.m${i}.written_as\`, as used in \`mentions.m${i}.passage\`, refer to the file \`mentions.m${i}.candidates.c${j}\`?`,
-          criteria: {
-            true: "This specific file is the one the assistant meant: its folder and contents fit the passage",
-            false: "A different file was meant, or this one only shares the name",
-          },
-        };
-      });
-    });
-    if (!Object.keys(qs).length) return out;
-    const ans = await jev(state, qs);
-    open.forEach((o, i) => {
-      const scored = shortlists[i].map((c, j) => ({ c, p: (ans[`m${i}_c${j}`] as NoulAnswer | undefined)?.noul ?? 0 })).sort((a, b) => b.p - a.p);
-      const [best, second] = scored;
-      const lead = second ? best.p - second.p : best?.p ?? 0;
-      if (((ans[`m${i}_specific`] as NoulAnswer | undefined)?.noul ?? 1) < SPECIFIC) return;
-      // Clear on its own, or both calls picked it (the ranking's top is the re-check's top) with a wider lead.
-      const sure = best && ((best.p >= ACCEPT && lead >= LEAD) || (best.c === shortlists[i][0] && best.p >= AGREE && lead >= AGREE_LEAD));
-      if (sure) out[o.written] = { abs: best.c.abs, via: "jev", confidence: Math.round(best.p * 100) / 100 };
-    });
-  } catch (e) {
-    console.warn(`[paths] jev check failed: ${(e as Error).message}`);
-    open.forEach(fallback);
+    const t = cands.filter((c) => c.how);
+    if (t.length === 1) out[written] = { abs: t[0].abs, via: "session" };
   }
   return out;
 }

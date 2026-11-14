@@ -9,7 +9,6 @@ import { closeSync, openSync, readSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, extname, isAbsolute, resolve, sep } from "node:path";
 import { ApiError } from "../runner";
-import { jevClient, type JevAsk } from "../jev";
 import type { Item } from "./claude";
 import { resolveMentions, type Resolved } from "./resolve";
 
@@ -84,36 +83,36 @@ export function chatFile(cwd: string, path: string, raw: boolean, download = fal
   return Response.json(out);
 }
 
-/** Shortened paths already resolved, per session: Jev isn't asked twice about the same mention. */
+/** Shortened paths already resolved, per session: a render doesn't search the repos again for the same mention. */
 const resolvedCache = new Map<string, { at: number; value: Resolved | null }>();
 const RESOLVED_TTL_MS = 10 * 60_000;
 
 /**
  * POST …/chat/paths {paths}: which of them are files we'd show, as {files: {<as given>: <absolute path>}}. A path that
  * isn't a file as written may still be one Claude shortened (`chat.js` for public/chat.js): those are resolved from
- * the session's context (see ./resolve.ts) and also listed in `resolved: {<as given>: {via, confidence?}}`.
+ * the session's context (see ./resolve.ts) and also listed in `resolved: {<as given>: {via}}`.
  */
-export async function chatPaths(cwd: string, paths: string[], items: Item[] = [], jev: JevAsk | null = jevClient(), session = cwd):
-  Promise<{ files: Record<string, string>; resolved: Record<string, { via: string; confidence?: number }> }> {
+export async function chatPaths(cwd: string, paths: string[], items: Item[] = [], session = cwd):
+  Promise<{ files: Record<string, string>; resolved: Record<string, { via: string }> }> {
   if (paths.length > MAX_PATHS) throw new ApiError(400, `at most ${MAX_PATHS} paths at a time`);
   const rs = roots(cwd);
   const files: Record<string, string> = {};
-  const resolved: Record<string, { via: string; confidence?: number }> = {};
+  const resolved: Record<string, { via: string }> = {};
   const misses: string[] = [];
   for (const p of new Set(paths)) {
     const at = locate(cwd, p, rs);
     try { if (at && statSync(at.real).isFile()) { files[p] = at.abs; continue; } } catch { /* gone in between */ }
     const hit = resolvedCache.get(`${session}\0${p}`);
-    if (hit && Date.now() - hit.at < RESOLVED_TTL_MS) { if (hit.value) { files[p] = hit.value.abs; resolved[p] = { via: hit.value.via, confidence: hit.value.confidence }; } }
+    if (hit && Date.now() - hit.at < RESOLVED_TTL_MS) { if (hit.value) { files[p] = hit.value.abs; resolved[p] = { via: hit.value.via }; } }
     else misses.push(p);
   }
   if (misses.length) {
     if (resolvedCache.size > 5000) for (const [k, v] of resolvedCache) if (Date.now() - v.at >= RESOLVED_TTL_MS) resolvedCache.delete(k);
-    const got = await resolveMentions({ cwd, mentions: misses, items, allowed: (real) => inside(real, rs), jev });
+    const got = await resolveMentions({ cwd, mentions: misses, items, allowed: (real) => inside(real, rs) });
     for (const p of misses) {
       const r = got[p] ?? null;
       resolvedCache.set(`${session}\0${p}`, { at: Date.now(), value: r });
-      if (r) { files[p] = r.abs; resolved[p] = { via: r.via, confidence: r.confidence }; }
+      if (r) { files[p] = r.abs; resolved[p] = { via: r.via }; }
     }
   }
   return { files, resolved };

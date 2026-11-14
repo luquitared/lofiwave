@@ -674,7 +674,7 @@ class ChatView {
         const abs = this.paths.get(f.path);
         if (!abs) continue;
         const how = this.guessed.get(f.path);
-        const title = how ? `${abs}\n(${f.path} matched from the conversation${how.via === "jev" ? ` by Jev, ${Math.round((how.confidence || 0) * 100)}% sure` : ""})` : abs;
+        const title = how ? `${abs}\n(${f.path} matched from the conversation)` : abs;
         const cls = how ? "chat-path chat-path-guess" : "chat-path";
         if (f.whole) {
           if (f.node.tagName === "A") { f.node.dataset.path = abs; f.node.dataset.line = f.line; f.node.removeAttribute("target"); f.node.classList.add(...cls.split(" ")); f.node.title = title; }
