@@ -256,7 +256,7 @@ const typeByName = (n) => types.find((t) => t.name === n);
 // ---------------------------------------------------------------- tabs
 // Main tabs: Sessions, Workflows, Connect, and Advanced, which holds the rest (processes, apps, runs, types, system, usage).
 const ADVANCED = ["agents", "apps", "runs", "types", "system", "usage"];
-const TITLES = { console: "Sessions", workflows: "Workflows", connect: "Connect", settings: "Settings", agents: "Advanced", apps: "Advanced", runs: "Advanced", types: "Advanced", system: "Advanced", usage: "Advanced" };
+const TITLES = { inbox: "Inbox", programmes: "Programmes", console: "Sessions", workflows: "Workflows", connect: "Connect", settings: "Settings", agents: "Advanced", apps: "Advanced", runs: "Advanced", types: "Advanced", system: "Advanced", usage: "Advanced" };
 $$("nav button").forEach((b) => b.addEventListener("click", () => switchTab(b.dataset.tab)));
 $$("#subnav button").forEach((b) => b.addEventListener("click", () => switchTab(b.dataset.sub)));
 function switchTab(name, push = true) {
@@ -278,6 +278,7 @@ function switchTab(name, push = true) {
   // reopening the console doesn't drop you back into whatever you last inspected. Sessions puts the
   // selected session back once it loads (syncConsoleHash).
   if (push && location.hash) history.replaceState(null, "", location.pathname);
+  if (name === "programmes" && push) AP.openProgramme(null);
   refresh();
 }
 
@@ -969,6 +970,7 @@ cf.addEventListener("submit", async (e) => {
 });
 
 function renderSettings() {
+  AP.loadSettings();
   loadTargets();
   loadConfigs();
   const pref = themePref();
@@ -1310,7 +1312,7 @@ function pinGroups(runs, rest, item) {
 
 function renderRail() {
   const { live, headless, adoptable, ended } = consoleData;
-  const sig = JSON.stringify([consoleView, live.map((r) => [r.id, runLabel(r), r.pinned_at]), headless.map((r) => [r.id, runLabel(r)]), adoptable.map((p) => [p.pid, p.session?.session_id || "", p.session?.web_url || "", p.live_run]), ended.map((r) => [r.id, runLabel(r), r.pinned_at]), endedRun?.id]);
+  const sig = JSON.stringify([consoleView, live.map((r) => [r.id, runLabel(r), r.pinned_at, AP.railSig(r)]), headless.map((r) => [r.id, runLabel(r)]), adoptable.map((p) => [p.pid, p.session?.session_id || "", p.session?.web_url || "", p.live_run]), ended.map((r) => [r.id, runLabel(r), r.pinned_at, AP.railSig(r)]), endedRun?.id]);
   if (sig === railSig) return patchRail();
   railSig = sig;
   if (consoleView === "ended") return $("#session-rail").replaceChildren(railBar(), h("div", { class: "rail-strip" }, ...endedRail()));
@@ -1320,6 +1322,7 @@ function renderRail() {
       h("div", { class: "rail-title" }, runLabel(r)),
       meter(r),
       h("div", { class: "rail-sub" }, r.workflow_name ? h("span", { class: "wf-tag" }, `⌁ ${r.workflow_name}`) : "", groupTag(r), `${r.type_name} · ${shortCwd(r.cwd)}`),
+      AP.railTags(r),
       h("div", { class: "rail-sub dim rail-up" }, railUp(r)),
     ))),
     h("button", { class: "tile-new", onclick: () => { drawerPicked(); openStartDialog({ kind: "agent" }); } }, h("span", { "aria-hidden": "true" }, "+"), "Start a session"),
@@ -1354,6 +1357,7 @@ function endedRail() {
     h("div", { class: "tile-act" }, h("span", { class: "dot" }), h("span", {}, r.status && r.status !== "success" ? r.status : "ended")),
     h("div", { class: "rail-title" }, runLabel(r)),
     h("div", { class: "rail-sub" }, r.workflow_name ? h("span", { class: "wf-tag" }, `⌁ ${r.workflow_name}`) : "", groupTag(r), `${r.type_name} · ${shortCwd(r.cwd)}${byWho(r)}`),
+    AP.railTags(r),
     h("div", { class: "rail-sub dim" }, endedWhen(r)),
   )));
 }
@@ -2053,11 +2057,14 @@ function limitRow(w) {
 // ---------------------------------------------------------------- refresh loop
 function refresh() {
   if (document.hidden) return;
+  AP.loadBadge();
   if (activeTab === "console" || drawerShown()) loadConsole();
   if (activeTab === "console") return;
   if (activeTab === "agents") loadAgents();
   else if (activeTab === "apps") loadTypes().then(loadApps);
   else if (activeTab === "workflows") loadWorkflows();
+  else if (activeTab === "inbox") AP.loadInbox();
+  else if (activeTab === "programmes") AP.loadProgrammes();
   else if (activeTab === "connect") loadConnect();
   else if (activeTab === "settings") renderSettings();
   else if (activeTab === "runs") { loadRuns(); if (selectedRun) refreshRunDetail(); }
@@ -2074,7 +2081,8 @@ document.addEventListener("visibilitychange", () => !document.hidden && refresh(
   applyTheme(); // the page head already set the scheme; this syncs theme-color
   await Promise.all([loadSystem(), loadTypes(), loadWorkflows(), loadMe(), loadTargets(), loadConfigs()]);
   const m = location.hash.match(/^#(\w+)(?:\/(\w+))?/);
-  if (m && m[1] === "runs" && m[2]) openRun(Number(m[2]));
+  if (await AP.route(location.hash, true)) { /* an inbox or programme link, or the inbox because something is waiting */ }
+  else if (m && m[1] === "runs" && m[2]) openRun(Number(m[2]));
   else if (m && (m[1] === "sessions" || m[1] === "console") && /^\d+$/.test(m[2] || "")) openSessionLink(Number(m[2]));
   else if (m && m[1] === "agents" && m[2] === "start") { switchTab("console", false); openStartDialog({ kind: "agent" }); }
   else if (m && m[1] === "processes") switchTab("agents", false);
@@ -2085,7 +2093,8 @@ $("#refresh-btn").onclick = () => { refresh(); loadSystem(); };
 $("#new-session-btn").onclick = () => openStartDialog({ kind: "agent" });
 window.addEventListener("hashchange", () => {
   const [tab, id] = location.hash.slice(1).split("/");
-  if (tab === "runs" && /^\d+$/.test(id || "")) openRun(Number(id));
+  if (tab === "inbox" || tab === "programmes") AP.route(location.hash, false);
+  else if (tab === "runs" && /^\d+$/.test(id || "")) openRun(Number(id));
   else if ((tab === "sessions" || tab === "console") && /^\d+$/.test(id || "")) openSessionLink(Number(id));
   else if ($(`#tab-${tab}`) || tab === "advanced") { if (selectedRun) closeRun(false); switchTab(tab, false); }
 });

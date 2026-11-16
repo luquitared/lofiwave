@@ -10,9 +10,10 @@ A small web console for the coding agents running on your machine: Claude Code, 
 - **Run targets**: give a session or workflow run its own [E2B](https://e2b.dev) sandbox VM instead of this machine, whose live terminal you still open and type into from the browser.
 - **Run configs**: a reusable bundle of custom instructions, environment variables (API keys, pasted as a `.env` file) and, optionally, a Docker image with volumes, attached to any session or workflow.
 - **Workflows**: a saved agent launch you run by hand or on a cron schedule. Each run is a live session you can watch and step into; it closes itself when the agent is done. Every run is kept: status, duration, full logs.
+- **Autopilot**: agents that run without someone watching. An agent raises an **ask** when it needs a person (a question, an approval, more budget) and says when it is **done** or **blocked**; lofiwave tells you (Slack, Telegram or a webhook), and brings the answer back saying who gave it. Answers you keep giving become **rules** you confirm once. **Programmes** hold what several agents share over days: a standing brief, global rules, decisions, figures, budgets, a controller. **Guards** refuse commands whatever the prompt says. See *Autopilot* below.
 - A REST API for all of it, documented at `/api/docs`, so other agents can drive it too. The *Connect* page gives you the URL to hand an agent and makes API keys for it.
 
-The UI has four pages: **Sessions** (live sessions and their terminals), **Workflows**, **Connect** (API docs URL and API keys), and **Advanced** (every process on the machine, apps, run history, process types, and **System**: memory, CPU, swap and disk, what lofiwave and each live run use, and how many more agents fit).
+The UI has six pages: **Inbox** (what needs you, and the team's open items), **Programmes**, **Sessions** (live sessions and their terminals), **Workflows**, **Connect** (API docs URL and API keys), and **Advanced** (every process on the machine, apps, run history, process types, and **System**: memory, CPU, swap and disk, what lofiwave and each live run use, and how many more agents fit).
 
 It runs on [Bun](https://bun.sh) with SQLite and no other dependencies. Linux and macOS are the main targets; Windows is best-effort (no interactive runs).
 
@@ -132,6 +133,16 @@ Environment variables, or `KEY=VALUE` lines in `.env`:
 | `OUTPUT_TAIL_BYTES` | `65536` | How much of the end of each log is copied into the run record (`output`) |
 | `MAX_AGENT_RUNS` | *(from RAM)* | At most this many agent runs at once; more are refused with 429 or queued (see *Swarms*). Default: (total RAM − 1 GB) / 600 MB, between 1 and 16. `0` = no cap. |
 | `MIN_FREE_MEM_MB` | `500` | No agent run starts while less memory than this is available (Linux `MemAvailable`; macOS free + inactive pages). `0` = no check. |
+| `MIN_FREE_DISK_MB` | `1024` | No agent run starts while the disk holding `DATA_DIR` has less than this free: a full disk stops every run on the machine. `0` = no check. |
+| `PUBLIC_URL` | *(unset)* | This console's address as people reach it (`https://…`), for the links in notifications. Like the next five, it can also be set under *Settings → Notifications*. |
+| `SLACK_WEBHOOK_URL` | *(unset)* | A Slack incoming webhook: asks, finished and blocked runs, stalls and the digest go to its channel. |
+| `SLACK_BOT_TOKEN`, `SLACK_CHANNEL` | *(unset)* | A Slack bot token (`chat:write`): the same go to `SLACK_CHANNEL`, and to a person directly when *People* has their Slack id. |
+| `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | *(unset)* | The same, to a Telegram chat. |
+| `NOTIFY_WEBHOOK_URL` | *(unset)* | Any URL: each notification is POSTed to it as JSON `{kind, title, text, link, to, at}`. |
+| `DIGEST_CRON` | *(unset)* | When to send the digest (what is waiting, each programme's workers, what rules answered), e.g. `0 9,18 * * *`. |
+| `STALL_WAITING_MIN`, `STALL_IDLE_MIN` | `10`, `30` | Announce a run that has waited this long on a prompt in its terminal, and a programme worker idle this long without reporting done or blocked. `0` = never. |
+| `NUDGE_DAYS` | `2` | Follow up on an open item with its owner every this many days once it is past its date. `0` = never. |
+| `LOFIWAVE_ME` | *(unset)* | Who a decision made with the bare token is recorded under, and who notifications are for when nobody is named. |
 | `CWD_ROOTS` | home and temp dirs | Colon-separated folders under which `mkdir_cwd` may create a run's folder |
 | `OPEN_TERMINAL` | `auto` | Desktop terminal window opened on an interactive run. `auto` = iTerm then Terminal.app on macOS, the first of wezterm/kitty/alacritty/ghostty/foot/gnome-terminal/konsole/tilix/xfce4-terminal/mate-terminal/terminator/urxvt/xterm found on Linux; `none` to keep runs headless; or name one (`iterm`, `terminal`, `kitty`, …). Ignored on a headless machine (no `DISPLAY`/`WAYLAND_DISPLAY`). |
 
@@ -202,6 +213,37 @@ Cron: 5 fields `min hour day-of-month month day-of-week`, with `*`, lists, range
 The built-in `claude` type keeps Claude Code's permission prompts (see *Security*). A headless run has nobody to answer them, so give it `--permission-mode acceptEdits` (or `--dangerously-skip-permissions`) as extra args, or add it to the type's args under *Advanced → Types*.
 
 Useful extra args: Claude Code `--output-format json`, `--model ...`; Codex `--sandbox workspace-write` (`--full-auto` was removed from Codex), `--skip-git-repo-check`, `-m ...`.
+
+## Autopilot
+
+Everything above is for watching and steering agents. This is for not having to. The design and what it was built from are in [docs/autopilot.md](docs/autopilot.md).
+
+**The `lw` command.** Every run lofiwave starts on this machine has `lw` on its `PATH`, and every agent run is told in its system prompt how to use it: to ask a person something, to say what became of it, and (in a programme) to read and record shared state. `lw help` lists it all. It is a thin client of the API below, using the run's own `AGENT_CONSOLE_URL`, token and run id. Runs on an E2B target or in a Docker config don't have it: they can't reach the console.
+
+**Ask.** `lw ask "Merge PR 505?" --approval --class merge`, or with options: `--option "A: keep it" --option "B*: switch"` (`*` marks the agent's recommendation), or `--amount 250` for more budget. lofiwave stores it, notifies, and shows it in the **Inbox**. When someone answers, the answer is typed into the run as `[lofiwave] Answer to ask #12 “…”, from lucas: Approve`, or returned to `lw ask --wait`. It is recorded with who gave it, so an approval is never something an agent read off a screen. An answered ask in a programme becomes an entry in its decision log.
+
+**Done, blocked, failed.** `lw done "<summary>" --report out/REPORT.md` (or `lw blocked`, `lw failed`) records the run's **outcome** and notifies. A run that ends without one is logged and announced as such. A run parked on a terminal prompt for `STALL_WAITING_MIN`, or a programme worker idle for `STALL_IDLE_MIN` without an outcome, is announced once and listed in the Inbox.
+
+**Rules from answers.** An ask can carry a **class**: `merge`, `deploy`, `launch`, `shutdown`, `budget`, `production`, or your own. Answering with *Always answer … this way* makes a **delegation rule**: later asks of that class (in that programme, or everywhere) get the same answer at once, recorded as given by the rule and by whoever set it. After three asks of a class got the same answer, the Inbox offers to make it a rule. A budget rule needs a ceiling. `external_send`, `delete`, `billing`, `credentials` and `data_egress` can never have a rule. *Settings → Delegation rules* lists each rule, how often it was applied and to what, and turns it off.
+
+**Programme.** A line of work that several agents carry over days. It has:
+
+- a **standing brief**, versioned. Changing it tells every running worker what changed (the lines added and removed) and shows which workers are still on an older version;
+- **global rules** (*Settings → Global rules*: “work in a git worktree and open a PR”, “heavy compute goes on the external VM, large files on S3”), which every programme run gets, or every agent run if you choose; the programme's own rules; and **lessons** workers record for the next one (`lw lesson`). A rule or lesson added mid-run reaches the runs already going;
+- a **decision log** (who decided what, when, from which ask), **figures** (`lw figure eval_accuracy 0.91`: a number recorded again supersedes the old one, so one stands) and **published outputs** (`lw publish`);
+- **budgets**: one for the programme, one per worker. Workers log spend (`lw spend aws 12.5`); passing 80 % and reaching the cap are logged, and people are told at the cap;
+- a **summary** of where it stands, rewritten by the controller;
+- a **controller** (optional): a workflow running a fixed playbook. It wakes when a worker reports or ends, and on a cron schedule if you give one. It reads the programme from lofiwave, checks finished work, records figures and lessons, restarts or asks about stuck workers, starts the next wave the brief plans, and rewrites the summary. Its state is the programme, not its conversation, so any session can be the controller.
+
+All of it is one markdown document, `lw context`, also written to `DATA_DIR/programmes/<slug>/CONTEXT.md` and to `PROGRAMME.md` in the programme's folder. A worker is started with a pointer to it, its own `BRIEF.md`, and its budget.
+
+**Guards.** Interactive claude runs get a `PreToolUse` hook: before each Bash call lofiwave checks the command against the guards and refuses a match, telling the agent why. Built in: `tmux kill-server` on the default socket and killing tmux by name (either ends every session on the machine), persistent spot requests and fleets, and starting cloud machines once the run is over budget. Add your own under *Settings → Guards* (a regex, an optional `unless` regex, a message). It sees the command line of a Bash call in a claude run on this machine, and nothing else: a script the agent wrote and then runs, runs on a target or in a container, and Codex are not covered.
+
+**The ledger.** Items: what is open, who holds it, by when (`do`, `decide`, `verify`, `risk`), and product **signals**. Agents add them (`lw item add`), people add them in the Inbox, and intake runs add them from Slack and from session endings. An item past its date is followed up with its owner every `NUDGE_DAYS`. *People* maps a name to a sign-in name and a Slack id, so a follow-up or an ask can go to that person.
+
+**Playbooks.** Ready-made unattended runs, set up as workflows from *Settings → Playbooks*: **Slack intake** (commitments, questions and signals from the team's Slack into the ledger; the agent it runs as needs a Slack connector), **Session triage** (what ended sessions left open) and **Signals to specs** (groups signals, writes a one-page spec for the strongest, and asks whether to build it).
+
+**Who can decide.** Answering an ask, writing a rule, changing a brief or a budget are for people: a request that carries a run's id (as every `lw` call does) is refused. A run holds lofiwave's token, because its hooks need it, so this stops the honest path, not a run that sets out to cheat; with `PASSWORD` set, give people sign-ins and agents API keys, and the record shows which was which.
 
 ## API
 
@@ -423,6 +465,45 @@ A session's **user** is the person who started its run here: the sign-in name (*
 | `GET /api/ccx/show?target=&line=&around=&context=6&head=&tail=&full=1` | `ccx show`, a slice of one conversation: `{machine, file, total_blocks, blocks: [{line, uuid, kind, tool, timestamp, text}]}`. `target` is a session id (or its first characters) or a hit's `file`; only Claude transcripts are read, and with `picked` only shared ones (404 otherwise) |
 
 The index is brought up to date before a search (at most every 30 s). The first build on a machine with a long history takes minutes; a search doesn't wait more than 10 s for it and answers from what is indexed so far. 503 when ccx isn't installed, 400 with ccx's own message when it refuses a request.
+
+### Autopilot (asks, outcomes, programmes, rules, guards, the ledger)
+
+An agent normally uses these through `lw` (see *Autopilot* above). A call made for a run names it with `run_id` in the body or the `X-Lofiwave-Run` header; routes marked *person* refuse a call that carries that header.
+
+| | |
+|---|---|
+| `GET /api/inbox` | everything that needs a person: `{me, asks, prompts, stalls, items, recent, needs_you, classes, never_auto, channels}`. `asks`: open asks; `prompts`: permission prompts, questions and plans held from chat views (answer them with `…/chat/requests/:rid`); `stalls`: runs parked on a terminal prompt, and programme workers idle without an outcome; `items`: open items owned by the caller; `recent`: the last 25 answers |
+| `POST /api/asks` | raise one: `{title, body?, kind?: "question"\|"approval"\|"budget", class?, options?, amount?, for?, run_id?, programme?}` → 201 with the ask, plus `auto: true` when a rule answered it at once. `options`: strings (`"A: label"`, `*` after the recommended one) or `{id, label, detail, recommended}`; `approval` and `budget` asks without options get approve / deny. `amount`: the new cap, in USD |
+| `GET /api/asks?status=open\|answered\|cancelled\|all&run=&programme=&limit=` | list, newest first |
+| `GET /api/asks/:id` | one: `{id, run_id, programme, kind, class, title, body, options, amount, for_person, status, answer_option, answer_label, answer_text, answered_by, answered_via: "person"\|"rule", policy_id, answered_at, delivered, from, worker, can_have_rule, waited_ms, …}`. `delivered`: the answer reached the run (1), not yet (0), or there is no run (null) |
+| `GET /api/asks/:id/wait?timeout=60` | long-poll until it is answered or withdrawn (max 600 s): the ask plus `{reached, timed_out}` |
+| `POST /api/asks/:id/answer` *(person)* | `{option?, text?, always?, everywhere?, max_amount?}` → the ask, plus `policy` (the rule made by `always`) and `suggest_rule` (`{class, answer, count, …}` once three asks of the class got this answer). The answer is typed into the run as a message, unless the run is blocked on `…/wait`. A granted `budget` ask raises the worker's cap to `amount` |
+| `POST /api/asks/:id/cancel` | `{why?}`: withdraw it |
+| `GET /api/policies` · `POST /api/policies` *(person)* · `PUT`, `DELETE /api/policies/:id` *(person)* | delegation rules: `{class, answer, programme?, max_amount?, note?}`; `PUT` takes `{enabled?, max_amount?, note?}`. Listed with `applied_count`, `last_applied_at` and `recent` (the last asks it answered). 400 for a class that can never have one |
+| `POST /api/runs/:id/outcome` | `{outcome: "done"\|"blocked"\|"failed", summary, report_path?, stop?}`: what became of the run. `stop`: end its session 20 s later |
+| `POST /api/runs/:id/status` | `{text}`: a programme worker's one-line status |
+| `POST /api/runs/:id/spend` | `{bucket, amount, note?, total?}` → `{spent, budget_usd, programme_spent, programme_budget_usd, near, over}`. `total`: `amount` is the bucket's running total |
+| `GET /api/runs/:id/budget` · `PUT /api/runs/:id/budget {budget_usd}` *(person)* | where a run stands against its cap; set the cap |
+| `GET /api/runs/:id/autopilot` | `{programme, worker, role, outcome, open_asks, status_line, budget}`; the same is on every run record as `autopilot` (null when there is nothing to say) |
+| `GET /api/programmes` · `POST /api/programmes` *(person)* | list; create: `{name, slug?, goal?, folder?, brief?, budget_usd?}` |
+| `GET /api/programmes/:slug` · `PUT` *(person)* | everything about one: `{…, spent, worker_counts, open_asks, workers, rules, decisions, figures, outputs, briefs, spend_by_bucket, asks}`. Each worker: `{run_id, worker, role, state, status, activity, status_line, outcome, spent, budget_usd, brief_seen, brief_current, open_asks}`; `state` is one of `working`, `idle`, `needs you`, `blocked`, `done`, `failed`, `queued`, `ended`, or the run's status. `PUT` takes `{name?, goal?, folder?, budget_usd?, status?: "active"\|"paused"\|"done"}` |
+| `GET /api/programmes/:slug/context` | the programme as markdown: rules, summary, standing brief, decisions, figures, outputs, lessons (`lw context`) |
+| `PUT /api/programmes/:slug/brief` *(person)* | `{body, note?}`: a new version. Running workers are sent what changed. `GET …/briefs/:version` returns an old one |
+| `PUT /api/programmes/:slug/summary` | `{text}`: where it stands |
+| `POST /api/programmes/:slug/entries` | `{kind: "figure"\|"output"\|"decision", key?, title?, body?, value?, path?}`. A figure or output with the same key supersedes the earlier one. A decision is *person* only; a run gets one by having an ask answered |
+| `POST /api/programmes/:slug/workers` | start a worker: `{worker, brief?, prompt?, budget_usd?, type?: "claude", cwd?, extra_args?, env?, config?, interactive?, queue?: true}` → 201 (202 queued) with the run. Its folder is `<programme folder>/<worker>` (made if missing), `brief` is written there as `BRIEF.md`, and it stays up until stopped |
+| `POST /api/programmes/:slug/controller` *(person)* | `{schedule?, type?, cwd?, extra_args?}`: create or update the controller workflow (`<slug>: controller`). An empty `schedule` leaves it woken by worker events only |
+| `GET /api/programmes/:slug/events?since=` · `GET …/digest?since=` | its log, and its digest as text |
+| `GET /api/rules?programme=` · `POST /api/rules` · `PUT`, `DELETE /api/rules/:id` *(person)* | global rules (no `programme`) or a programme's rules and lessons: `{body, title?, programme?, kind?: "rule"\|"lesson", applies?: "programme"\|"all"}`. A `rule` is *person* only; a run may add a `lesson` |
+| `GET /api/guards` · `POST` · `PUT`, `DELETE /api/guards/:id` *(person)* | `{name, pattern, unless?, when?: "always"\|"over_budget", message?, enabled?}`; listed with `hits`. Built-ins can be turned off, not deleted |
+| `POST /api/hooks/pretool` | Claude Code's `PreToolUse` hook (Bash): `{}`, or a `deny` decision with the guard's message |
+| `GET /api/items?status=&owner=&kind=&programme=` · `POST /api/items` · `GET`, `PUT /api/items/:id` | the ledger: `{title, body?, kind?: "do"\|"decide"\|"verify"\|"risk"\|"signal", owner?, priority?, due?, source?, source_key?, programme?}`; `PUT` also takes `status: "open"\|"done"\|"dropped"` and `note`. `due`: a date, or `3d` / `2w` from now. A second `POST` with the same `source_key` returns the first item with `existed: true` |
+| `GET /api/people` · `POST` · `PUT`, `DELETE /api/people/:id` *(person)* | `{name, login?, slack_id?, notes?}` |
+| `GET /api/autopilot/settings` · `PUT` *(person)* · `POST /api/autopilot/notify-test` *(person)* | notification channels and thresholds (the variables in *Configuration*, by their lower-case names); secrets are listed masked. The test sends one notification to every channel and returns what each answered |
+| `GET /api/digest?since=` · `GET /api/events?since=&programme=&limit=` | the digest as text; the log: `[{id, at, kind, programme_id, run_id, ref, actor, text}]` |
+| `GET /api/playbooks` · `POST /api/playbooks/:name/workflow` *(person)* | the ready-made unattended runs; set one up as a workflow: `{schedule?, type?, cwd?, programme?, extra_args?}` |
+
+`POST /api/processes` also takes `programme` (a slug), `worker` and `budget_usd`, and a workflow takes `programme`: the run then joins that programme and gets its context.
 
 ### Examples
 

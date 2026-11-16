@@ -4,6 +4,7 @@
  *
  *  - PermissionRequest → approvals answered from the chat view (./approvals.ts)
  *  - MessageDisplay → streaming text; UserPromptSubmit, Stop → per-turn git checkpoints (./live.ts)
+ *  - PreToolUse (Bash) → guards: commands refused before they run (../autopilot/guards.ts)
  *  - statusLine → usage and context (scripts/claude-statusline.ts, which still runs the user's own statusline)
  *  - tui → the renderer (CLAUDE_TUI)
  *
@@ -35,6 +36,8 @@ export function chatSettingsPath(): string {
       MessageDisplay: [{ hooks: [http("/api/hooks/message", 2)] }],
       UserPromptSubmit: [{ hooks: [http("/api/hooks/turn", 10)] }],
       Stop: [{ hooks: [http("/api/hooks/turn", 10)] }],
+      // Guards (../autopilot/guards.ts): commands no run may execute, checked before each Bash call.
+      PreToolUse: [{ matcher: "Bash", hooks: [http("/api/hooks/pretool", 5)] }],
     },
     statusLine: { type: "command", command: `${shq(process.execPath)} ${shq(join(config.root, "scripts", "claude-statusline.ts"))}`, padding: 0 },
     // The renderer (CLAUDE_TUI): "default" keeps claude off the alternate screen, so tmux keeps the history.
