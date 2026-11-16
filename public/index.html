@@ -28,7 +28,9 @@
   <button id="drawer-btn" class="drawer-btn" aria-label="Sessions" aria-controls="session-rail" aria-expanded="false"><svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true"><path d="M3 5h12M3 9h12M3 13h8" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"></path></svg></button>
   <a class="brand" href="#console" aria-label="lofiwave home"><img class="brand-mark" src="/logo.png" alt="" width="30" height="30"><span>lofiwave</span></a>
   <nav aria-label="Main navigation">
+    <button data-tab="inbox">Inbox<span id="inbox-count" class="nav-count" hidden></span></button>
     <button data-tab="console" class="active">Sessions</button>
+    <button data-tab="programmes">Programmes</button>
     <button data-tab="workflows">Workflows</button>
     <button data-tab="connect">Connect</button>
     <button data-tab="advanced">Advanced</button>
@@ -58,6 +60,10 @@
       <div class="pane" id="session-pane" role="region" aria-label="Session terminal" aria-live="off"></div>
     </div>
   </section>
+
+  <section id="tab-inbox" class="tab"><div id="ap-inbox" class="ap"></div></section>
+
+  <section id="tab-programmes" class="tab"><div id="ap-programmes" class="ap"></div></section>
 
   <section id="tab-agents" class="tab">
     <div class="toolbar">
@@ -133,6 +139,7 @@
         <tbody></tbody>
       </table>
     </div>
+    <div id="ap-settings" class="ap"></div>
     <div class="card">
       <h2>Appearance</h2>
       <p class="muted">Saved in this browser.</p>
@@ -380,6 +387,7 @@
 <script src="/vendor/purify.min.js"></script>
 <script src="/vendor/highlight.min.js"></script>
 <script src="/chat.js"></script>
+<script src="/autopilot.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>

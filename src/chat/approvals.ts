@@ -69,6 +69,11 @@ export function requestsFor(runId: number): ApprovalRequest[] {
   return [...held.values()].filter((r) => r.run_id === runId).sort((a, b) => a.created_at - b.created_at).map(publicOf);
 }
 
+/** Every open request, across runs: the inbox lists them beside asks. */
+export function allRequests(): ApprovalRequest[] {
+  return [...held.values()].sort((a, b) => a.created_at - b.created_at).map(publicOf);
+}
+
 /** Let a request go. `decision` undefined: no decision, so the TUI's own dialog decides. */
 function release(id: string, decision?: object) {
   const r = held.get(id);

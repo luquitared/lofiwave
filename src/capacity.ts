@@ -3,7 +3,7 @@
  * A small VM running a swarm got OOM-killed (the console included) when several agents started together, so
  * startRun asks here first and answers 429 when the machine is full; POST /api/processes {queue: true} waits instead.
  */
-import { readFileSync } from "node:fs";
+import { readFileSync, statfsSync } from "node:fs";
 import { freemem } from "node:os";
 import { db } from "./db";
 import { config } from "./config";
@@ -36,6 +36,11 @@ export function memAvailableMb(): number {
   return Math.floor(freemem() / MB);
 }
 
+/** Free space on the disk that holds DATA_DIR (logs, transcripts, the database), in MB; null if it can't be read. */
+export function diskFreeMb(): number | null {
+  try { const s = statfsSync(config.dataDir); return Math.floor((Number(s.bavail) * Number(s.bsize)) / MB); } catch { return null; }
+}
+
 /** Agent runs holding a slot: running (including ones still starting). */
 export function liveAgentRuns(): number {
   return db.query<{ n: number }, []>(
@@ -56,12 +61,17 @@ export function admissionBlocker(): string | null {
     const free = memAvailableMb();
     if (free < config.minFreeMemMb) return `only ${free} MB of memory is available and a new agent needs ${config.minFreeMemMb} MB free (MIN_FREE_MEM_MB)`;
   }
+  if (config.minFreeDiskMb > 0) {
+    const free = diskFreeMb();
+    if (free !== null && free < config.minFreeDiskMb) return `only ${free} MB of disk is free and a new agent needs ${config.minFreeDiskMb} MB (MIN_FREE_DISK_MB)`;
+  }
   return null;
 }
 
 export function capacity() {
   return {
     max_agent_runs: config.maxAgentRuns, live_agent_runs: liveAgentRuns(), queued: queuedRuns(),
-    mem_available_mb: memAvailableMb(), min_free_mem_mb: config.minFreeMemMb, blocked: admissionBlocker(),
+    mem_available_mb: memAvailableMb(), min_free_mem_mb: config.minFreeMemMb,
+    disk_free_mb: diskFreeMb(), min_free_disk_mb: config.minFreeDiskMb, blocked: admissionBlocker(),
   };
 }

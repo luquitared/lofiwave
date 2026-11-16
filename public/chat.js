@@ -766,6 +766,11 @@ class ChatView {
   // ---------------------------------------------------------------- rows
   renderUser(it) {
     if (it.notification) return h("div", { class: "chat-event info" }, h("span", {}, "⚙"), h("span", {}, it.text));
+    // Typed by lofiwave itself (an answer to an ask, a changed brief, a wake-up), not by a person: say so.
+    const auto = typeof it.text === "string" && it.text.startsWith("[lofiwave]");
+    if (auto) return h("div", { class: "chat-user from-lofiwave", title: "typed into the session by lofiwave, not by a person" },
+      h("span", { class: "chat-from" }, "lofiwave"),
+      h("div", { class: "chat-user-text" }, it.text.replace(/^\[lofiwave\]\s*/, "")));
     return h("div", { class: `chat-user${it.queued ? " queued" : ""}`, title: it.queued ? "sent while Claude was working, and read mid-turn" : null },
       it.command ? h("code", { class: "chat-cmd" }, it.command) : "",
       ...(it.text ? this.userText(it) : []),

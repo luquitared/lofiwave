@@ -28,6 +28,8 @@ import { systemUsage } from "./usage";
 import { planLimits } from "./limits";
 import { ccxStatus, ccxSearch, ccxSessions, ccxShow } from "./ccx";
 import { insidePath, listDir, writeFiles, decodeContent, extractInto, archiveOf, resultsOf, makeFolder } from "./files";
+import { registerAutopilot, runExtras } from "./autopilot/routes";
+import { getProgramme, attachRun } from "./autopilot/programmes";
 
 const PUBLIC_DIR = join(config.root, "public");
 const startedAt = now();
@@ -125,6 +127,8 @@ function runOut(r: RunRow, { withOutput = true } = {}) {
   out.session_id = db.query<{ session_id: string }, [number]>("SELECT session_id FROM sessions WHERE run_id = ? ORDER BY started_at DESC, id DESC LIMIT 1").get(r.id)?.session_id ?? null;
   if (!withOutput) delete out.output;
   else out.sessions = sessionsOf(r.id);
+  // Its programme, what it said became of it, and how many asks it has open (src/autopilot).
+  out.autopilot = runExtras(r.id);
   return out;
 }
 
@@ -468,6 +472,15 @@ route("POST", "/api/processes", async (req) => {
   const meta: Record<string, any> = {};
   if (group) meta.group = group;
   if (parent) meta.parent_run = parent.id;
+  // A run for a programme (src/autopilot): it gets the programme's context, and is listed as one of its workers.
+  const programme = b.programme ? getProgramme(str(b.programme, "programme")) : null;
+  const budget = b.budget_usd === undefined || b.budget_usd === null || b.budget_usd === "" ? undefined : Number(b.budget_usd);
+  if (budget !== undefined && (!Number.isFinite(budget) || budget < 0)) throw new ApiError(400, "budget_usd must be an amount in USD");
+  if (programme) {
+    meta.programme = programme.slug; meta.worker = str(b.worker, "worker").trim(); meta.role = b.role === "controller" ? "controller" : "worker";
+    if (budget !== undefined) meta.budget_usd = budget;
+    if (!meta.group) meta.group = programme.slug;
+  }
   const run = await startJob({
     typeName,
     cwd,
@@ -499,6 +512,7 @@ route("POST", "/api/processes", async (req) => {
       }
     },
   });
+  if (programme) attachRun(run.id, programme, { worker: meta.worker, role: meta.role, ...(budget !== undefined ? { budget_usd: budget } : {}) });
   return json(runOut(run), run.status === "queued" ? 202 : 201);
 });
 
@@ -590,8 +604,9 @@ function parseWorkflowBody(b: any, cur?: WorkflowRow) {
   if (!cwd && !target) throw new ApiError(400, "cwd is required (the process type has no default_cwd)");
   const schedule = pick("schedule", (v) => str(v, "schedule").trim(), cur?.schedule ?? "");
   if (schedule) { const err = validateCron(schedule); if (err) throw new ApiError(400, `invalid schedule: ${err}`); }
+  const programme = pick("programme", (v) => (str(v, "programme").trim() ? getProgramme(str(v, "programme").trim()).slug : ""), (cur as any)?.programme ?? "");
   return {
-    name, type_name, cwd, schedule, target, config: cfg,
+    name, type_name, cwd, schedule, target, config: cfg, programme,
     prompt: pick("prompt", (v) => str(v, "prompt"), cur?.prompt ?? ""),
     extra_args: pick("extra_args", (v) => strArray(v, "extra_args"), cur ? JSON.parse(cur.extra_args) : []),
     env: pick("env", (v) => strMap(v, "env"), cur ? JSON.parse(cur.env) : {}),
@@ -610,10 +625,10 @@ route("POST", "/api/workflows", async (req) => {
   let id: number;
   try {
     id = Number(db.prepare(
-      `INSERT INTO workflows (name, type_name, cwd, prompt, extra_args, env, schedule, enabled, timeout_sec, allow_overlap, target, config, next_run_at, created_at, updated_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      `INSERT INTO workflows (name, type_name, cwd, prompt, extra_args, env, schedule, enabled, timeout_sec, allow_overlap, target, config, programme, next_run_at, created_at, updated_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     ).run(w.name, w.type_name, w.cwd, w.prompt, JSON.stringify(w.extra_args), JSON.stringify(w.env), w.schedule,
-      w.enabled ? 1 : 0, w.timeout_sec, w.allow_overlap ? 1 : 0, w.target, w.config, w.enabled ? computeNext(w.schedule) : null, t, t).lastInsertRowid);
+      w.enabled ? 1 : 0, w.timeout_sec, w.allow_overlap ? 1 : 0, w.target, w.config, w.programme, w.enabled ? computeNext(w.schedule) : null, t, t).lastInsertRowid);
   } catch (e: any) {
     if (String(e.message).includes("UNIQUE")) throw new ApiError(409, `workflow "${w.name}" already exists`);
     throw e;
@@ -626,9 +641,9 @@ route("PUT", "/api/workflows/:id", async (req, p) => {
   const w = parseWorkflowBody(await body(req), cur);
   try {
     db.prepare(
-      `UPDATE workflows SET name=?, type_name=?, cwd=?, prompt=?, extra_args=?, env=?, schedule=?, enabled=?, timeout_sec=?, allow_overlap=?, target=?, config=?, updated_at=? WHERE id=?`,
+      `UPDATE workflows SET name=?, type_name=?, cwd=?, prompt=?, extra_args=?, env=?, schedule=?, enabled=?, timeout_sec=?, allow_overlap=?, target=?, config=?, programme=?, updated_at=? WHERE id=?`,
     ).run(w.name, w.type_name, w.cwd, w.prompt, JSON.stringify(w.extra_args), JSON.stringify(w.env), w.schedule,
-      w.enabled ? 1 : 0, w.timeout_sec, w.allow_overlap ? 1 : 0, w.target, w.config, now(), cur.id);
+      w.enabled ? 1 : 0, w.timeout_sec, w.allow_overlap ? 1 : 0, w.target, w.config, w.programme, now(), cur.id);
   } catch (e: any) {
     if (String(e.message).includes("UNIQUE")) throw new ApiError(409, `workflow "${w.name}" already exists`);
     throw e;
@@ -1030,6 +1045,9 @@ route("DELETE", "/api/runs/:id", async (_r, p) => {
   return json({ ok: true });
 });
 
+// ---- autopilot: programmes, asks, rules, guards, the ledger (src/autopilot/routes.ts)
+registerAutopilot({ route, json, body, runOut });
+
 // ---------------------------------------------------------------- server
 
 function baseUrl(req: Request): string {
@@ -1079,7 +1097,7 @@ const server = Bun.serve<WsData>({
     // A held approval stays open with nothing sent until someone answers: no idle timeout for it.
     if (path === "/api/hooks/permission") srv.timeout(req, 0);
     // A long-poll sends nothing until it answers: don't let the idle timeout (10s by default) cut it off.
-    if (/^\/api\/runs\/\d+\/wait\/?$/.test(path)) srv.timeout(req, 0);
+    if (/^\/api\/(runs|asks)\/\d+\/wait\/?$/.test(path)) srv.timeout(req, 0);
     const ws = req.headers.get("upgrade")?.toLowerCase() === "websocket";
     const tty = ws && path.match(/^\/api\/runs\/(\d+)\/tty$/);
     const chat = ws && path.match(/^\/api\/(runs|sessions)\/([^/]+)\/chat$/);

@@ -51,6 +51,8 @@ export async function runWorkflow(wf: WorkflowRow, trigger: string, target: stri
     terminal: "none",
     target: target || undefined,
     config: wf.config || undefined,
+    // A workflow that works for a programme (its controller, a scheduled pass): the run joins it.
+    meta: (wf as any).programme ? { programme: (wf as any).programme, worker: wf.name, role: /: controller$/.test(wf.name) ? "controller" : "worker" } : undefined,
   });
 }
 

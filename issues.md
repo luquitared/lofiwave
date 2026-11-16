@@ -5,6 +5,42 @@ Open work, newest first within each status. One heading per issue; close it by m
 
 ## Open
 
+### #10 Autopilot: what's left after asks, programmes, rules and guards
+*Opened 2026-11-14 · designed in [`docs/autopilot.md`](docs/autopilot.md) · built on `lucas/autopilot`*
+
+Agents can raise asks and report outcomes (`lw`), answers come back with their author, answers become rules a
+person confirms, programmes hold the shared brief, rules, decisions, figures and budgets, a controller playbook
+runs on worker events, guards refuse commands through a `PreToolUse` hook, and there is a ledger of items with
+follow-ups. Checked end to end with script workers (`test/autopilot.e2e.test.ts`) and once by hand with a real
+Claude Code session (the guard refused a command, `lw context` / `ask` / `done` worked, the answer was typed into
+the TUI and read).
+
+Not done, or not checked:
+
+- [ ] Answering from Slack or Telegram. Notifications link to the Inbox card; buttons need a Slack app with an
+      interactivity endpoint (and its signing secret), or a Telegram bot polled for replies.
+- [ ] Slack (bot, and direct messages to a person's Slack id) and Telegram are tested against a stand-in API
+      only, and the Slack incoming webhook not at all. None has been sent to the real service.
+- [ ] A run can still answer its own ask by calling the API without its run id: it holds the console's token.
+      Give runs a token of their own that can't reach the person-only routes.
+- [ ] The controller playbook has only been run as a script standing in for an agent. Run it with a real agent on
+      a real programme: does it check claims, stop finished workers, and keep the summary short?
+- [ ] The three intake playbooks (Slack intake, session triage, signals to specs) are prompts that have never run.
+      Slack intake needs a Slack connector in the agent it runs as.
+- [ ] Stall detection for a run waiting on a terminal prompt, and the follow-up on overdue items, are not covered
+      by a test (the first needs a TUI that reports `waiting`).
+- [ ] Codex gets the instructions and `lw` but no guards (no hook), and nothing has been run with it.
+- [ ] Runs on an E2B target or in a Docker config have no `lw`, no programme context and no guards: they can't
+      reach the console. A tunnel or a relay through the sandbox's files would do it.
+- [ ] Guards match the command line of a Bash call. A script written and then run gets past them; so does a
+      command built from variables.
+- [ ] Spend is what a worker reports. Reading a cloud bill, or tagging instances by run and summing them, would
+      make the budget real.
+- [ ] A resumed session keeps its programme only when it is restarted through the run (`restart`); *Resume here*
+      on an ended worker starts it outside the programme.
+- [ ] Sessions on another machine don't show in this console's Inbox (ideas-fridge §3).
+- [ ] The digest is plain text. On Slack it should be blocks, with one line per ask that links to its card.
+
 ### #9 Chat: a message sometimes shows twice while the agent is working
 *Opened 2026-10-27 · seen on a live run with several background agents*
 

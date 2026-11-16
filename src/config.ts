@@ -101,6 +101,8 @@ export const config = {
    */
   maxAgentRuns: Number(process.env.MAX_AGENT_RUNS ?? Math.max(1, Math.min(16, Math.floor((totalmem() / 2 ** 20 - 1024) / 600)))),
   minFreeMemMb: Number(process.env.MIN_FREE_MEM_MB ?? 500),
+  /** And none started while the disk holding DATA_DIR has less than this free (0 = no check): a full disk stops every run. */
+  minFreeDiskMb: Number(process.env.MIN_FREE_DISK_MB ?? 1024),
   /** `mkdir_cwd` on POST /api/processes may only create folders under these (colon-separated; default: home and temp dirs). */
   cwdRoots: (process.env.CWD_ROOTS ?? `${homedir()}:${tmpdir()}`).split(":").map((p) => p.trim()).filter(Boolean).map((p) => resolve(p)),
 };
