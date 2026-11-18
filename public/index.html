@@ -49,10 +49,9 @@
   <div class="page-top">
     <h1 id="page-title">Sessions</h1>
     <div class="subnav" id="subnav" role="tablist" aria-label="Advanced" hidden>
-      <button data-sub="agents">Processes</button><button data-sub="apps">Apps</button><button data-sub="runs">Runs</button><button data-sub="types">Types</button><button data-sub="system">System</button><button data-sub="usage">Usage</button>
+      <button data-sub="agents">Processes</button><button data-sub="apps">Apps</button><button data-sub="runs">Runs</button><button data-sub="types">Types</button><button data-sub="system">System</button><button data-sub="usage">Usage</button><button data-sub="stats">Stats</button>
     </div>
   </div>
-  <div id="team-bar" class="team-bar" aria-label="Team activity" hidden></div>
 
   <section id="tab-console" class="tab active">
     <div class="console-view">
@@ -160,6 +159,29 @@
   <section id="tab-usage" class="tab">
     <div id="usage-cards"></div>
     <p class="muted usage-note">Plan limits as of each agent's last request on this machine. Claude's come from the statusline of sessions lofiwave started; Codex's from its rollouts in <code>~/.codex/sessions</code>, which every Codex session writes. A bar's tick is where an even pace through the window would be by now.</p>
+  </section>
+
+  <section id="tab-stats" class="tab">
+    <div class="toolbar">
+      <div class="stats-range" id="stats-range" role="group" aria-label="Time range"></div>
+      <span id="stats-totals" class="muted"></span>
+    </div>
+    <h3 class="section-title">People <span class="muted">by messages sent · click one to see what they sent</span></h3>
+    <table id="stats-people" class="stats-table">
+      <thead><tr><th>Person</th><th>Messages</th><th>Tokens</th><th>Output</th><th>Sessions</th><th>Last message</th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <h3 class="section-title">Sessions <span class="muted">by tokens</span></h3>
+    <table id="stats-sessions" class="stats-table">
+      <thead><tr><th>Session</th><th>Folder</th><th>People</th><th>Messages</th><th>Tokens</th><th>Output</th><th>Last active</th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <h3 class="section-title">Folders <span class="muted">by tokens</span></h3>
+    <table id="stats-folders" class="stats-table">
+      <thead><tr><th>Folder</th><th>Sessions</th><th>People</th><th>Messages</th><th>Tokens</th><th>Output</th><th>Last active</th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <p class="muted sys-note">A message counts for whoever sent it from lofiwave: the chat view, the browser terminal (whoever pressed Enter) or the API. Messages typed where lofiwave can't see who (an ssh or tmux attach, Claude's remote control) and those from before this was tracked are under <i>No known sender</i>. Tokens come from Claude's transcripts on this machine, subagents included, for every Claude session here, lofiwave's or not: input, cache writes, cache reads and output. Output is what the model wrote.</p>
   </section>
 
   <section id="tab-runs" class="tab">

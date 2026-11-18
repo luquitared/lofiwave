@@ -1,35 +1,50 @@
 /**
- * What the team is doing and when, for the bar above Advanced (GET /api/stats/team?days=7).
+ * Advanced → Stats: who sent what, and the tokens it cost, per person, session and folder (GET /api/stats?days=).
  *
- * Everything comes from lofiwave's own tables: runs (who started what, where), and turns, one row per prompt Claude
- * takes in a lofiwave run (its UserPromptSubmit hook), closed by Stop. A turn's length is how long the agent worked
- * on it, so summed turns are agent time. Work is credited to whoever started the run (sign-in name, an API key's
- * maker), not to whoever typed into a shared session: lofiwave can't tell those apart in the TUI.
+ * Who sent a prompt: lofiwave notes who is about to send one (noteSender) when someone sends from the chat view,
+ * through the API, or presses Enter in the browser terminal. When Claude's UserPromptSubmit hook then reports the
+ * prompt, the turn is recorded with that sender. Prompts typed where lofiwave can't see who (an ssh/tmux attach,
+ * Claude's remote control) have no sender, and neither do prompts from before this was tracked.
+ *
+ * Tokens: per API call from the transcripts (src/tokens.ts), tied to a prompt by its id. Every Claude session on the
+ * machine counts toward sessions and folders; only prompts lofiwave saw being sent count toward a person.
  */
 import { basename } from "node:path";
 import { db, now } from "./db";
 import { TOKEN_ACTOR, KEY_ACTOR_PREFIX } from "./auth";
 
-const HOUR = 3_600_000;
-const DAY = 24 * HOUR;
-/** A turn that never got its Stop (interrupted, crashed) counts at most this long. */
-export const MAX_TURN_MS = 3 * HOUR;
+const DAY = 86_400_000;
+/** How long after someone sends (chat, API) or presses Enter (terminal) a prompt Claude reports is theirs. */
+const SENDER_WINDOW_MS: Record<Via, number> = { chat: 90_000, api: 90_000, terminal: 20_000 };
+const TEXT_MAX = 2000;
+
+export type Via = "chat" | "terminal" | "api";
+const pending = new Map<number, { by: string; via: Via; at: number }>();
+
+/** Someone is sending input to run `runId`'s agent: the next prompt it reports is theirs. */
+export function noteSender(runId: number, by: string | undefined, via: Via, at = now()): void {
+  if (by) pending.set(runId, { by, via, at });
+}
 
 /** UserPromptSubmit opens a turn (and closes the run's earlier open one, which an interrupt leaves open); Stop closes it. */
-export function recordTurn(runId: number, sessionId: string, promptId: string, event: string, at = now()): void {
+export function recordTurn(runId: number, sessionId: string, promptId: string, event: string, text = "", at = now()): void {
   try {
     if (event === "UserPromptSubmit") {
+      const p = pending.get(runId);
+      const sender = p && at - p.at <= SENDER_WINDOW_MS[p.via] ? p : null;
+      if (sender) pending.delete(runId);
       db.query("UPDATE turns SET ended_at = ? WHERE run_id = ? AND ended_at IS NULL AND prompt_id != ?").run(at, runId, promptId);
-      db.query("INSERT OR IGNORE INTO turns (run_id, session_id, prompt_id, started_at) VALUES (?, ?, ?, ?)").run(runId, sessionId, promptId, at);
+      db.query("INSERT OR IGNORE INTO turns (run_id, session_id, prompt_id, started_at, sent_by, via, text) VALUES (?, ?, ?, ?, ?, ?, ?)")
+        .run(runId, sessionId, promptId, at, sender?.by ?? "", sender?.via ?? "", text.slice(0, TEXT_MAX));
     } else if (event === "Stop") {
       db.query("UPDATE turns SET ended_at = ? WHERE run_id = ? AND prompt_id = ? AND ended_at IS NULL").run(at, runId, promptId);
     }
   } catch (e) { console.error("[turns]", e); }
 }
 
-/** Who a run's `started_by` stands for: a sign-in name, an API key's maker (or the key's name), the shared token. */
-export function personOf(by: string | null, trigger: string, keyMakers: Map<string, string>): string {
-  if (!by) return trigger === "schedule" ? "schedules" : "unknown";
+/** The person behind an actor: a sign-in name, an API key's maker (else the key's name), the console token; '' = nobody known. */
+export function personOf(by: string, keyMakers: Map<string, string>): string {
+  if (!by) return "";
   if (by === TOKEN_ACTOR) return "API token";
   if (by.startsWith(KEY_ACTOR_PREFIX)) {
     const key = by.slice(KEY_ACTOR_PREFIX.length), maker = keyMakers.get(key) ?? "";
@@ -37,89 +52,120 @@ export function personOf(by: string | null, trigger: string, keyMakers: Map<stri
   }
   return by;
 }
+const keyMakers = () => new Map(db.query<{ name: string; created_by: string }, []>("SELECT name, created_by FROM api_keys").all().map((k) => [k.name, k.created_by]));
 
-export type PersonStats = { name: string; sessions: number; turns: number; agent_ms: number; running: number; working: number; last_at: number | null };
-export type TeamStats = {
+export type Tokens = { input: number; output: number; cache_read: number; cache_write: number; total: number };
+const zero = (): Tokens => ({ input: 0, output: 0, cache_read: 0, cache_write: 0, total: 0 });
+function add(t: Tokens, u: { input: number; output: number; cache_read: number; cache_write: number }) {
+  t.input += u.input; t.output += u.output; t.cache_read += u.cache_read; t.cache_write += u.cache_write;
+  t.total += u.input + u.output + u.cache_read + u.cache_write;
+}
+
+export type PersonRow = { person: string; messages: number; sessions: number; tokens: Tokens; via: Record<string, number>; last_at: number | null };
+export type SessionStat = { session_id: string; title: string; cwd: string; run_id: number | null; messages: number; people: string[]; tokens: Tokens; last_at: number };
+export type FolderStat = { cwd: string; name: string; sessions: number; messages: number; people: string[]; tokens: Tokens; last_at: number };
+export type Stats = {
   days: number; since: number; at: number;
-  totals: { people: number; sessions: number; workflow_runs: number; failed: number; turns: number; agent_ms: number; running: number; working: number };
-  people: PersonStats[];
-  projects: { name: string; turns: number; agent_ms: number; people: string[] }[];
-  /** [hour start (ms), index into people, turns started that hour]: the client bins it by its own time zone. */
-  activity: [number, number, number][];
+  totals: { messages: number; tracked_messages: number; tokens: Tokens; sessions: number; people: number };
+  /** By messages sent; person '' = prompts lofiwave didn't see anyone send. */
+  people: PersonRow[]; sessions: SessionStat[]; folders: FolderStat[];
 };
 
-type RunLite = { id: number; type_name: string; cwd: string; trigger: string; status: string; started_at: number; ended_at: number | null; workflow_id: number | null; by: string | null };
+type Call = { session_id: string; prompt_id: string; cwd: string; at: number; input: number; output: number; cache_read: number; cache_write: number };
+type Turn = { run_id: number; session_id: string; prompt_id: string; started_at: number; sent_by: string; via: string; cwd: string };
 
-export function teamStats(days = 7, t = now()): TeamStats {
+export function stats(days = 7, t = now(), limit = 25): Stats {
   days = Math.min(90, Math.max(1, Math.round(days) || 7));
-  const since = t - days * DAY;
-  const keyMakers = new Map(db.query<{ name: string; created_by: string }, []>("SELECT name, created_by FROM api_keys").all().map((k) => [k.name, k.created_by]));
-  const agentTypes = new Set(db.query<{ name: string }, []>("SELECT name FROM process_types WHERE kind = 'agent'").all().map((r) => r.name));
-  const runs = db.query<RunLite, [number, number]>(
-    `SELECT id, type_name, cwd, trigger, status, started_at, ended_at, workflow_id, json_extract(meta, '$.started_by') AS by FROM runs
-     WHERE started_at >= ? OR status IN ('running', 'queued') OR id IN (SELECT run_id FROM turns WHERE started_at >= ?)`).all(since, since);
-  const runById = new Map(runs.map((r) => [r.id, r]));
-  const turns = db.query<{ run_id: number; started_at: number; ended_at: number | null }, [number]>(
-    "SELECT run_id, started_at, ended_at FROM turns WHERE started_at >= ? ORDER BY started_at").all(since);
+  const since = t - days * DAY, makers = keyMakers();
+  // Per prompt: its calls' tokens in the window (subagents' too), the session, folder and time of the last call.
+  const calls = db.query<Call, [number]>(
+    `SELECT session_id, prompt_id, cwd, MAX(at) AS at, SUM(input) AS input, SUM(output) AS output, SUM(cache_read) AS cache_read, SUM(cache_write) AS cache_write
+     FROM token_calls WHERE at >= ? GROUP BY session_id, prompt_id`).all(since);
+  // A prompt sent before the window can still be making calls in it: look turns up from a day earlier.
+  const recent = db.query<Turn, [number]>(
+    `SELECT t.run_id, t.session_id, t.prompt_id, t.started_at, t.sent_by, t.via, r.cwd FROM turns t JOIN runs r ON r.id = t.run_id WHERE t.started_at >= ?`).all(since - DAY);
+  const turnOf = new Map(recent.map((x) => [x.prompt_id, x]));
+  const turns = recent.filter((x) => x.started_at >= since);
+  const runOfSession = new Map(db.query<{ session_id: string; run_id: number }, []>("SELECT session_id, MAX(run_id) AS run_id FROM sessions GROUP BY session_id").all().map((r) => [r.session_id, r.run_id]));
 
-  const people = new Map<string, PersonStats>();
-  const person = (name: string) => {
-    let p = people.get(name);
-    if (!p) people.set(name, (p = { name, sessions: 0, turns: 0, agent_ms: 0, running: 0, working: 0, last_at: null }));
-    return p;
+  const people = new Map<string, PersonRow & { _s: Set<string> }>();
+  const personRow = (p: string) => {
+    let r = people.get(p);
+    if (!r) people.set(p, (r = { person: p, messages: 0, sessions: 0, tokens: zero(), via: {}, last_at: null, _s: new Set() }));
+    return r;
   };
-  const touch = (p: PersonStats, at: number) => { if (p.last_at === null || at > p.last_at) p.last_at = at; };
-  const totals = { people: 0, sessions: 0, workflow_runs: 0, failed: 0, turns: 0, agent_ms: 0, running: 0, working: 0 };
-  const live = (r: RunLite) => r.status === "running" || r.status === "queued";
+  const sessions = new Map<string, SessionStat & { _p: Set<string>; _m: Set<string> }>();
+  const folders = new Map<string, FolderStat & { _p: Set<string>; _s: Set<string>; _m: Set<string> }>();
+  const totals = { messages: 0, tracked_messages: 0, tokens: zero(), sessions: 0, people: 0 };
+  const seenPrompt = new Set<string>();
 
-  for (const r of runs) {
-    const p = person(personOf(r.by, r.trigger, keyMakers));
-    if (r.started_at >= since) {
-      if (r.workflow_id !== null || r.trigger === "schedule") totals.workflow_runs++;
-      else if (agentTypes.has(r.type_name)) { p.sessions++; totals.sessions++; }
-      if (["failed", "error", "timeout"].includes(r.status)) totals.failed++;
-      touch(p, r.started_at);
+  const touch = (sid: string, cwd: string, prompt: string, who: string | null, at: number, u: Tokens | null) => {
+    let s = sessions.get(sid);
+    if (!s) sessions.set(sid, (s = { session_id: sid, title: "", cwd, run_id: runOfSession.get(sid) ?? null, messages: 0, people: [], tokens: zero(), last_at: 0, _p: new Set(), _m: new Set() }));
+    if (!s.cwd) s.cwd = cwd;
+    const key = s.cwd || cwd || "?";
+    let f = folders.get(key);
+    if (!f) folders.set(key, (f = { cwd: key, name: basename(key) || key, sessions: 0, messages: 0, people: [], tokens: zero(), last_at: 0, _p: new Set(), _s: new Set(), _m: new Set() }));
+    if (prompt) { s._m.add(prompt); f._m.add(prompt); }
+    f._s.add(sid);
+    if (who) { s._p.add(who); f._p.add(who); }
+    if (u) { add(s.tokens, u); add(f.tokens, u); }
+    s.last_at = Math.max(s.last_at, at); f.last_at = Math.max(f.last_at, at);
+  };
+
+  // Prompts that made API calls in the window: every Claude session here.
+  for (const c of calls) {
+    const turn = c.prompt_id ? turnOf.get(c.prompt_id) : undefined;
+    const who = turn ? personOf(turn.sent_by, makers) : "";
+    const u = { ...zero(), input: c.input, output: c.output, cache_read: c.cache_read, cache_write: c.cache_write, total: c.input + c.output + c.cache_read + c.cache_write };
+    add(totals.tokens, u);
+    const p = personRow(who);
+    add(p.tokens, u); p._s.add(c.session_id);
+    p.last_at = Math.max(p.last_at ?? 0, c.at);
+    touch(c.session_id, c.cwd, c.prompt_id, who || null, c.at, u);
+    if (c.prompt_id && !seenPrompt.has(c.prompt_id)) {
+      seenPrompt.add(c.prompt_id);
+      if (!turn) { p.messages++; totals.messages++; }
     }
-    if (r.status === "running" && agentTypes.has(r.type_name)) { p.running++; totals.running++; }
   }
-
-  const projects = new Map<string, { name: string; turns: number; agent_ms: number; people: Set<string> }>();
-  const hours = new Map<string, number>(); // `${hour}:${person}` → turns
-  const workingRuns = new Set<number>();
+  // Prompts lofiwave recorded (whether or not their tokens are indexed yet).
   for (const turn of turns) {
-    const r = runById.get(turn.run_id);
-    if (!r) continue;
-    const name = personOf(r.by, r.trigger, keyMakers), p = person(name);
-    const open = turn.ended_at === null;
-    const isWorking = open && live(r) && t - turn.started_at < MAX_TURN_MS;
-    const end = open ? (isWorking ? t : turn.started_at) : turn.ended_at!;
-    const ms = Math.max(0, Math.min(MAX_TURN_MS, end - turn.started_at));
-    p.turns++; p.agent_ms += ms; totals.turns++; totals.agent_ms += ms;
-    touch(p, open ? turn.started_at : turn.ended_at!);
-    if (isWorking && !workingRuns.has(r.id)) { workingRuns.add(r.id); p.working++; totals.working++; }
-    const proj = basename(r.cwd) || r.cwd || "?";
-    let pr = projects.get(proj);
-    if (!pr) projects.set(proj, (pr = { name: proj, turns: 0, agent_ms: 0, people: new Set() }));
-    pr.turns++; pr.agent_ms += ms; pr.people.add(name);
-    const key = `${Math.floor(turn.started_at / HOUR) * HOUR}:${name}`;
-    hours.set(key, (hours.get(key) ?? 0) + 1);
+    const who = personOf(turn.sent_by, makers), p = personRow(who);
+    p.messages++; totals.messages++;
+    if (who) totals.tracked_messages++;
+    if (turn.via) p.via[turn.via] = (p.via[turn.via] ?? 0) + 1;
+    p._s.add(turn.session_id);
+    p.last_at = Math.max(p.last_at ?? 0, turn.started_at);
+    seenPrompt.add(turn.prompt_id);
+    if (turn.session_id) touch(turn.session_id, turn.cwd, turn.prompt_id, who || null, turn.started_at, null);
   }
 
-  // Busiest first; people with nothing in the window (only a live run from before it) still show.
-  const list = [...people.values()].filter((p) => p.sessions || p.turns || p.running)
-    .sort((a, b) => b.agent_ms - a.agent_ms || b.turns - a.turns || b.sessions - a.sessions || a.name.localeCompare(b.name));
-  const index = new Map(list.map((p, i) => [p.name, i]));
-  totals.people = list.filter((p) => p.name !== "schedules" && p.name !== "unknown").length;
-  const activity: [number, number, number][] = [];
-  for (const [key, n] of hours) {
-    const i = key.indexOf(":"), at = Number(key.slice(0, i)), who = index.get(key.slice(i + 1));
-    if (who !== undefined) activity.push([at, who, n]);
-  }
-  activity.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
-  return {
-    days, since, at: t, totals, people: list,
-    projects: [...projects.values()].sort((a, b) => b.agent_ms - a.agent_ms || b.turns - a.turns).slice(0, 8)
-      .map((p) => ({ name: p.name, turns: p.turns, agent_ms: p.agent_ms, people: [...p.people] })),
-    activity,
-  };
+  const peopleOut = [...people.values()].map(({ _s, ...p }) => ({ ...p, sessions: _s.size }))
+    .sort((a, b) => (a.person === "" ? 1 : 0) - (b.person === "" ? 1 : 0) || b.messages - a.messages || b.tokens.total - a.tokens.total || a.person.localeCompare(b.person));
+  totals.people = peopleOut.filter((p) => p.person).length;
+  totals.sessions = sessions.size;
+
+  const titles = db.query<{ title: string }, [string]>("SELECT CASE WHEN custom_title != '' THEN custom_title ELSE ai_title END AS title FROM token_sessions WHERE session_id = ?");
+  const sessionsOut = [...sessions.values()].sort((a, b) => b.tokens.total - a.tokens.total || b._m.size - a._m.size).slice(0, limit)
+    .map(({ _p, _m, ...s }) => ({ ...s, title: titles.get(s.session_id)?.title ?? "", messages: _m.size, people: [..._p] }));
+  const foldersOut = [...folders.values()].sort((a, b) => b.tokens.total - a.tokens.total || b._m.size - a._m.size).slice(0, limit)
+    .map(({ _p, _s, _m, ...f }) => ({ ...f, sessions: _s.size, messages: _m.size, people: [..._p] }));
+  return { days, since, at: t, totals, people: peopleOut, sessions: sessionsOut, folders: foldersOut };
+}
+
+export type SentMessage = { at: number; person: string; via: string; text: string; run_id: number; session_id: string; cwd: string; tokens: Tokens };
+
+/** What a person sent (person '' = prompts without a known sender), newest first, with the tokens each one cost. */
+export function sentMessages(person: string, days = 7, t = now(), limit = 100): SentMessage[] {
+  const since = t - Math.min(90, Math.max(1, days)) * DAY, makers = keyMakers();
+  const rows = db.query<Turn & { text: string }, [number]>(
+    `SELECT t.run_id, t.session_id, t.prompt_id, t.started_at, t.sent_by, t.via, t.text, r.cwd FROM turns t JOIN runs r ON r.id = t.run_id
+     WHERE t.started_at >= ? ORDER BY t.started_at DESC`).all(since).filter((r) => personOf(r.sent_by, makers) === person).slice(0, Math.min(500, limit));
+  const tok = db.query<{ input: number; output: number; cache_read: number; cache_write: number }, [string]>(
+    "SELECT COALESCE(SUM(input),0) AS input, COALESCE(SUM(output),0) AS output, COALESCE(SUM(cache_read),0) AS cache_read, COALESCE(SUM(cache_write),0) AS cache_write FROM token_calls WHERE prompt_id = ?");
+  return rows.map((r) => {
+    const u = tok.get(r.prompt_id)!, tokens = zero();
+    add(tokens, u);
+    return { at: r.started_at, person, via: r.via, text: r.text, run_id: r.run_id, session_id: r.session_id, cwd: r.cwd, tokens };
+  });
 }

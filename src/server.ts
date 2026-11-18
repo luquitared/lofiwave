@@ -26,7 +26,8 @@ import { startJob, startQueue } from "./jobs";
 import { capacity } from "./capacity";
 import { systemUsage } from "./usage";
 import { planLimits } from "./limits";
-import { teamStats } from "./stats";
+import { stats, sentMessages, noteSender } from "./stats";
+import { startTokenIndex, tokensFresh } from "./tokens";
 import { ccxStatus, ccxSearch, ccxSessions, ccxShow } from "./ccx";
 import { insidePath, listDir, writeFiles, decodeContent, extractInto, archiveOf, resultsOf, makeFolder } from "./files";
 
@@ -261,8 +262,11 @@ route("GET", "/api/system/usage", async () => json(await systemUsage()));
 /** Claude and Codex plan limits: used %, resets and pace per window, as of each agent's last request here. */
 route("GET", "/api/system/limits", () => json(planLimits()));
 
-/** What the team is doing and when: sessions, turns and agent time per person, projects, and turns by hour. */
-route("GET", "/api/stats/team", (_req, _p, url) => json(teamStats(Number(url.searchParams.get("days") ?? 7))));
+/** Advanced → Stats: messages and tokens per person (by who sent each prompt), per session and per folder. */
+route("GET", "/api/stats", async (_req, _p, url) => { await tokensFresh(); return json(stats(Number(url.searchParams.get("days") ?? 7))); });
+/** What one person sent (?person=, '' = no known sender), newest first, with each prompt's tokens. */
+route("GET", "/api/stats/messages", (_req, _p, url) =>
+  json(sentMessages(url.searchParams.get("person") ?? "", Number(url.searchParams.get("days") ?? 7), now(), Number(url.searchParams.get("limit") ?? 100) || 100)));
 
 // ---- people (with PASSWORD set: name + shared password login; with GOOGLE_*: Google sign-in; and who's online)
 route("GET", "/api/auth", () => json({ password_login: Boolean(config.password), google_login: googleLogin() }));
@@ -847,6 +851,7 @@ route("GET", "/api/runs/:id/screen", async (_r, p, url) => json(await screenOf(g
 route("GET", "/api/runs/:id/history", async (_r, p, url) => json(await historyOf(getRun(Number(p.id)), int(url.searchParams.get("lines"), "lines", 5000) || 5000)));
 route("POST", "/api/runs/:id/keys", async (req, p) => {
   const b = await body(req);
+  if (bool(b.enter, true) || strArray(b.keys, "keys").some((k) => /^(Enter|C-m)$/i.test(k))) noteSender(Number(p.id), actor.getStore(), "api");
   const r = await sendKeys(getRun(Number(p.id)), str(b.text, "text"), strArray(b.keys, "keys"), bool(b.enter, true));
   return json({ ok: true, ...r });
 });
@@ -857,6 +862,7 @@ route("POST", "/api/runs/:id/message", async (req, p) => {
   const run = getRun(Number(p.id));
   const text = str(b.text, "text", { required: true });
   const mark = transcriptMark(run);
+  noteSender(run.id, actor.getStore(), "api");
   const r = await sendMessage(run, text);
   const message_id = recordMessage(run, text, r, mark, actor.getStore() ?? "");
   return json({ message_id, ...r, run: runOut(getRun(run.id), { withOutput: false }) });
@@ -981,6 +987,7 @@ route("POST", "/api/runs/:id/chat/send", async (req, p) => {
   const draft = str(b.draft, "draft");
   if (draft && draft !== "replace" && draft !== "append") throw new ApiError(400, `draft must be "replace" or "append"`);
   const text = str(b.text, "text");
+  noteSender(Number(p.id), actor.getStore(), "chat");
   const r = await chatSend(Number(p.id), { text, files: strArray(b.files, "files"), draft: draft as "replace" | "append" | "" });
   return json({ ...r, opens_menu: opensMenu(text) });
 });
@@ -1148,6 +1155,7 @@ async function dispatch(req: Request, url: URL): Promise<Response> {
 
 startScheduler();
 startQueue();
+startTokenIndex();
 console.log(`lofiwave listening on http://${server.hostname}:${server.port}  (data: ${config.dataDir})`);
 if (config.tokenGenerated) {
   // First start: hand the person a link that logs the browser in (the UI keeps the token and drops it from the URL).

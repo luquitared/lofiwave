@@ -1,58 +1,90 @@
-// The team bar above Advanced: turns from the prompt hooks, credited to whoever started the run.
+// Advanced → Stats: who sent each prompt, and tokens per person, session and folder from transcripts.
 import { test, expect } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync, appendFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 const tmp = mkdtempSync(join(tmpdir(), "lofiwave-statstest-"));
 process.env.DATA_DIR = join(tmp, "data");
+process.env.CLAUDE_CONFIG_DIR = join(tmp, "claude");
 const { db } = await import("../src/db");
-const { recordTurn, teamStats, personOf, MAX_TURN_MS } = await import("../src/stats");
+const { noteSender, recordTurn, stats, sentMessages, personOf } = await import("../src/stats");
+const { indexTokens } = await import("../src/tokens");
 
 const T = Date.parse("2026-11-17T12:00:00Z");
 const M = 60_000, H = 60 * M;
+const iso = (ms: number) => new Date(ms).toISOString();
 
-function run(by: string | null, status: string, startedAt: number, cwd = "/home/a/proj", trigger = "manual"): number {
-  const meta = JSON.stringify(by ? { started_by: by } : {});
-  return Number(db.query(`INSERT INTO runs (type_name, cwd, command, trigger, status, started_at, meta) VALUES ('claude', ?, 'claude', ?, ?, ?, ?)`)
-    .run(cwd, trigger, status, startedAt, meta).lastInsertRowid);
+function run(by: string, cwd: string, startedAt: number): number {
+  return Number(db.query(`INSERT INTO runs (type_name, cwd, command, trigger, status, started_at, meta) VALUES ('claude', ?, 'claude', 'manual', 'running', ?, ?)`)
+    .run(cwd, startedAt, JSON.stringify({ started_by: by })).lastInsertRowid);
 }
+const user = (promptId: string, cwd: string, text = "x") => JSON.stringify({ type: "user", promptId, cwd, message: { role: "user", content: text } });
+const assistant = (id: string, at: number, u: [number, number, number, number]) =>
+  JSON.stringify({ type: "assistant", timestamp: iso(at), message: { id, model: "claude-opus-5-5", usage: { input_tokens: u[0], cache_creation_input_tokens: u[1], cache_read_input_tokens: u[2], output_tokens: u[3] } } });
 
-test("who a run counts for: a name, an API key's maker or name, the token, schedules", () => {
+test("who an actor stands for: a name, an API key's maker or name, the token, nobody", () => {
   const makers = new Map([["frank", "Frank J"], ["bot", "api"]]);
-  expect(personOf("Gary", "manual", makers)).toBe("Gary");
-  expect(personOf("key:frank", "api", makers)).toBe("Frank J");
-  expect(personOf("key:bot", "api", makers)).toBe("bot");
-  expect(personOf("api", "api", makers)).toBe("API token");
-  expect(personOf(null, "schedule", makers)).toBe("schedules");
+  expect(personOf("Gary", makers)).toBe("Gary");
+  expect(personOf("key:frank", makers)).toBe("Frank J");
+  expect(personOf("key:bot", makers)).toBe("bot");
+  expect(personOf("api", makers)).toBe("API token");
+  expect(personOf("", makers)).toBe("");
 });
 
-test("turns: agent time per person, working now, an interrupted turn closed by the next prompt, the hour grid", () => {
-  const a = run("Gary", "running", T - 5 * H, "/home/a/lofiwave");
-  const b = run("Seth", "killed", T - 30 * H, "/home/b/site");
-  const old = run("Seth", "killed", T - 30 * 24 * H);
-  recordTurn(a, "s1", "p1", "UserPromptSubmit", T - 4 * H);
-  recordTurn(a, "s1", "p2", "UserPromptSubmit", T - 3 * H);   // p1 was interrupted: it ends here (1h)
-  recordTurn(a, "s1", "p2", "Stop", T - 3 * H + 10 * M);       // 10m
-  recordTurn(a, "s1", "p3", "UserPromptSubmit", T - 20 * M);   // still working: 20m so far
-  recordTurn(b, "s2", "q1", "UserPromptSubmit", T - 29 * H);
-  recordTurn(b, "s2", "q1", "Stop", T - 29 * H + 5 * M);
-  recordTurn(b, "s2", "q2", "UserPromptSubmit", T - 28 * H);  // never stopped and the run is over: 0
-  recordTurn(old, "s3", "x", "UserPromptSubmit", T - 30 * 24 * H);
+test("senders, messages and tokens per person, session and folder", async () => {
+  const proj = join(process.env.CLAUDE_CONFIG_DIR!, "projects", "-home-a-lofiwave");
+  mkdirSync(join(proj, "s1", "subagents"), { recursive: true });
+  const r = run("Gary", "/home/a/lofiwave", T - 5 * H);
 
-  const s = teamStats(7, T);
-  const gary = s.people.find((p) => p.name === "Gary")!, seth = s.people.find((p) => p.name === "Seth")!;
-  expect(gary).toMatchObject({ sessions: 1, turns: 3, agent_ms: H + 10 * M + 20 * M, running: 1, working: 1 });
-  expect(seth).toMatchObject({ sessions: 1, turns: 2, agent_ms: 5 * M, running: 0, working: 0 });
-  expect(s.people[0].name).toBe("Gary");
-  expect(s.totals).toMatchObject({ people: 2, sessions: 2, turns: 5, working: 1, running: 1 });
-  expect(s.projects.map((p) => p.name)).toEqual(["lofiwave", "site"]);
-  expect(s.activity.reduce((n, a) => n + a[2], 0)).toBe(5);
+  // Gary sends from the chat view; Seth presses Enter in the terminal of Gary's session; then a prompt nobody sent
+  // from lofiwave (a tmux attach), and a terminal Enter that is too old to count.
+  noteSender(r, "Gary", "chat", T - 4 * H);
+  recordTurn(r, "s1", "p1", "UserPromptSubmit", "fix the build", T - 4 * H + 2000);
+  noteSender(r, "Seth", "terminal", T - 3 * H);
+  recordTurn(r, "s1", "p2", "UserPromptSubmit", "now add tests", T - 3 * H + 500);
+  noteSender(r, "Seth", "terminal", T - 2 * H);
+  recordTurn(r, "s1", "p3", "UserPromptSubmit", "typed over ssh", T - 2 * H + 60_000);
 
-  const day = teamStats(1, T);
-  expect(day.totals.turns).toBe(3);
-  expect(day.people.map((p) => p.name)).toEqual(["Gary"]);
+  writeFileSync(join(proj, "s1.jsonl"), [
+    JSON.stringify({ type: "ai-title", aiTitle: "Build fixes", sessionId: "s1" }),
+    user("p1", "/home/a/lofiwave", "fix the build"),
+    assistant("m1", T - 4 * H + 5000, [10, 100, 1000, 50]),
+    assistant("m1", T - 4 * H + 5000, [10, 100, 1000, 50]), // the same call, another content block
+    user("p2", "/home/a/lofiwave"),
+    assistant("m2", T - 3 * H + 5000, [5, 0, 2000, 20]),
+    user("p3", "/home/a/lofiwave"),
+    assistant("m3", T - 2 * H + 90_000, [1, 0, 0, 1]),
+    "",
+  ].join("\n"));
+  // Seth's prompt started a subagent: its calls are Seth's too.
+  writeFileSync(join(proj, "s1", "subagents", "agent-a.jsonl"), [user("p2", "/home/a/lofiwave"), assistant("m4", T - 3 * H + 9000, [0, 0, 0, 7]), ""].join("\n"));
+  // A session lofiwave never saw, in another folder.
+  const other = join(process.env.CLAUDE_CONFIG_DIR!, "projects", "-home-b-site");
+  mkdirSync(other, { recursive: true });
+  writeFileSync(join(other, "s9.jsonl"), [user("q1", "/home/b/site"), assistant("n1", T - H, [0, 0, 0, 500]), ""].join("\n"));
 
-  // A turn left open for longer than MAX_TURN_MS stops counting as working.
-  expect(teamStats(7, T + MAX_TURN_MS).totals.working).toBe(0);
+  await indexTokens();
+  const s = stats(7, T);
+  const by = Object.fromEntries(s.people.map((p) => [p.person, p]));
+  expect(s.people.map((p) => p.person)).toEqual(["Seth", "Gary", ""]); // a tie on messages goes to tokens; no known sender always last
+  expect(by.Gary).toMatchObject({ messages: 1, via: { chat: 1 }, tokens: { total: 1160, output: 50 } });
+  expect(by.Seth).toMatchObject({ messages: 1, via: { terminal: 1 }, tokens: { total: 2025 + 7, output: 27 } });
+  expect(by[""]).toMatchObject({ messages: 2, tokens: { output: 501 } }); // p3 and the outside session's q1
+  expect(s.totals).toMatchObject({ messages: 4, tracked_messages: 2, people: 2, sessions: 2 });
+
+  const s1 = s.sessions.find((x) => x.session_id === "s1")!;
+  expect(s1).toMatchObject({ title: "Build fixes", cwd: "/home/a/lofiwave", messages: 3, run_id: null });
+  expect(s1.people.sort()).toEqual(["Gary", "Seth"]);
+  expect(s.folders.map((f) => f.name).sort()).toEqual(["lofiwave", "site"]);
+  expect(s.folders.find((f) => f.name === "site")).toMatchObject({ sessions: 1, messages: 1, people: [], tokens: { output: 500 } });
+
+  // What Seth sent, with its tokens.
+  expect(sentMessages("Seth", 7, T)).toMatchObject([{ text: "now add tests", via: "terminal", tokens: { output: 27 } }]);
+
+  // Appended lines are read on the next pass, not the old ones again.
+  appendFileSync(join(proj, "s1.jsonl"), assistant("m5", T - H, [0, 0, 0, 3]) + "\n");
+  await indexTokens();
+  expect(stats(7, T).people.find((p) => p.person === "")!.tokens.output).toBe(504);
+  expect(stats(1, T + 48 * H).people).toEqual([]); // nothing in the last day two days later
 });
