@@ -13,6 +13,7 @@ import { db, type RunRow } from "../db";
 import { checkpoint } from "./checkpoints";
 import { adoptSession } from "../runner";
 import { recordClaudeLimits } from "../limits";
+import { recordTurn } from "../stats";
 
 /** One assistant message as it streams: `parts[index]` is each delta. */
 export type Stream = { messageId: string; promptId: string; parts: string[]; final: boolean; at: number };
@@ -115,6 +116,7 @@ export async function turnHook(req: Request, p: any): Promise<void> {
   const sid = String(p.session_id ?? "");
   // Every turn says which session it is in: the run has it even if the SessionStart hook never reported it.
   if (/^[A-Za-z0-9_.-]+$/.test(sid)) adoptSession(run.id, { session_id: sid, cwd, transcript_path: typeof p.transcript_path === "string" ? p.transcript_path : "", source: "turn hook" });
+  recordTurn(run.id, sid, p.prompt_id, event); // for the team bar (../stats.ts), git folder or not
   if (event === "UserPromptSubmit") {
     // Anything still streaming belongs to an earlier prompt; the transcript has it by now.
     const m = streams.get(run.id);

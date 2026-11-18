@@ -270,6 +270,7 @@ function switchTab(name, push = true) {
   if (advanced) localStorage.setItem("ac_advanced", name);
   $("#page-title").textContent = TITLES[name];
   $("#subnav").hidden = !advanced;
+  $("#team-bar").hidden = !advanced;
   $$("#subnav button").forEach((b) => { const on = b.dataset.sub === name; b.classList.toggle("active", on); b.setAttribute("aria-selected", String(on)); });
   const navOf = advanced ? "advanced" : name;
   $$("nav button").forEach((b) => { b.classList.toggle("active", b.dataset.tab === navOf); b.setAttribute("aria-current", b.dataset.tab === navOf ? "page" : "false"); });
@@ -2050,11 +2051,96 @@ function limitRow(w) {
     h("div", { class: "usage-meta muted" }, [resets, pace].filter(Boolean).join(" · ")));
 }
 
+// ---------------------------------------------------------------- team bar (above Advanced, GET /api/stats/team)
+// Who is working, how much agent time the team used, on what, and at which hours (in this browser's time zone).
+let teamAt = 0, teamDays = Number(localStorage.getItem("ac_team_days")) || 7, teamPick = null, teamData = null;
+const WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+const fmtAgent = (ms) => (ms < 60000 ? (ms ? "<1m" : "0m") : ms < 3600000 ? `${Math.round(ms / 60000)}m` : `${Math.floor(ms / 3600000)}h ${Math.round((ms % 3600000) / 60000)}m`);
+const teamOpen = () => { try { return localStorage.getItem("ac_team_open") !== "0"; } catch { return true; } };
+const loadTeam = guard(async (force = false) => {
+  if (!force && Date.now() - teamAt < 30000 && teamData) return;
+  teamAt = Date.now();
+  const [s, l] = await Promise.all([get(`/stats/team?days=${teamDays}`), get("/system/limits").catch(() => null)]);
+  teamData = { s, l };
+  renderTeam();
+});
+function teamTile(label, value, sub, cls = "") {
+  return h("div", { class: `team-tile ${cls}` }, h("span", {}, label), h("b", {}, value), sub ? h("small", {}, sub) : "");
+}
+function renderTeam() {
+  if (!teamData) return;
+  const { s, l } = teamData, t = s.totals, span = s.days === 1 ? "24h" : `${s.days}d`;
+  const open = teamOpen();
+  if (teamPick !== null && !s.people.some((p) => p.name === teamPick)) teamPick = null;
+  const cl = l?.claude?.windows ?? [];
+  const pct = (id) => { const w = cl.find((x) => x.id === id); return w ? `${Math.round(w.reset ? 0 : w.used_percent)}%` : null; };
+  const five = pct("five_hour"), week = pct("seven_day");
+  const plan = five || week
+    ? teamTile("Claude plan", five ?? week, [five && week ? `week ${week}` : "", l.claude.plan].filter(Boolean).join(" · "),
+      Math.max(...cl.map((w) => (w.reset ? 0 : w.used_percent))) >= 85 ? "warn" : "")
+    : "";
+  const tiles = h("div", { class: "team-tiles" },
+    teamTile("Working now", String(t.working), `${t.running} session${t.running === 1 ? "" : "s"} open`, t.working ? "live" : ""),
+    teamTile(`Agent time · ${span}`, fmtAgent(t.agent_ms), `${t.turns} prompt${t.turns === 1 ? "" : "s"}`),
+    teamTile(`People · ${span}`, String(t.people), `${t.sessions} session${t.sessions === 1 ? "" : "s"} started`),
+    t.workflow_runs ? teamTile(`Workflows · ${span}`, String(t.workflow_runs), t.failed ? `${t.failed} failed` : "none failed", t.failed ? "warn" : "") : "",
+    plan,
+    h("div", { class: "team-ctl" },
+      h("div", { class: "team-range", role: "group", "aria-label": "Time range" }, ...[1, 7, 30].map((d) =>
+        h("button", { class: d === s.days ? "active" : "", "aria-pressed": String(d === s.days), onclick: () => { teamDays = d; try { localStorage.setItem("ac_team_days", d); } catch {} loadTeam(true); } }, d === 1 ? "24h" : `${d}d`))),
+      h("button", { class: "team-toggle", "aria-expanded": String(open), title: open ? "Hide details" : "Show who and when",
+        onclick: () => { try { localStorage.setItem("ac_team_open", open ? "0" : "1"); } catch {} renderTeam(); } }, open ? "Less" : "More")));
+  const bar = $("#team-bar");
+  if (!open) { bar.replaceChildren(tiles); return; }
+
+  // People: agent time as a bar against the busiest; a dot while one of their sessions is working.
+  const top = Math.max(1, ...s.people.map((p) => p.agent_ms));
+  const people = h("div", { class: "team-people" }, h("h4", {}, "Who", h("span", { class: "muted" }, teamPick ? " · click again to show everyone" : " · agent time")),
+    s.people.length ? s.people.slice(0, 10).map((p) => h("button", {
+      class: `team-person${teamPick === p.name ? " picked" : ""}${teamPick && teamPick !== p.name ? " dim" : ""}`,
+      title: `${p.name}: ${fmtAgent(p.agent_ms)} agent time, ${p.turns} prompts, ${p.sessions} sessions started${p.running ? `, ${p.running} open now` : ""}${p.last_at ? `\nlast active ${fmtRel(p.last_at)}` : ""}`,
+      onclick: () => { teamPick = teamPick === p.name ? null : p.name; renderTeam(); },
+    },
+      h("span", { class: `team-dot${p.working ? " on" : p.running ? " open" : ""}` }),
+      h("span", { class: "team-name" }, p.name),
+      h("span", { class: "team-meter" }, h("i", { style: `width:${Math.max(2, (p.agent_ms / top) * 100)}%` })),
+      h("span", { class: "team-num" }, fmtAgent(p.agent_ms)),
+    )) : h("p", { class: "muted" }, "Nobody in this window."));
+
+  // When: prompts by weekday × hour in local time.
+  const who = teamPick === null ? null : s.people.findIndex((p) => p.name === teamPick);
+  const grid = Array.from({ length: 7 }, () => new Array(24).fill(0));
+  for (const [at, i, n] of s.activity) {
+    if (who !== null && i !== who) continue;
+    const d = new Date(at);
+    grid[(d.getDay() + 6) % 7][d.getHours()] += n;
+  }
+  const max = Math.max(0, ...grid.flat());
+  let best = null;
+  grid.forEach((row, d) => row.forEach((n, hr) => { if (n && (!best || n > best.n)) best = { d, hr, n }; }));
+  const hourLabel = (hr) => new Date(2020, 0, 1, hr).toLocaleTimeString([], { hour: "numeric" });
+  const heat = h("div", { class: "team-when" },
+    h("h4", {}, "When", h("span", { class: "muted" }, best ? ` · busiest ${WEEKDAYS[best.d]} ${hourLabel(best.hr)}` : " · no prompts yet")),
+    h("div", { class: "team-heat", role: "img", "aria-label": `Prompts by weekday and hour${teamPick ? ` for ${teamPick}` : ""}` },
+      ...grid.flatMap((row, d) => [h("span", { class: "team-day" }, WEEKDAYS[d]),
+        ...row.map((n, hr) => h("i", { class: "team-cell", style: n ? `--v:${(0.25 + 0.75 * n / max).toFixed(2)}` : "", title: `${WEEKDAYS[d]} ${hourLabel(hr)}: ${n} prompt${n === 1 ? "" : "s"}` }))]),
+      h("span", {}), ...[0, 6, 12, 18].map((hr) => h("span", { class: "team-hr", style: `grid-column:${hr + 2} / span 6` }, hourLabel(hr)))));
+
+  const projs = s.projects.filter((p) => !teamPick || p.people.includes(teamPick)).slice(0, 5);
+  const projects = h("div", { class: "team-projects" }, h("h4", {}, "On what"),
+    projs.length ? h("ol", {}, ...projs.map((p) => h("li", { title: `${p.turns} prompts · ${p.people.join(", ")}` },
+      h("span", { class: "mono" }, p.name), h("span", { class: "muted" }, p.people.slice(0, 3).join(", ") + (p.people.length > 3 ? ` +${p.people.length - 3}` : "")), h("b", {}, fmtAgent(p.agent_ms)))))
+      : h("p", { class: "muted" }, "No prompts in this window."));
+  bar.replaceChildren(tiles, h("div", { class: "team-detail" }, people, heat, projects),
+    h("p", { class: "team-note muted" }, "Counts prompts Claude took in sessions lofiwave runs; agent time is how long it worked on them. Work counts for whoever started the session."));
+}
+
 // ---------------------------------------------------------------- refresh loop
 function refresh() {
   if (document.hidden) return;
   if (activeTab === "console" || drawerShown()) loadConsole();
   if (activeTab === "console") return;
+  if (ADVANCED.includes(activeTab)) loadTeam();
   if (activeTab === "agents") loadAgents();
   else if (activeTab === "apps") loadTypes().then(loadApps);
   else if (activeTab === "workflows") loadWorkflows();
