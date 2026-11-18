@@ -16,6 +16,7 @@ import type { ServerWebSocket, Subprocess } from "bun";
 import { db, type RunRow } from "./db";
 import { ApiError, tmuxTarget } from "./runner";
 import { e2bTerms } from "./e2b";
+import { noteSender } from "./stats";
 
 export type TtyData = {
   runId: number; session: string; cols: number; rows: number; user: string; proc?: Subprocess;
@@ -100,6 +101,7 @@ export const ttySocket = {
     if (ws.data.e2b) {
       const term = e2bTerms.get(ws.data.runId);
       if (!term) return;
+      if (m.t === "i" && typeof m.d === "string" && m.d.includes("\r")) noteSender(ws.data.runId, ws.data.user, "terminal");
       if (m.t === "i" && typeof m.d === "string") term.input(m.d).catch((e) => { if (ws.readyState === 1) ws.sendBinary(notice(`input not delivered: ${e?.message ?? e}`)); });
       // Focus reports are activity for tmux sizing; here only a real resize changes the PTY.
       else if (m.t === "r") term.resize(clamp(m.cols, 20, 400, ws.data.cols), clamp(m.rows, 5, 200, ws.data.rows));
@@ -107,7 +109,7 @@ export const ttySocket = {
     }
     const term = ws.data.proc?.terminal;
     if (!term) return;
-    if (m.t === "i" && typeof m.d === "string") term.write(m.d);
+    if (m.t === "i" && typeof m.d === "string") { if (m.d.includes("\r")) noteSender(ws.data.runId, ws.data.user, "terminal"); term.write(m.d); }
     else if (m.t === "r") term.resize(clamp(m.cols, 20, 400, ws.data.cols), clamp(m.rows, 5, 200, ws.data.rows));
   },
   close(ws: ServerWebSocket<TtyData>) {

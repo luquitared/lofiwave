@@ -116,7 +116,7 @@ export async function turnHook(req: Request, p: any): Promise<void> {
   const sid = String(p.session_id ?? "");
   // Every turn says which session it is in: the run has it even if the SessionStart hook never reported it.
   if (/^[A-Za-z0-9_.-]+$/.test(sid)) adoptSession(run.id, { session_id: sid, cwd, transcript_path: typeof p.transcript_path === "string" ? p.transcript_path : "", source: "turn hook" });
-  recordTurn(run.id, sid, p.prompt_id, event); // for the team bar (../stats.ts), git folder or not
+  recordTurn(run.id, sid, p.prompt_id, event, typeof p.prompt === "string" ? p.prompt : ""); // who sent what (../stats.ts), git folder or not
   if (event === "UserPromptSubmit") {
     // Anything still streaming belongs to an earlier prompt; the transcript has it by now.
     const m = streams.get(run.id);
