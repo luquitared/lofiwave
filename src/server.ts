@@ -26,6 +26,7 @@ import { startJob, startQueue } from "./jobs";
 import { capacity } from "./capacity";
 import { systemUsage } from "./usage";
 import { planLimits } from "./limits";
+import { teamStats } from "./stats";
 import { ccxStatus, ccxSearch, ccxSessions, ccxShow } from "./ccx";
 import { insidePath, listDir, writeFiles, decodeContent, extractInto, archiveOf, resultsOf, makeFolder } from "./files";
 
@@ -259,6 +260,9 @@ route("GET", "/api/system/usage", async () => json(await systemUsage()));
 
 /** Claude and Codex plan limits: used %, resets and pace per window, as of each agent's last request here. */
 route("GET", "/api/system/limits", () => json(planLimits()));
+
+/** What the team is doing and when: sessions, turns and agent time per person, projects, and turns by hour. */
+route("GET", "/api/stats/team", (_req, _p, url) => json(teamStats(Number(url.searchParams.get("days") ?? 7))));
 
 // ---- people (with PASSWORD set: name + shared password login; with GOOGLE_*: Google sign-in; and who's online)
 route("GET", "/api/auth", () => json({ password_login: Boolean(config.password), google_login: googleLogin() }));

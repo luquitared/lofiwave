@@ -184,6 +184,25 @@ if (sessionsUniqueOnIdOnly) {
     CREATE INDEX IF NOT EXISTS sessions_run_idx ON sessions(run_id, started_at);
   `);
 }
+// One row per prompt Claude takes in a lofiwave run (UserPromptSubmit), closed by its Stop: what Advanced's team bar
+// counts (src/stats.ts). Made after checkpoints existed, so the first time it's filled in from their start/end pairs.
+if (!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'turns'").get()) {
+  db.exec(`
+    CREATE TABLE turns (
+      id         INTEGER PRIMARY KEY,
+      run_id     INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+      session_id TEXT NOT NULL DEFAULT '',
+      prompt_id  TEXT NOT NULL,
+      started_at INTEGER NOT NULL,
+      ended_at   INTEGER,
+      UNIQUE(run_id, prompt_id)
+    );
+    CREATE INDEX turns_started_idx ON turns(started_at);
+    INSERT OR IGNORE INTO turns (run_id, session_id, prompt_id, started_at, ended_at)
+      SELECT run_id, MIN(session_id), prompt_id, MIN(CASE WHEN kind = 'start' THEN at END), MAX(CASE WHEN kind = 'end' THEN at END)
+      FROM checkpoints GROUP BY run_id, prompt_id HAVING MIN(CASE WHEN kind = 'start' THEN at END) IS NOT NULL;
+  `);
+}
 db.exec("UPDATE process_types SET kind = 'agent' WHERE builtin = 1 AND kind = 'app'");
 // Runs started together for one job (a swarm) share meta.group; GET /api/runs?group= and /api/groups read it.
 db.exec("CREATE INDEX IF NOT EXISTS runs_group_idx ON runs(json_extract(meta, '$.group'))");
