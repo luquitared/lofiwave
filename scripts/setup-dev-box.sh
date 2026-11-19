@@ -28,6 +28,7 @@ set_key() {
   case "$ANTHROPIC_API_KEY" in sk-ant-oat*) var=CLAUDE_CODE_OAUTH_TOKEN ;; esac
   echo "== claude credential: $var (…${ANTHROPIC_API_KEY: -6})"
   setkv "$var" "$ANTHROPIC_API_KEY"
+  [ "$var" = CLAUDE_CODE_OAUTH_TOKEN ] && setkv CLAUDE_OAUTH_LOCAL 1
   # claude asks once whether to use an API key it finds in the env; approve this one (it remembers the last 20 chars).
   as_user "mkdir -p ~/.claude"
   K="$ANTHROPIC_API_KEY" V="$var" python3 - "$HOME_DIR/.claude.json" <<'PY2'
@@ -45,6 +46,10 @@ if os.environ["V"] == "ANTHROPIC_API_KEY":
 json.dump(j, open(p, "w"), indent=2)
 PY2
   chown "$RUN_AS": "$HOME_DIR/.claude.json"
+  # …and the bypass-permissions warning, which only this setting skips.
+  local S="$HOME_DIR/.claude/settings.json"
+  [ -f "$S" ] || echo '{}' > "$S"
+  jq '.skipDangerousModePermissionPrompt = true' "$S" > "$S.tmp" && mv "$S.tmp" "$S" && chown "$RUN_AS": "$S"
 }
 if [ "${KEY_ONLY:-}" = 1 ]; then set_key; exit 0; fi
 : "${DOMAIN:?set DOMAIN (e.g. 203-0-113-7.sslip.io)}"
