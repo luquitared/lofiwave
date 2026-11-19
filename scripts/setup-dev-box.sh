@@ -57,6 +57,8 @@ corepack enable >/dev/null 2>&1 || npm install -g pnpm >/dev/null
 usermod -aG docker "$RUN_AS"
 as_user 'command -v uv >/dev/null || [ -x ~/.local/bin/uv ] || curl -LsSf https://astral.sh/uv/install.sh | sh >/dev/null'
 as_user 'command -v bun >/dev/null || [ -x ~/.bun/bin/bun ] || curl -fsSL https://bun.sh/install | bash >/dev/null'
+# ~/.bashrc stops early for non-interactive shells, so put the user's tool dirs on PATH in ~/.profile too.
+grep -q '.bun/bin' "$HOME_DIR/.profile" 2>/dev/null || echo 'export PATH="$HOME/.local/bin:$HOME/.bun/bin:$PATH"' >> "$HOME_DIR/.profile"
 
 if [ "${AGENT_SUDO:-}" = 1 ]; then
   echo "== passwordless sudo for $RUN_AS"
@@ -74,6 +76,7 @@ fi
 
 echo "== agent settings"
 setkv CLAUDE_PERMISSION_MODE bypassPermissions
+setkv COREPACK_ENABLE_DOWNLOAD_PROMPT 0
 setkv BOX_DOMAIN "$DOMAIN"
 set_key
 as_user "mkdir -p ~/.claude ~/apps"
