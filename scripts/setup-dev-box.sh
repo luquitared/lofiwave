@@ -6,7 +6,8 @@
 #   sudo DOMAIN=203-0-113-7.sslip.io ANTHROPIC_API_KEY=sk-ant-... AGENT_SUDO=1 scripts/setup-dev-box.sh
 #
 # DOMAIN: the box's domain (apps are at https://<port>.$DOMAIN). ANTHROPIC_API_KEY (optional): every agent uses it,
-# with claude's first-run prompts pre-accepted. AGENT_SUDO=1: the agents' user gets passwordless sudo, so an agent
+# with claude's first-run prompts pre-accepted; a `claude setup-token` token (sk-ant-oat…) goes in as
+# CLAUDE_CODE_OAUTH_TOKEN instead, so agents run on that Claude subscription. AGENT_SUDO=1: the agents' user gets passwordless sudo, so an agent
 # can apt install what a project needs (only for boxes whose people trust each other). Agents run in
 # bypassPermissions mode. Safe to run again; KEY_ONLY=1 just (re)sets the API key.
 set -euo pipefail
@@ -22,23 +23,27 @@ setkv() { if grep -q "^$1=" "$ENV"; then sed -i "s|^$1=.*|$1=$2|" "$ENV"; else e
 
 set_key() {
   [ -n "${ANTHROPIC_API_KEY:-}" ] || return 0
-  echo "== anthropic key (…${ANTHROPIC_API_KEY: -6})"
-  setkv ANTHROPIC_API_KEY "$ANTHROPIC_API_KEY"
-  # claude asks once whether to use a key it finds in the env; approve this one (it remembers the last 20 chars).
+  # A `claude setup-token` token (sk-ant-oat…) runs claude on a Claude subscription; anything else is an API key.
+  local var=ANTHROPIC_API_KEY
+  case "$ANTHROPIC_API_KEY" in sk-ant-oat*) var=CLAUDE_CODE_OAUTH_TOKEN ;; esac
+  echo "== claude credential: $var (…${ANTHROPIC_API_KEY: -6})"
+  setkv "$var" "$ANTHROPIC_API_KEY"
+  # claude asks once whether to use an API key it finds in the env; approve this one (it remembers the last 20 chars).
   as_user "mkdir -p ~/.claude"
-  K="$ANTHROPIC_API_KEY" python3 - "$HOME_DIR/.claude.json" <<'PY'
+  K="$ANTHROPIC_API_KEY" V="$var" python3 - "$HOME_DIR/.claude.json" <<'PY2'
 import json, os, sys
 p = sys.argv[1]
 try: j = json.load(open(p))
 except Exception: j = {}
 j["hasCompletedOnboarding"] = True
 j["bypassPermissionsModeAccepted"] = True
-r = j.setdefault("customApiKeyResponses", {"approved": [], "rejected": []})
-r.setdefault("approved", [])
-k = os.environ["K"][-20:]
-if k not in r["approved"]: r["approved"].append(k)
+if os.environ["V"] == "ANTHROPIC_API_KEY":
+    r = j.setdefault("customApiKeyResponses", {"approved": [], "rejected": []})
+    r.setdefault("approved", [])
+    k = os.environ["K"][-20:]
+    if k not in r["approved"]: r["approved"].append(k)
 json.dump(j, open(p, "w"), indent=2)
-PY
+PY2
   chown "$RUN_AS": "$HOME_DIR/.claude.json"
 }
 if [ "${KEY_ONLY:-}" = 1 ]; then set_key; exit 0; fi
