@@ -88,6 +88,22 @@ For a console several people share (e.g. on a VM), set `PASSWORD` in `.env` (or 
 
 Wrong passwords are throttled (10 per address per 10 minutes; behind a reverse proxy on the same machine, the `X-Forwarded-For` address). Changing `PASSWORD` signs everyone out. Serve it over HTTPS, e.g. with Caddy in front (`reverse_proxy 127.0.0.1:7770`).
 
+### A team box to build apps on
+
+On a fresh Ubuntu VM, two scripts make a box a team builds apps on with agents, behind HTTPS:
+
+```bash
+sudo DOMAIN=203-0-113-7.sslip.io ANTHROPIC_API_KEY=sk-ant-... AGENT_SUDO=1 scripts/setup-dev-box.sh
+sudo DOMAIN=203-0-113-7.sslip.io APPS=1 PASSWORD='team password' scripts/setup-server-ubuntu.sh
+```
+
+`setup-dev-box.sh` installs Docker, Postgres 16 (`DATABASE_URL` in every agent's env), Node 22, Bun, uv, ffmpeg and gh,
+gives every claude run the API key with its first-run prompts pre-accepted and `CLAUDE_PERMISSION_MODE=bypassPermissions`,
+and writes `~/.claude/CLAUDE.md` from `scripts/dev-box-CLAUDE.md` so the agents know how the box works. With `APPS=1`
+Caddy serves any app listening on a port at `https://<port>.$DOMAIN`, with certificates issued on first visit.
+`AGENT_SUDO=1` lets agents install packages; use it only where everyone on the box trusts each other, since they
+already share one user, its files and its key.
+
 ### Sign in with Google
 
 Instead of the team password, or next to it, people can sign in with a Google account you allow. Make an OAuth client (Google Cloud → *APIs & Services* → *Credentials* → *OAuth client ID*, type *Web application*) and set:
