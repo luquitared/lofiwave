@@ -382,8 +382,8 @@ export async function startRun(opts: StartOptions): Promise<RunRow> {
 
   // lofiwave's own CLAUDE_CODE_OAUTH_TOKEN (from .env, kept for E2B sandboxes) is an inference-only token: a local
   // claude that inherits it skips the user's login and loses their claude.ai MCP connectors. Local runs only get it
-  // when the run type or run config sets it on purpose.
-  const stripEnv = ["CLAUDE_CODE_OAUTH_TOKEN"].filter((k) => !(k in launchEnv));
+  // when the run type or run config sets it on purpose, or CLAUDE_OAUTH_LOCAL says this machine has no login of its own.
+  const stripEnv = config.claudeOauthLocal ? [] : ["CLAUDE_CODE_OAUTH_TOKEN"].filter((k) => !(k in launchEnv));
   const inherited: Record<string, string | undefined> = { ...process.env };
   for (const k of stripEnv) delete inherited[k];
   const childEnv = {

@@ -88,6 +88,22 @@ For a console several people share (e.g. on a VM), set `PASSWORD` in `.env` (or 
 
 Wrong passwords are throttled (10 per address per 10 minutes; behind a reverse proxy on the same machine, the `X-Forwarded-For` address). Changing `PASSWORD` signs everyone out. Serve it over HTTPS, e.g. with Caddy in front (`reverse_proxy 127.0.0.1:7770`).
 
+### A team box to build apps on
+
+On a fresh Ubuntu VM, two scripts make a box a team builds apps on with agents, behind HTTPS:
+
+```bash
+sudo DOMAIN=203-0-113-7.sslip.io ANTHROPIC_API_KEY=sk-ant-... AGENT_SUDO=1 scripts/setup-dev-box.sh
+sudo DOMAIN=203-0-113-7.sslip.io APPS=1 PASSWORD='team password' scripts/setup-server-ubuntu.sh
+```
+
+`setup-dev-box.sh` installs Docker, Postgres 16 (`DATABASE_URL` in every agent's env), Node 22, Bun, uv, ffmpeg and gh,
+gives every claude run the API key with its first-run prompts pre-accepted and `CLAUDE_PERMISSION_MODE=bypassPermissions`,
+and writes `~/.claude/CLAUDE.md` from `scripts/dev-box-CLAUDE.md` so the agents know how the box works. With `APPS=1`
+Caddy serves any app listening on a port at `https://<port>.$DOMAIN`, with certificates issued on first visit.
+`AGENT_SUDO=1` lets agents install packages; use it only where everyone on the box trusts each other, since they
+already share one user, its files and its key.
+
 ### Sign in with Google
 
 Instead of the team password, or next to it, people can sign in with a Google account you allow. Make an OAuth client (Google Cloud → *APIs & Services* → *Credentials* → *OAuth client ID*, type *Web application*) and set:
@@ -124,6 +140,7 @@ Environment variables, or `KEY=VALUE` lines in `.env`:
 | `GIT_AUTHORS` | *(unset)* | Git identity per signed-in person: `"lucas=Lucas N <lucas@x.com>, seth=Seth N <seth@x.com>"` (key = first word of the sign-in name, any case). Runs they start get `GIT_AUTHOR_*`/`GIT_COMMITTER_*` set, so commits carry their name; everyone else uses git's own config. |
 | `DATA_DIR` | `./data` | SQLite database, run logs, generated token |
 | `CLAUDE_PERMISSION_MODE` | *(unset)* | Permission mode every `claude` run starts in — new, restarted and resumed, headless or interactive: adds `--permission-mode <mode>` (`acceptEdits`, `bypassPermissions`, …) unless the run's args already choose one. Unset: Claude Code's own default (prompts on). |
+| `CLAUDE_OAUTH_LOCAL` | *(unset)* | `1`: local runs also get `CLAUDE_CODE_OAUTH_TOKEN` from lofiwave's env (a `claude setup-token` token), for a box where claude has no login of its own. Unset, that token only goes to E2B sandboxes, so a local claude keeps its user's login. |
 | `CODEX_SANDBOX_MODE` | *(unset)* | The same for `codex`: adds `--sandbox <mode>` (`read-only`, `workspace-write`, `danger-full-access`) unless the run's args already choose a sandbox. Unset: Codex's own config, where `codex exec` defaults to `read-only`, so a headless run can't change files. |
 | `CLAUDE_TUI` | `default` | Claude Code renderer for interactive runs: adds `--settings '{"tui":"<value>"}'` unless the run's args already pass `--settings`. `default` keeps claude out of the alternate screen, so tmux keeps the history and scrolling up in the browser terminal is private and smooth; `fullscreen` hands the wheel to claude (every viewer's screen moves, one redraw per tick); `keep` uses your own `~/.claude/settings.json`. |
 | `SCHEDULER_INTERVAL_MS` | `15000` | How often scheduled workflows are checked |

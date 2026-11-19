@@ -7,6 +7,8 @@
 # Claude Code for that user, writes .env (HOST=127.0.0.1, PASSWORD, OPEN_TERMINAL=none), installs a system service
 # (agent-console.service, running as that user) and puts Caddy in front with an automatic Let's Encrypt certificate.
 # No domain? DOMAIN=<ip with dashes>.sslip.io works (e.g. 203-0-113-7.sslip.io). Safe to run again.
+# APPS=1 also gives apps built on the box a public URL by port (https://3000.$DOMAIN); the domain's subdomains must
+# point here (sslip.io's do). For a full dev box (Docker, Postgres, Node, …) run scripts/setup-dev-box.sh first.
 set -euo pipefail
 [ "$(id -u)" = 0 ] || { echo "run with sudo" >&2; exit 1; }
 : "${DOMAIN:?set DOMAIN (e.g. 203-0-113-7.sslip.io)}"
@@ -72,17 +74,54 @@ systemctl enable agent-console >/dev/null
 systemctl restart agent-console
 
 echo "== caddy (https://$DOMAIN)"
-cat > /etc/caddy/Caddyfile <<EOF
+if [ "${APPS:-}" = 1 ]; then
+  # Apps people build here get a public URL by port: https://3000.$DOMAIN → 127.0.0.1:3000 (ports 1000-65535).
+  # Certificates are fetched on demand, the first time a name is visited; `ask` only allows <port>.$DOMAIN.
+  ESC="$(printf '%s' "$DOMAIN" | sed 's/[.]/\\./g')"
+  RE="^([0-9]{4,5})\\.${ESC}\$"
+  cat > /etc/caddy/Caddyfile <<EOF
+{
+	on_demand_tls {
+		ask http://127.0.0.1:5555/
+	}
+}
+$DOMAIN {
+	encode gzip
+	reverse_proxy 127.0.0.1:$PORT
+}
+https:// {
+	tls {
+		on_demand
+	}
+	@app header_regexp app Host \`$RE\`
+	handle @app {
+		reverse_proxy 127.0.0.1:{re.app.1}
+	}
+	handle {
+		respond "Nothing here" 404
+	}
+}
+http://127.0.0.1:5555 {
+	bind 127.0.0.1
+	@ok vars_regexp {query.domain} \`$RE\`
+	respond @ok 200
+	respond 403
+}
+EOF
+else
+  cat > /etc/caddy/Caddyfile <<EOF
 $DOMAIN {
 	encode gzip
 	reverse_proxy 127.0.0.1:$PORT
 }
 EOF
+fi
 systemctl reload caddy || systemctl restart caddy
 
 sleep 2
 systemctl --no-pager --lines 5 status agent-console | head -8
 echo
 echo "Open:    https://$DOMAIN"
+if [ "${APPS:-}" = 1 ]; then echo "Apps:    https://<port>.$DOMAIN"; fi
 echo "Logs:    journalctl -u agent-console -f"
 echo "Claude:  sudo -iu $RUN_AS claude   (log in once, so agents can run)"
