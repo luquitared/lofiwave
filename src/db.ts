@@ -259,6 +259,16 @@ const BUILTIN_TYPES = [
     env: {},
     detect: CODEX_DETECT,
   },
+  {
+    name: "pi",
+    description: "pi coding agent (pi.dev). Prompt is passed with -p (headless) or as the first message (interactive). Uses pi's default model: scripts/setup-pi-neon.sh makes that Gemini through Neon's AI Gateway; add e.g. --model neon/gemini-3-5-flash to pick another. Interactive runs get a chat view.",
+    command: "pi",
+    args: ["-p", "{prompt}"],
+    interactive_args: ["{prompt}"],
+    resume_args: ["--session", "{session}"],
+    env: {},
+    detect: "(^|/|\\s)pi(\\s|$)",
+  },
 ];
 
 // Built-in codex rows from before 0.16x: --full-auto is gone from Codex, and the old detect caught its app-server daemon.

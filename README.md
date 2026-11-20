@@ -20,7 +20,7 @@ It runs on [Bun](https://bun.sh) with SQLite and no other dependencies. Linux an
 
 - [Bun](https://bun.sh) 1.1+
 - [tmux](https://github.com/tmux/tmux), for interactive runs (`brew install tmux` / `apt install tmux`)
-- The agents you want to drive, on `PATH`: [Claude Code](https://docs.claude.com/en/docs/claude-code) (`claude`), [Codex](https://github.com/openai/codex) (`codex`), …
+- The agents you want to drive, on `PATH`: [Claude Code](https://docs.claude.com/en/docs/claude-code) (`claude`), [Codex](https://github.com/openai/codex) (`codex`), [pi](https://pi.dev) (`pi`), …
 - Optional: [ccx](https://github.com/luquitared/ccx), to search this machine's conversations from another one (*API → Conversation search*)
 
 ## Install
@@ -49,6 +49,20 @@ scripts/install-service-linux.sh    # systemd user service: starts at boot (jour
 ```
 
 Both use `scripts/start.sh`, which puts the usual tool folders (`~/.bun/bin`, `~/.local/bin`, Homebrew, nvm's node) on `PATH` so the service can find the agents, and loads `.env`.
+
+### pi with Gemini through Neon (optional)
+
+The built-in `pi` type runs the [pi](https://pi.dev) coding agent (`bun add -g @earendil-works/pi-coding-agent`). Interactive pi runs get the chat view as well as the terminal. They also get a Resume button, because each run starts pi with a `--session-id` lofiwave picks and reads that session file. To run Gemini on it through [Neon's AI Gateway](https://neon.com/docs/ai-gateway), put the gateway's variables in `.env` and run the setup script:
+
+```bash
+# .env (or `neon env pull`)
+NEON_AI_GATEWAY_BASE_URL=https://<branch>-api.ai.<cell>.<region>.<cloud>.neon.tech
+NEON_AI_GATEWAY_TOKEN=nt_live_…
+
+scripts/setup-pi-neon.sh          # PI_NEON_MODEL=gemini-3-5-flash to pick another default
+```
+
+It adds a `neon` provider (the gateway's OpenAI-compatible `/v1`) to `~/.pi/agent/models.json` and makes `neon/gemini-4-argon` pi's default model. The token stays in the environment: pi reads `$NEON_AI_GATEWAY_TOKEN` when it starts, so runs get it from `.env` through `scripts/start.sh`, or from a run config's env. To use another model for one run, pass e.g. `--model neon/gemini-3-5-flash` as extra args.
 
 ### Link sessions to their transcripts (optional)
 
