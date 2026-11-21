@@ -261,7 +261,7 @@ const BUILTIN_TYPES = [
   },
   {
     name: "pi",
-    description: "pi coding agent (pi.dev). Prompt is passed with -p (headless) or as the first message (interactive). Uses pi's default model: scripts/setup-pi-neon.sh makes that Gemini through Neon's AI Gateway; add e.g. --model neon/gemini-3-5-flash to pick another. Interactive runs get a chat view.",
+    description: "pi coding agent (pi.dev). Prompt is passed with -p (headless) or as the first message (interactive). Uses pi's default model: scripts/setup-pi-vertex.sh makes that Gemini 4 Neon on Vertex AI; add e.g. --model google-vertex/gemini-4-argon to pick another. Interactive runs get a chat view.",
     command: "pi",
     args: ["-p", "{prompt}"],
     interactive_args: ["{prompt}"],

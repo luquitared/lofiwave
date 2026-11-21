@@ -18,7 +18,7 @@ function items(lines: any[]) {
 const header = { type: "session", version: 3, id: "s-1", timestamp: T, cwd: "/w" };
 const user = entry("u1", null, { role: "user", content: "fix the bug", timestamp: 1 });
 const call = entry("a1", "mc", {
-  role: "assistant", stopReason: "toolUse", model: "gemini-4-argon",
+  role: "assistant", stopReason: "toolUse", model: "gemini-4-neon",
   content: [{ type: "thinking", thinking: "look first" }, { type: "text", text: "Editing." }, { type: "toolCall", id: "c1", name: "edit", arguments: { path: "src/x.ts", edits: [{ oldText: "a", newText: "b" }] } }],
 });
 const result = entry("r1", "a1", {
@@ -28,7 +28,7 @@ const result = entry("r1", "a1", {
 });
 const answer = entry("a2", "r1", { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Fixed." }] });
 // A model change between the prompt and the answer: hidden, but the chain still runs through it.
-const modelChange = { type: "model_change", id: "mc", parentId: "u1", timestamp: T, provider: "neon", modelId: "gemini-4-argon" };
+const modelChange = { type: "model_change", id: "mc", parentId: "u1", timestamp: T, provider: "google-vertex", modelId: "gemini-4-neon" };
 
 test("a turn with an edit becomes user, thinking, assistant, file change with its diff, assistant", () => {
   const out = items([header, user, modelChange, call, result, answer]);

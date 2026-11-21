@@ -50,19 +50,20 @@ scripts/install-service-linux.sh    # systemd user service: starts at boot (jour
 
 Both use `scripts/start.sh`, which puts the usual tool folders (`~/.bun/bin`, `~/.local/bin`, Homebrew, nvm's node) on `PATH` so the service can find the agents, and loads `.env`.
 
-### pi with Gemini through Neon (optional)
+### pi with Gemini on Vertex AI (optional)
 
-The built-in `pi` type runs the [pi](https://pi.dev) coding agent (`bun add -g @earendil-works/pi-coding-agent`). Interactive pi runs get the chat view as well as the terminal. They also get a Resume button, because each run starts pi with a `--session-id` lofiwave picks and reads that session file. To run Gemini on it through [Neon's AI Gateway](https://neon.com/docs/ai-gateway), put the gateway's variables in `.env` and run the setup script:
+The built-in `pi` type runs the [pi](https://pi.dev) coding agent (`bun add -g @earendil-works/pi-coding-agent`). Interactive pi runs get the chat view as well as the terminal. They also get a Resume button, because each run starts pi with a `--session-id` lofiwave picks and reads that session file. To run Gemini 4 Neon on it through your Google Cloud project's Vertex AI (no API key: pi uses Application Default Credentials), sign in once and run the setup script:
 
 ```bash
-# .env (or `neon env pull`)
-NEON_AI_GATEWAY_BASE_URL=https://<branch>-api.ai.<cell>.<region>.<cloud>.neon.tech
-NEON_AI_GATEWAY_TOKEN=nt_live_…
+gcloud auth application-default login
+# .env
+GOOGLE_CLOUD_PROJECT=my-project
+GOOGLE_CLOUD_LOCATION=global
 
-scripts/setup-pi-neon.sh          # PI_NEON_MODEL=gemini-3-5-flash to pick another default
+scripts/setup-pi-vertex.sh        # PI_VERTEX_MODEL=gemini-4-argon to pick another default
 ```
 
-It adds a `neon` provider (the gateway's OpenAI-compatible `/v1`) to `~/.pi/agent/models.json` and makes `neon/gemini-4-argon` pi's default model. The token stays in the environment: pi reads `$NEON_AI_GATEWAY_TOKEN` when it starts, so runs get it from `.env` through `scripts/start.sh`, or from a run config's env. To use another model for one run, pass e.g. `--model neon/gemini-3-5-flash` as extra args.
+It adds `google-vertex/gemini-4-neon` to `~/.pi/agent/models.json` (pi's catalog may not list it yet) and makes it pi's default model. pi runs need `GOOGLE_CLOUD_PROJECT` and `GOOGLE_CLOUD_LOCATION` in their environment: `.env` reaches them through `scripts/start.sh`, but an interactive run inherits the tmux server's environment, and a tmux server started before you added them keeps its old one. Setting them in the pi type's env (Types) always works. To use another model for one run, pass e.g. `--model google-vertex/gemini-4-argon` as extra args.
 
 ### Link sessions to their transcripts (optional)
 
