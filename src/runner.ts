@@ -294,6 +294,12 @@ export async function startRun(opts: StartOptions): Promise<RunRow> {
   const picksSession = args.some((a) => ["--session-id", "--resume", "-r", "--continue", "-c"].includes(a) || a.startsWith("--session-id="));
   const targetSession = target && basename(command) === "claude" && !picksSession ? randomUUID() : "";
   if (targetSession) { args = [...args.slice(0, template_len), "--session-id", targetSession, ...args.slice(template_len)]; template_len += 2; }
+  // A pi run on this machine gets its session id picked here too, so the chat view knows which session file is its
+  // (pi files sessions by cwd and time, and keeps no registry of running processes). A resume reopens the one asked for.
+  const isPi = basename(command) === "pi" && !target && !docker;
+  const piPicks = args.some((a) => ["--session-id", "--session", "--resume", "-r", "--continue", "-c", "--fork", "--no-session", "-p", "--print"].includes(a) || a.startsWith("--session-id=") || a.startsWith("--session="));
+  const piSession = isPi && !piPicks ? randomUUID() : isPi ? opts.resumeSession ?? "" : "";
+  if (isPi && !piPicks) { args = [...args.slice(0, template_len), "--session-id", piSession, ...args.slice(template_len)]; template_len += 2; }
   // Too many agents (or too little memory) and one more could take the machine down: refuse; the caller may queue.
   const blocked = type.kind === "agent" && !target ? admissionBlocker() : null;
   if (blocked) throw new ApiError(429, `machine is full: ${blocked}. Try again later, or pass "queue": true to start it when there is room.`);
@@ -311,6 +317,7 @@ export async function startRun(opts: StartOptions): Promise<RunRow> {
   const timeoutSec = opts.timeoutSec ?? opts.workflow?.timeout_sec ?? 0;
   const meta: Record<string, any> = { ...(opts.meta ?? {}), timeout_sec: timeoutSec, template_len };
   if (opts.resumeSession) meta.resume_session = opts.resumeSession;
+  if (piSession) meta.pi_session = piSession;
   if (opts.stopWhenIdle && interactive) meta.stop_when_idle = true;
   if (args.includes(chatSettingsPath())) { meta.approvals = true; meta.live = true; }
   if (opts.idleStopSec !== undefined) meta.idle_stop_sec = opts.idleStopSec;
@@ -372,6 +379,8 @@ export async function startRun(opts: StartOptions): Promise<RunRow> {
   if (interactive) { meta.interactive = true; if (!e2b) meta.tmux = tmuxSessionName(id); }
   if (e2b) meta.e2b = { tag: `lofiwave-${id}` };
   db.prepare("UPDATE runs SET log_path = ?, meta = ? WHERE id = ?").run(logPath, JSON.stringify(meta), id);
+  // A new pi session is this run's from the start: it gets a transcript, and a Resume button once the run ends.
+  if (piSession && !opts.resumeSession) recordSession(id, { session_id: piSession, agent: "pi", cwd, source: "started" });
 
   const sink = Bun.file(logPath).writer();
   const header = `# lofiwave run ${id} | ${new Date(t).toISOString()} | ${target ? `target=${target.name} (${target.kind}) | ` : ""}cwd=${cwd}\n# $ ${[command, ...args].map(shellQuote).join(" ")}\n` +

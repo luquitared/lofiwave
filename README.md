@@ -20,7 +20,7 @@ It runs on [Bun](https://bun.sh) with SQLite and no other dependencies. Linux an
 
 - [Bun](https://bun.sh) 1.1+
 - [tmux](https://github.com/tmux/tmux), for interactive runs (`brew install tmux` / `apt install tmux`)
-- The agents you want to drive, on `PATH`: [Claude Code](https://docs.claude.com/en/docs/claude-code) (`claude`), [Codex](https://github.com/openai/codex) (`codex`), …
+- The agents you want to drive, on `PATH`: [Claude Code](https://docs.claude.com/en/docs/claude-code) (`claude`), [Codex](https://github.com/openai/codex) (`codex`), [pi](https://pi.dev) (`pi`), …
 - Optional: [ccx](https://github.com/luquitared/ccx), to search this machine's conversations from another one (*API → Conversation search*)
 
 ## Install
@@ -49,6 +49,21 @@ scripts/install-service-linux.sh    # systemd user service: starts at boot (jour
 ```
 
 Both use `scripts/start.sh`, which puts the usual tool folders (`~/.bun/bin`, `~/.local/bin`, Homebrew, nvm's node) on `PATH` so the service can find the agents, and loads `.env`.
+
+### pi with Gemini on Vertex AI (optional)
+
+The built-in `pi` type runs the [pi](https://pi.dev) coding agent (`bun add -g @earendil-works/pi-coding-agent`). Interactive pi runs get the chat view as well as the terminal. They also get a Resume button, because each run starts pi with a `--session-id` lofiwave picks and reads that session file. To run Gemini 4 Neon on it through your Google Cloud project's Vertex AI (no API key: pi uses Application Default Credentials), sign in once and run the setup script:
+
+```bash
+gcloud auth application-default login
+# .env
+GOOGLE_CLOUD_PROJECT=my-project
+GOOGLE_CLOUD_LOCATION=global
+
+scripts/setup-pi-vertex.sh        # PI_VERTEX_MODEL=gemini-4-argon to pick another default
+```
+
+It adds `google-vertex/gemini-4-neon` to `~/.pi/agent/models.json` (pi's catalog may not list it yet) and makes it pi's default model. pi runs need `GOOGLE_CLOUD_PROJECT` and `GOOGLE_CLOUD_LOCATION` in their environment: `.env` reaches them through `scripts/start.sh`, but an interactive run inherits the tmux server's environment, and a tmux server started before you added them keeps its old one. Setting them in the pi type's env (Types) always works. To use another model for one run, pass e.g. `--model google-vertex/gemini-4-argon` as extra args.
 
 ### Link sessions to their transcripts (optional)
 

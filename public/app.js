@@ -582,7 +582,7 @@ function applyStartType() {
   sf.prompt.placeholder = interactive ? "Optional first message" : "What should it do?";
   sf.cwd.value = t?.default_cwd || sf.cwd.value;
   sf.cwd.placeholder = t?.default_cwd ? t.default_cwd : "start typing to search";
-  sf.extra_args.placeholder = t?.name === "claude" ? "--permission-mode acceptEdits" : t?.name === "codex" ? "--sandbox workspace-write" : "";
+  sf.extra_args.placeholder = t?.name === "claude" ? "--permission-mode acceptEdits" : t?.name === "codex" ? "--sandbox workspace-write" : t?.name === "pi" ? "--model google-vertex/gemini-4-argon" : "";
   const c = configs.find((x) => x.name === sf.config.value);
   $("#start-config-hint").textContent = c ? configSummary(c) : "";
 }
@@ -1643,12 +1643,12 @@ function paneMode(r) {
   return chatable(r) && matchMedia("(max-width: 700px)").matches ? "chat" : "terminal";
 }
 function setPaneMode(mode) { localStorage.setItem("ac_term_mode", mode); paneSig = ""; renderPane(); }
-/** The chat view reads Claude Code transcripts; other agents (Codex) and plain commands get the terminal only. */
+/** The chat view reads Claude Code and pi sessions; other agents (Codex) and plain commands get the terminal only. */
 function chatable(r) {
   if (!r) return false;
   const s = sessOf(r);
-  if (s) return s.agent === "claude";
-  return /(^|\/)claude$/.test(typeByName(r.type_name)?.command || "");
+  if (s) return s.agent === "claude" || s.agent === "pi";
+  return /(^|\/)(claude|pi)$/.test(typeByName(r.type_name)?.command || "");
 }
 function viewSwitch(r, mode) {
   const views = [["chat", "Chat", "the session as messages, tool calls and diffs, read from its transcript; scrolls on its own"], ["terminal", "Terminal", "a real terminal in the browser"]]
@@ -2020,7 +2020,7 @@ function emptyPane() {
 }
 
 // ---------------------------------------------------------------- usage (plan limits, GET /api/system/limits)
-const AGENT_NAMES = { claude: "Claude", codex: "Codex" };
+const AGENT_NAMES = { claude: "Claude", codex: "Codex", pi: "pi" };
 let limitsAt = 0;
 const loadLimits = guard(async () => {
   if (Date.now() - limitsAt < 15000 && $("#usage-cards").childElementCount) return; // the numbers change per request, not per second
