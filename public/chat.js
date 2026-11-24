@@ -163,7 +163,14 @@ class ChatView {
       e.preventDefault(); card.pick(Number(e.key));
     };
     document.addEventListener("keydown", this.onKey);
-    this.scroller.addEventListener("scroll", () => { this.atBottom = this.nearBottom(); this.jump.hidden = this.atBottom; ChatView.scrolls.set(this.base, this.atBottom ? null : this.scroller.scrollTop); });
+    this.scroller.addEventListener("scroll", () => {
+      if (!this.laidOut()) return; // hidden or out of the page: its scrollTop reads 0 and says nothing about the reader
+      this.atBottom = this.nearBottom(); this.jump.hidden = this.atBottom; ChatView.scrolls.set(this.base, this.atBottom ? null : this.scroller.scrollTop);
+    });
+    // Shown again after being hidden (display:none drops the scroll position): put the reader back where they were.
+    this.wasShown = false;
+    this.ro = new ResizeObserver(() => { const shown = this.laidOut(); if (shown && !this.wasShown) this.reattached(); this.wasShown = shown; });
+    this.ro.observe(this.scroller);
     this.atBottom = true;
     this.connect();
   }
@@ -184,7 +191,7 @@ class ChatView {
       : matchMedia("(pointer: coarse)").matches ? "" : "Enter to send · Shift+Enter for a new line · / for commands";
   }
 
-  close() { this.closed = true; clearTimeout(this.retry); clearTimeout(this.screenTimer); document.removeEventListener("keydown", this.onKey); this.composer?.close(); try { this.ws?.close(); } catch {} }
+  close() { this.closed = true; this.ro.disconnect(); clearTimeout(this.retry); clearTimeout(this.screenTimer); document.removeEventListener("keydown", this.onKey); this.composer?.close(); try { this.ws?.close(); } catch {} }
 
   connect() {
     if (this.closed) return;
@@ -520,7 +527,7 @@ class ChatView {
     this.rendering = true;
     nextFrame(() => {
       this.rendering = false;
-      const stick = restore ? ChatView.scrolls.get(this.base) == null : this.nearBottom();
+      const stick = restore ? ChatView.scrolls.get(this.base) == null : this.laidOut() ? this.nearBottom() : this.atBottom;
       const all = this.sorted();
       const turns = new Map();
       for (const it of all) { if (!turns.has(it.turnId)) turns.set(it.turnId, []); turns.get(it.turnId).push(it); }
@@ -550,6 +557,17 @@ class ChatView {
   }
 
   nearBottom() { const s = this.scroller; return s.scrollHeight - s.scrollTop - s.clientHeight < 150; }
+  laidOut() { return this.scroller.isConnected && this.scroller.clientHeight > 0; }
+
+  /**
+   * The view was moved into a rebuilt pane, or shown again. A scroller taken out of the page comes back at the top,
+   * so restore where the reader was: the bottom if they were following it, else their saved position.
+   */
+  reattached() {
+    if (!this.laidOut()) return;
+    const saved = ChatView.scrolls.get(this.base);
+    if (saved == null) this.toBottom(); else this.scroller.scrollTop = saved;
+  }
 
   /** Stick to the bottom, again over a few frames: highlighting and images change heights after the first paint. */
   toBottom(smooth = false) {

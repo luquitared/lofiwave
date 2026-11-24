@@ -1885,7 +1885,9 @@ function closeTerm() {
   closeHistory(t);
   t.closed = true; clearTimeout(t.retry); clearTimeout(t.parkTimer); t.ro?.disconnect();
   t.el.remove();
-  paneSig = ""; // the pane lost its terminal: rebuild it next time
+  // The pane lost its terminal: rebuild it next time. A parked terminal was already out of the pane (it shows the chat),
+  // and rebuilding that would pull the chat out of the page and back, which drops its scroll to the top.
+  if (!t.parked) paneSig = "";
   try { t.ws?.close(); } catch {}
   t.term.dispose();
 }
@@ -1991,7 +1993,7 @@ function openChat(runId) {
   }
   // A rebuilt pane has a fresh placeholder: move the live view into it.
   const el = $("#console-chat"), root = liveChat.view.root;
-  if (el && el !== root) { el.replaceWith(root); root.id = "console-chat"; }
+  if (el && el !== root) { el.replaceWith(root); root.id = "console-chat"; liveChat.view.reattached(); }
 }
 // The pane loses its chat with it, so it is rebuilt next time (else a new view has no placeholder to move into).
 function closeChat() { if (liveChat) { liveChat.view.close(); liveChat.view.root.remove(); liveChat = null; paneSig = ""; } }
