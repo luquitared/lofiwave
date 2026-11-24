@@ -23,6 +23,9 @@ const MAX_LIMIT = 200;
 /** Hits are filtered (by user, by what is shared) after ccx ranked them: ask for more until enough are kept, up to this many. */
 const MAX_SCAN = 6400;
 
+/** Whether ccx is installed here (for what a run is told about this machine). */
+export const ccxInstalled = () => ccxCommand() !== null;
+
 /** ccx as an argv prefix. It is a bun script, so lofiwave's own bun runs it: bun needn't be on the service's PATH. */
 function ccxCommand(): string[] | null {
   const found = process.env.CCX_BIN?.trim() || Bun.which("ccx") || join(homedir(), ".bun", "bin", "ccx");

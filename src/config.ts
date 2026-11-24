@@ -104,6 +104,8 @@ export const config = {
   maxAgentRuns: Number(process.env.MAX_AGENT_RUNS ?? Math.max(1, Math.min(16, Math.floor((totalmem() / 2 ** 20 - 1024) / 600)))),
   minFreeMemMb: Number(process.env.MIN_FREE_MEM_MB ?? 500),
   /** `mkdir_cwd` on POST /api/processes may only create folders under these (colon-separated; default: home and temp dirs). */
+  /** Tell agent runs they are under lofiwave, and about `lw` and `ccx` (src/lw.ts). LOFIWAVE_AGENT_CONTEXT=off leaves it out. */
+  agentContext: !/^(0|off|false|no)$/i.test(process.env.LOFIWAVE_AGENT_CONTEXT?.trim() ?? ""),
   cwdRoots: (process.env.CWD_ROOTS ?? `${homedir()}:${tmpdir()}`).split(":").map((p) => p.trim()).filter(Boolean).map((p) => resolve(p)),
 };
 

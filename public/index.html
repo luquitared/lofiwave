@@ -30,6 +30,7 @@
   <nav aria-label="Main navigation">
     <button data-tab="console" class="active">Sessions</button>
     <button data-tab="workflows">Workflows</button>
+    <button data-tab="keys">Keys</button>
     <button data-tab="connect">Connect</button>
     <button data-tab="advanced">Advanced</button>
     <button data-tab="settings">Settings</button>
@@ -94,6 +95,28 @@
       <thead><tr><th>Workflow</th><th>Schedule</th><th>Last run</th><th>On</th><th></th></tr></thead>
       <tbody></tbody>
     </table>
+  </section>
+
+  <section id="tab-keys" class="tab">
+    <div class="toolbar">
+      <button class="primary" id="secret-new-btn">+ Add key</button>
+      <input type="search" id="secret-filter" placeholder="Search names, env vars, services, notes" autocomplete="off" aria-label="Search keys">
+      <span id="secret-count" class="muted"></span>
+    </div>
+    <div id="secret-detail" class="card secret-detail" hidden></div>
+    <table id="secret-table">
+      <thead><tr><th>Key</th><th>Env var</th><th>Value</th><th>On disk</th><th>Last used</th><th></th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <p class="muted keys-help">Values are encrypted in lofiwave's database. Agents use them with <code>lw keys</code>: <code>lw keys env &lt;name&gt; -- &lt;command&gt;</code>, <code>lw keys write &lt;name&gt; --to .env</code>, <code>lw keys copy &lt;name&gt;</code>, so a key doesn't have to be printed into a transcript. Everyone who can use this console can use its keys; each use is logged.</p>
+    <div class="card found-card">
+      <div class="card-head"><h2>Found on this computer</h2><button class="small" id="secret-rescan">Rescan</button></div>
+      <p class="muted" id="found-info">Keys in .env files and shell profiles that lofiwave doesn't hold yet.</p>
+      <table id="found-table">
+        <thead><tr><th>Env var</th><th>Value</th><th>Written in</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
   </section>
 
   <section id="tab-connect" class="tab">
@@ -346,6 +369,24 @@
     <div class="wide row">
       <button type="submit" class="primary">Save</button>
       <button type="button" id="config-cancel" style="margin-left:auto">Cancel</button>
+    </div>
+  </form>
+</dialog>
+<dialog id="secret-dialog" aria-labelledby="secret-title">
+  <form id="secret-form" class="grid" method="dialog">
+    <h3 class="wide" id="secret-title">Add a key</h3>
+    <input type="hidden" name="orig"><input type="hidden" name="file"><input type="hidden" name="var">
+    <label>Name <input name="name" required autocomplete="off" spellcheck="false" pattern="[A-Za-z0-9][A-Za-z0-9_.:@\-]{0,79}" placeholder="openai-personal"></label>
+    <label>Env var <input name="env" autocomplete="off" spellcheck="false" pattern="[A-Za-z_][A-Za-z0-9_]*" placeholder="OPENAI_API_KEY"></label>
+    <label>Service <input name="service" autocomplete="off" placeholder="openai"></label>
+    <label>Tags <input name="tags" autocomplete="off" placeholder="comma separated: prod, billing"></label>
+    <label class="wide" id="secret-value-label">Value <textarea name="value" rows="2" class="mono masked" spellcheck="false" autocomplete="off" placeholder="paste the key"></textarea><small class="muted" id="secret-value-help"></small></label>
+    <label class="wide">Note <textarea name="note" rows="3" placeholder="what it's for, which account, where to rotate it, limits…"></textarea></label>
+    <label class="wide">Fields <textarea name="fields" rows="3" class="mono" spellcheck="false" placeholder="values that go with it, one per line:&#10;account: me@example.com&#10;project: my-project&#10;dashboard: https://…"></textarea></label>
+    <div id="secret-feedback" class="wide form-error" role="alert" hidden></div>
+    <div class="wide row">
+      <button type="submit" class="primary">Save</button>
+      <button type="button" id="secret-cancel" style="margin-left:auto">Cancel</button>
     </div>
   </form>
 </dialog>

@@ -5,6 +5,20 @@ Open work, newest first within each status. One heading per issue; close it by m
 
 ## Open
 
+### #11 Keys: what's left
+*Opened 2026-11-24 · after the Keys tab and `lw keys` (#10 is Autopilot's, in its PR)*
+
+- [ ] Merging with Autopilot (PR #49): both add `scripts/lw.ts`. Keep #49's and add `case "keys": return
+      keysCommand(rest)` plus `KEYS_HELP` to its help. Both install the same `DATA_DIR/bin/lw` shim and the same
+      `runHooks` in `src/runner.ts`; `registerLw()` must stay after `registerAutopilot()` so the two contexts compose,
+      and #49's own lines about `lw` can then drop what `src/lw.ts` already says.
+- [ ] Keys are the console's, not a person's: on a team console everyone who signs in can use every key. Per-person
+      keys (or keys only some people can read) if a shared box needs them.
+- [ ] Rotation: `lw keys where` lists the files with the old value; a `lw keys sync <name>` could rewrite them.
+- [ ] The master key is a file. macOS Keychain or a passphrase would keep it off disk, at the cost of prompts or
+      unlocking after a restart.
+- [ ] Runs on a target or in a container get neither `lw` nor the context lines (no way back to this console from there).
+
 ### #9 Chat: a message sometimes shows twice while the agent is working
 *Opened 2026-10-27 · seen on a live run with several background agents*
 

@@ -111,6 +111,16 @@ export type StartOptions = {
   config?: string;
 };
 
+/**
+ * Set by src/autopilot: what every local run is started with besides its own prompt and config (how to reach people,
+ * the rules that apply, its programme's context), and a call once the run has its id. Kept as hooks so this file
+ * doesn't depend on the autopilot modules.
+ */
+export const runHooks: {
+  context?: (meta: Record<string, any>, o: { agent: boolean; cwd: string }) => { instructions: string; env: Record<string, string> } | null;
+  started?: (runId: number, meta: Record<string, any>) => void;
+} = {};
+
 /** A run config by name, with ConfigErrors as ApiErrors. */
 export function configOf(name: string): RunConfig {
   try { return getConfig(name); } catch (e) { if (e instanceof ConfigError) throw new ApiError(e.status, e.message); throw e; }
@@ -188,9 +198,9 @@ export async function tmux(...args: string[]): Promise<{ code: number; out: stri
   return tmuxWith(args);
 }
 /** `input` goes to tmux's stdin (load-buffer -). Code -1: tmux could not be started at all (e.g. out of memory). */
-async function tmuxWith(args: string[], input?: string): Promise<{ code: number; out: string; err: string }> {
+async function tmuxWith(args: string[], input?: string, env?: Record<string, string>): Promise<{ code: number; out: string; err: string }> {
   try {
-    const p = Bun.spawn(["tmux", ...args], { stdin: input === undefined ? "ignore" : new TextEncoder().encode(input), stdout: "pipe", stderr: "pipe" });
+    const p = Bun.spawn(["tmux", ...args], { stdin: input === undefined ? "ignore" : new TextEncoder().encode(input), stdout: "pipe", stderr: "pipe", ...(env ? { env: { ...process.env, ...env } } : {}) });
     const [out, err, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
     return { code, out: out.replace(/\n$/, ""), err: err.trim() };
   } catch (e: any) {
@@ -282,7 +292,13 @@ export async function startRun(opts: StartOptions): Promise<RunRow> {
   if (!target && (!existsSync(cwd) || !statSync(cwd).isDirectory())) throw new ApiError(400, `cwd does not exist: ${cwd}`);
   const interactive = Boolean(opts.interactive) || Boolean(opts.resumeSession);
   if (interactive && !e2b && !tmuxPath()) throw new ApiError(400, "interactive runs need tmux on PATH (brew install tmux / apt install tmux)");
-  let { command, args, template_len } = buildCommand(type, { ...opts, cwd, permissionMode: e2b?.permission_mode, runConfig });
+  // Agent runs on this machine also get lofiwave's own instructions (src/autopilot): they ride with the config's.
+  // Not on a target or in a container, where neither `lw` nor the context file can be reached.
+  const ctx = !target && !docker ? runHooks.context?.(opts.meta ?? {}, { agent: type.kind === "agent", cwd }) ?? null : null;
+  const cmdConfig: RunConfig | null = ctx?.instructions
+    ? { name: runConfig?.name ?? "", description: "", env: {}, docker: null, ...(runConfig ?? {}), instructions: [ctx.instructions, runConfig?.instructions ?? ""].filter((x) => x.trim()).join("\n\n") }
+    : runConfig;
+  let { command, args, template_len } = buildCommand(type, { ...opts, cwd, permissionMode: e2b?.permission_mode, runConfig: cmdConfig });
   // Remote Control needs a claude.ai login: in a sandbox that only has an API key, leave it out.
   if (e2b && !sandboxEnv(e2b, { ...JSON.parse(type.env || "{}"), ...(runConfig?.env ?? {}), ...(opts.env ?? {}) }, [config.authToken]).CLAUDE_CODE_OAUTH_TOKEN) {
     const drop = args.slice(0, template_len).filter((a) => a === "--remote-control").length;
@@ -312,7 +328,7 @@ export async function startRun(opts: StartOptions): Promise<RunRow> {
   const configEnv: Record<string, string> = runConfig
     ? { LOFIWAVE_CONFIG: runConfig.name, ...(runConfig.instructions.trim() ? { LOFIWAVE_INSTRUCTIONS: runConfig.instructions } : {}), ...runConfig.env }
     : {};
-  const launchEnv: Record<string, string> = { LOFIWAVE_OUT_DIR: outDir, ...typeEnv, ...configEnv, ...(opts.env ?? {}) };
+  const launchEnv: Record<string, string> = { LOFIWAVE_OUT_DIR: outDir, ...(ctx?.env ?? {}), ...typeEnv, ...configEnv, ...(opts.env ?? {}) };
   const t = now();
   const timeoutSec = opts.timeoutSec ?? opts.workflow?.timeout_sec ?? 0;
   const meta: Record<string, any> = { ...(opts.meta ?? {}), timeout_sec: timeoutSec, template_len };
@@ -375,6 +391,7 @@ export async function startRun(opts: StartOptions): Promise<RunRow> {
     id = Number(ins.lastInsertRowid);
   }
   starting.add(id);
+  try { runHooks.started?.(id, meta); } catch (e) { console.error("[runs] started hook", e); }
   const logPath = join(logDir, `run-${id}.log`);
   if (interactive) { meta.interactive = true; if (!e2b) meta.tmux = tmuxSessionName(id); }
   if (e2b) meta.e2b = { tag: `lofiwave-${id}` };
@@ -454,7 +471,9 @@ export async function startRun(opts: StartOptions): Promise<RunRow> {
     // A tmux pane inherits the tmux server's environment (started by lofiwave, so it has the stripped vars too): unset them in the pane.
     const runCmd = stripEnv.length ? ["env", ...stripEnv.flatMap((k) => ["-u", k]), command, ...args] : [command, ...args];
     const paneCmd = secretFile ? ["sh", "-c", '. "$0"; rm -f "$0"; exec "$@"', secretFile, ...runCmd] : runCmd;
-    const created = await tmux("new-session", "-d", "-s", sess, "-c", cwd, "-x", "180", "-y", "48", ...envFlags, "--", ...paneCmd);
+    // tmux gives a new pane the PATH of the client that created it, whatever `-e PATH=` says: the run's PATH (which
+    // has the `lw` command on it) has to be this tmux client's own.
+    const created = await tmuxWith(["new-session", "-d", "-s", sess, "-c", cwd, "-x", "180", "-y", "48", ...envFlags, "--", ...paneCmd], undefined, { PATH: launchEnv.PATH ?? process.env.PATH ?? "" });
     if (created.code !== 0) { if (secretFile) rmSync(secretFile, { force: true }); await fail(`failed to start tmux session: ${created.err || created.out}`); }
     await tmux("set-option", "-t", tmuxTarget(sess), "remain-on-exit", "on");
     const pane = await tmux("display-message", "-p", "-t", tmuxTarget(sess), "#{pane_pid}");

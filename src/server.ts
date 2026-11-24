@@ -30,6 +30,8 @@ import { stats, sentMessages, noteSender } from "./stats";
 import { startTokenIndex, tokensFresh } from "./tokens";
 import { ccxStatus, ccxSearch, ccxSessions, ccxShow } from "./ccx";
 import { insidePath, listDir, writeFiles, decodeContent, extractInto, archiveOf, resultsOf, makeFolder } from "./files";
+import { registerLw } from "./lw";
+import { listSecrets, createSecret, updateSecret, deleteSecret, readValue, secretDetail, scanOut, importFound, suggestName, type Who } from "./secrets";
 
 const PUBLIC_DIR = join(config.root, "public");
 const startedAt = now();
@@ -340,6 +342,45 @@ route("DELETE", "/api/keys/:id", (_r, p) => {
   keyAdmin();
   if (!db.prepare("DELETE FROM api_keys WHERE id = ?").run(Number(p.id)).changes) throw new ApiError(404, `API key ${p.id} not found`);
   return json({ ok: true });
+});
+
+// ---- keys: API keys and secrets for this machine's agents, encrypted at rest (src/secrets.ts; `lw keys` in a run).
+// Not /api/keys, which is the console's own API keys above.
+const keyUser = (req: Request): Who => {
+  const run = Number(req.headers.get("x-lofiwave-run") ?? "");
+  return { actor: actor.getStore() ?? "", run: Number.isInteger(run) && run > 0 ? run : null };
+};
+const tagList = (v: unknown) => (v === undefined ? undefined : strArray(v, "tags"));
+route("GET", "/api/secrets", (_r, _p, url) => json(listSecrets(url.searchParams.get("q") ?? "")));
+route("POST", "/api/secrets", async (req) => {
+  const b = await body(req);
+  return json(createSecret({
+    name: str(b.name, "name", { required: true }), value: str(b.value, "value", { required: true }), env: str(b.env, "env"), service: str(b.service, "service"),
+    note: str(b.note, "note"), fields: strMap(b.fields, "fields"), tags: tagList(b.tags),
+  }, keyUser(req)), 201);
+});
+route("GET", "/api/secrets/scan", async (_r, _p, url) => json(await scanOut(url.searchParams.get("refresh") === "1")));
+route("POST", "/api/secrets/import", async (req) => {
+  const b = await body(req);
+  const file = str(b.file, "file", { required: true }), v = str(b.var, "var", { required: true });
+  return json(await importFound({ file, var: v, name: str(b.name, "name") || undefined, env: str(b.env, "env") || undefined, service: str(b.service, "service"), note: str(b.note, "note"), fields: strMap(b.fields, "fields"), tags: tagList(b.tags) }, keyUser(req)), 201);
+});
+route("GET", "/api/secrets/suggest-name", (_r, _p, url) => json({ name: suggestName(url.searchParams.get("env") ?? "key", url.searchParams.get("file") ?? "") }));
+route("GET", "/api/secrets/:name", (_r, p) => json(secretDetail(p.name)));
+route("PUT", "/api/secrets/:name", async (req, p) => {
+  const b = await body(req);
+  return json(updateSecret(p.name, {
+    rename: b.name === undefined ? undefined : str(b.name, "name"), value: b.value === undefined ? undefined : str(b.value, "value"),
+    env: b.env === undefined ? undefined : str(b.env, "env"), service: b.service === undefined ? undefined : str(b.service, "service"),
+    note: b.note === undefined ? undefined : str(b.note, "note"), fields: b.fields === undefined ? undefined : (b.fields as Record<string, string>),
+    tags: tagList(b.tags), replace_fields: b.replace_fields === true,
+  }, keyUser(req)));
+});
+route("DELETE", "/api/secrets/:name", (_r, p) => { deleteSecret(p.name); return json({ ok: true }); });
+// The value itself: POST, so it is never cached or prefetched, and logged with what it is for.
+route("POST", "/api/secrets/:name/value", async (req, p) => {
+  const b = await body(req).catch(() => ({}));
+  return json(readValue(p.name, typeof b.use === "string" ? b.use : "reveal", keyUser(req), typeof b.detail === "string" ? b.detail : ""));
 });
 
 // ---- paths (recent working directories + filesystem completion, for the UI's path picker)
@@ -1153,6 +1194,8 @@ async function dispatch(req: Request, url: URL): Promise<Response> {
   }
 }
 
+// After every other hook (src/autopilot's), so lofiwave's own lines and `lw` on the PATH compose with them.
+registerLw();
 startScheduler();
 startQueue();
 startTokenIndex();

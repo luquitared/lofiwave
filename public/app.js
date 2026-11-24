@@ -195,9 +195,9 @@ const ddlg = $("#dir-dialog");
 let dirInput = null, dirView = "recent", dirAt = "", dirHome = "", dirEntries = [], dirSeq = 0;
 function openDirPicker(input) {
   dirInput = input;
-  const v = input.value.trim();
-  dirView = v ? "browse" : "recent";
-  dirAt = v;
+  // Recent folders first, even when the field has one: that's what you pick from most. Browse starts at the field's folder.
+  dirView = "recent";
+  dirAt = input.value.trim();
   $("#dir-filter").value = "";
   ddlg.showModal();
   $("#dir-close").focus();
@@ -274,7 +274,7 @@ const typeByName = (n) => types.find((t) => t.name === n);
 // ---------------------------------------------------------------- tabs
 // Main tabs: Sessions, Workflows, Connect, and Advanced, which holds the rest (processes, apps, runs, types, system, usage, stats).
 const ADVANCED = ["agents", "apps", "runs", "types", "system", "usage", "stats"];
-const TITLES = { console: "Sessions", workflows: "Workflows", connect: "Connect", settings: "Settings", agents: "Advanced", apps: "Advanced", runs: "Advanced", types: "Advanced", system: "Advanced", usage: "Advanced", stats: "Advanced" };
+const TITLES = { console: "Sessions", workflows: "Workflows", keys: "Keys", connect: "Connect", settings: "Settings", agents: "Advanced", apps: "Advanced", runs: "Advanced", types: "Advanced", system: "Advanced", usage: "Advanced", stats: "Advanced" };
 $$("nav button").forEach((b) => b.addEventListener("click", () => switchTab(b.dataset.tab)));
 $$("#subnav button").forEach((b) => b.addEventListener("click", () => switchTab(b.dataset.sub)));
 function switchTab(name, push = true) {
@@ -282,6 +282,7 @@ function switchTab(name, push = true) {
   if (!TITLES[name]) name = "console";
   if (name !== "runs" && selectedRun) closeRun(false);
   if (name !== "console") { closeTerm(); closeChat(); closeEndedChat(); syncFull(false); drawerPicked(); }
+  if (name === "keys" && activeTab !== "keys") secretsAt = 0;
   activeTab = name;
   document.body.dataset.tab = name;
   const advanced = ADVANCED.includes(name);
@@ -810,7 +811,15 @@ $("#wf-save-run").onclick = async () => {
 // ---------------------------------------------------------------- connect (API docs URL + API keys)
 const docsUrl = () => `${location.origin}/api/docs`;
 const agentPrompt = (key) => `Read ${docsUrl()} and use the lofiwave API with the header "Authorization: Bearer ${key || "<API key>"}". `;
-function copy(text, what) { navigator.clipboard?.writeText(text).then(() => toast(`copied ${what}`, true), () => toast("couldn't copy; select it and copy by hand")); }
+function copy(text, what) {
+  // navigator.clipboard is only there on https and localhost: over plain http (Tailscale) fall back to a selection.
+  const fallback = () => {
+    const ta = h("textarea", { style: "position:fixed;opacity:0;top:0;left:0" }); ta.value = text; document.body.append(ta); ta.select();
+    const ok = document.execCommand("copy"); ta.remove();
+    toast(ok ? `copied ${what}` : "couldn't copy; select it and copy by hand", ok);
+  };
+  if (navigator.clipboard) navigator.clipboard.writeText(text).then(() => toast(`copied ${what}`, true), fallback); else fallback();
+}
 $("#copy-docs-url").onclick = () => copy(docsUrl(), "the URL");
 $("#copy-agent-prompt").onclick = () => copy(agentPrompt(lastKey), "the prompt");
 let lastKey = "";
@@ -987,6 +996,126 @@ cf.addEventListener("submit", async (e) => {
     else await post("/configs", { name: cf.elements.namedItem("name").value.trim(), ...body });
   } catch (err) { $("#config-feedback").textContent = err.message; $("#config-feedback").hidden = false; return; }
   toast("saved", true); cdlg.close(); loadConfigs();
+});
+
+// ---------------------------------------------------------------- keys (API keys and secrets for agents, src/secrets.ts)
+// The list never holds values: a value is fetched (and logged) only when someone reveals or copies it.
+let secrets = [], openSecret = null, secretTimer = null, secretsAt = 0;
+const encS = (n) => encodeURIComponent(n);
+const loadSecrets = guard(async () => {
+  secretsAt = Date.now();
+  const q = $("#secret-filter").value.trim();
+  secrets = await get(`/secrets${q ? `?q=${encS(q)}` : ""}`);
+  $("#secret-count").textContent = secrets.length ? `${secrets.length} key${secrets.length === 1 ? "" : "s"}` : "";
+  $("#secret-table tbody").replaceChildren(...secrets.map((k) => h("tr", { class: `clickable${openSecret === k.name ? " selected" : ""}`, onclick: () => showSecret(k.name) },
+    h("td", { class: "full" }, h("b", {}, k.name), k.service ? h("span", { class: "wf-tag svc-tag" }, k.service) : "",
+      k.note ? h("div", { class: "muted wf-sub trunc", title: k.note }, k.note.split("\n")[0]) : ""),
+    h("td", { class: "mono trunc", "data-l": "env var" }, k.env || h("span", { class: "muted" }, "–")),
+    h("td", { class: "mono trunc", "data-l": "value" }, k.hint),
+    h("td", { "data-l": "on disk", title: "how many .env files and profiles here have this value" }, k.files === null ? h("span", { class: "muted" }, "…") : k.files ? `${k.files} file${k.files === 1 ? "" : "s"}` : h("span", { class: "muted" }, "–")),
+    h("td", { "data-l": "last used" }, k.used_at ? fmtRel(k.used_at) : h("span", { class: "muted" }, "never")),
+    h("td", { class: "row" }, h("button", { class: "small", title: "copy the value", onclick: (e) => { e.stopPropagation(); copySecret(k.name); } }, "Copy")),
+  )));
+  if (!secrets.length) $("#secret-table tbody").replaceChildren(h("tr", {}, h("td", { colspan: 6, class: "muted empty" }, q ? "No key matches." : "No keys yet. Add one, or import one found on this computer below.")));
+});
+/** The tab polls slowly: a reveal or an open dialog shouldn't be redrawn under you, and the scan is cached anyway. */
+function refreshKeys() {
+  if (kdlg.open || Date.now() - secretsAt < 30_000) return;
+  loadSecrets(); loadFound();
+}
+async function secretValue(name, use) { return (await post(`/secrets/${encS(name)}/value`, { use, detail: "from the Keys page" })).value; }
+const copySecret = guard(async (name) => { copy(await secretValue(name, "copy"), name); });
+const showSecret = guard(async (name, toggle = true) => {
+  if (toggle && openSecret === name) { openSecret = null; $("#secret-detail").hidden = true; return loadSecrets(); }
+  const k = await get(`/secrets/${encS(name)}`);
+  openSecret = k.name;
+  $$("#secret-table tbody tr").forEach((tr) => tr.classList.toggle("selected", tr.querySelector("b")?.textContent === k.name));
+  const val = h("code", { class: "mono secret-val" }, k.hint);
+  let shown = false;
+  const reveal = h("button", { class: "small", onclick: guard(async () => {
+    shown = !shown; val.textContent = shown ? await secretValue(k.name, "reveal") : k.hint; reveal.textContent = shown ? "Hide" : "Reveal";
+  }) }, "Reveal");
+  const fields = Object.entries(k.fields);
+  $("#secret-detail").replaceChildren(
+    h("div", { class: "card-head" }, h("h2", {}, k.name, k.service ? h("span", { class: "wf-tag svc-tag" }, k.service) : ""),
+      h("div", { class: "row" },
+        h("button", { class: "small", onclick: () => copySecret(k.name) }, "Copy"),
+        h("button", { class: "small", onclick: () => openSecretDialog(k) }, "Edit"),
+        h("button", { class: "small danger", onclick: () => confirmDo(`Delete the key "${k.name}"? Its value can't be recovered from lofiwave afterwards.`, async () => { await del(`/secrets/${encS(k.name)}`); openSecret = null; $("#secret-detail").hidden = true; toast("deleted", true); loadSecrets(); }) }, "Delete"),
+        h("button", { class: "small", "aria-label": "Close", onclick: () => { openSecret = null; $("#secret-detail").hidden = true; loadSecrets(); } }, "✕"))),
+    h("dl", { class: "secret-dl" },
+      h("dt", {}, "Value"), h("dd", { class: "row" }, val, reveal),
+      h("dt", {}, "Env var"), h("dd", { class: "mono" }, k.env || "–"),
+      ...fields.flatMap(([f, v]) => [h("dt", {}, f), h("dd", {}, /^https?:\/\//.test(v) ? h("a", { href: v, target: "_blank", rel: "noopener" }, v) : v)]),
+      k.tags.length ? [h("dt", {}, "Tags"), h("dd", {}, k.tags.join(", "))] : "",
+      k.note ? [h("dt", {}, "Note"), h("dd", { class: "secret-note" }, k.note)] : "",
+      h("dt", {}, "Added"), h("dd", {}, `${fmtRel(k.created_at)}${k.created_by ? ` by ${k.created_by}` : ""}${k.source ? ` from ${k.source}` : ""}`),
+      h("dt", {}, "For agents"), h("dd", { class: "mono" }, `lw keys env ${k.name} -- <command>`),
+    ),
+    k.where.length ? h("details", { class: "secret-where" }, h("summary", {}, `Written in ${k.where.length} file${k.where.length === 1 ? "" : "s"} on this computer`),
+      h("ul", { class: "mono" }, ...k.where.map((f) => h("li", {}, `${f.file}:${f.line}`, h("span", { class: "muted" }, `  ${f.var}`))))) : "",
+    k.events.length ? h("details", { class: "secret-where" }, h("summary", {}, "Recent uses"),
+      h("ul", {}, ...k.events.map((e) => h("li", {}, `${fmtRel(e.at)} · ${e.action}${e.actor ? ` by ${e.actor}` : ""}${e.run_id ? ` (run ${e.run_id})` : ""}${e.detail ? `: ${e.detail}` : ""}`)))) : "",
+  );
+  $("#secret-detail").hidden = false;
+});
+const loadFound = guard(async (refresh = false) => {
+  if (refresh) $("#found-info").textContent = "Scanning…";
+  const s = await get(`/secrets/scan${refresh ? "?refresh=1" : ""}`);
+  const todo = s.groups.filter((g) => !g.stored);
+  $("#found-info").textContent = `${s.files} .env files and profiles under ${s.roots.join(", ")}, scanned ${fmtRel(s.scanned_at)}: ${todo.length} value${todo.length === 1 ? "" : "s"} lofiwave doesn't hold, ${s.groups.length - todo.length} it does.`;
+  $("#found-table tbody").replaceChildren(...todo.map((g) => h("tr", {},
+    h("td", { class: "mono trunc", "data-l": "env var", title: g.vars.join("\n") }, g.vars.join(", ")),
+    h("td", { class: "mono trunc", "data-l": "value" }, g.hint),
+    h("td", { class: "mono trunc", "data-l": "written in", title: g.files.map((f) => `${f.file}:${f.line}`).join("\n") }, g.files[0].file, g.files.length > 1 ? h("span", { class: "muted" }, ` +${g.files.length - 1}`) : ""),
+    h("td", { class: "row" }, h("button", { class: "small", onclick: () => importFoundDialog(g) }, "Import")),
+  )));
+  if (!todo.length) $("#found-table tbody").replaceChildren(h("tr", {}, h("td", { colspan: 4, class: "muted empty" }, s.groups.length ? "Every key found here is in lofiwave." : "No keys found in .env files or shell profiles.")));
+  if (secrets.some((k) => k.files === null)) loadSecrets();   // "on disk" counts come from the scan
+});
+$("#secret-rescan").onclick = () => loadFound(true).then(() => loadSecrets());
+$("#secret-filter").addEventListener("input", () => { clearTimeout(secretTimer); secretTimer = setTimeout(loadSecrets, 150); });
+
+const kdlg = $("#secret-dialog"), kf = $("#secret-form");
+const fieldsText = (f) => Object.entries(f ?? {}).map(([k, v]) => `${k}: ${v}`).join("\n");
+const parseFields = (t) => Object.fromEntries(t.split("\n").map((l) => l.match(/^\s*([^:=]+?)\s*[:=]\s*(.*?)\s*$/)).filter(Boolean).map((m) => [m[1], m[2]]));
+function openSecretDialog(k, found = null) {
+  kf.reset(); $("#secret-feedback").hidden = true;
+  kf.orig.value = k?.name ?? ""; kf.file.value = found?.file ?? ""; kf.var.value = found?.var ?? "";
+  kf.elements.namedItem("name").value = k?.name ?? found?.name ?? "";
+  kf.env.value = k?.env ?? found?.var ?? ""; kf.service.value = k?.service ?? found?.service ?? "";
+  kf.tags.value = (k?.tags ?? []).join(", "); kf.note.value = k?.note ?? ""; kf.fields.value = fieldsText(k?.fields);
+  $("#secret-title").textContent = k ? `Edit ${k.name}` : found ? `Import ${found.var}` : "Add a key";
+  $("#secret-value-label").hidden = Boolean(found);
+  kf.value.required = !k && !found;
+  $("#secret-value-help").textContent = k ? `Now ${k.hint}. Leave blank to keep it.` : "Stored encrypted; the list only shows its first and last characters.";
+  kdlg.showModal();
+  kf.elements.namedItem("name").focus();
+}
+const SERVICE_OF = [[/OPENAI/, "openai"], [/ANTHROPIC|CLAUDE/, "anthropic"], [/GEMINI|GOOGLE/, "google"], [/REPLICATE/, "replicate"], [/ELEVENLABS/, "elevenlabs"], [/OPENROUTER/, "openrouter"], [/SUPABASE/, "supabase"], [/STRIPE/, "stripe"], [/^R2_|CLOUDFLARE/, "cloudflare"], [/^AWS_/, "aws"], [/TELEGRAM/, "telegram"], [/DISCORD/, "discord"], [/GITHUB|^GH_/, "github"], [/SLACK/, "slack"], [/DATABASE_URL|POSTGRES|PG/, "database"]];
+const importFoundDialog = guard(async (g) => {
+  const f = g.files[0];
+  const { name } = await get(`/secrets/suggest-name?env=${encS(f.var)}&file=${encS(f.file)}`);
+  openSecretDialog(null, { file: f.file, var: f.var, name, service: SERVICE_OF.find(([re]) => re.test(f.var))?.[1] ?? "" });
+  if (g.files.length > 1) kf.note.value = `Also in ${g.files.length - 1} other file${g.files.length === 2 ? "" : "s"} (see where it's written).`;
+});
+$("#secret-new-btn").onclick = () => openSecretDialog(null);
+$("#secret-cancel").onclick = () => kdlg.close();
+kf.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  if (!kf.reportValidity()) return;
+  $("#secret-feedback").hidden = true;
+  const name = kf.elements.namedItem("name").value.trim();
+  const body = { env: kf.env.value.trim(), service: kf.service.value.trim(), note: kf.note.value, fields: parseFields(kf.fields.value), tags: kf.tags.value.split(",").map((t) => t.trim()).filter(Boolean) };
+  const orig = kf.orig.value;
+  let saved;
+  try {
+    if (orig) saved = await put(`/secrets/${encS(orig)}`, { ...body, name, replace_fields: true, ...(kf.value.value ? { value: kf.value.value } : {}) });
+    else if (kf.file.value) saved = await post("/secrets/import", { ...body, name, file: kf.file.value, var: kf.var.value });
+    else saved = await post("/secrets", { ...body, name, value: kf.value.value });
+  } catch (err) { $("#secret-feedback").textContent = err.message; $("#secret-feedback").hidden = false; return; }
+  toast(saved.same_value_as ? `saved; ${saved.same_value_as} has the same value` : "saved", true);
+  kdlg.close(); loadSecrets(); showSecret(saved.name, false); loadFound();
 });
 
 function renderSettings() {
@@ -2173,6 +2302,7 @@ function refresh() {
   else if (activeTab === "apps") loadTypes().then(loadApps);
   else if (activeTab === "workflows") loadWorkflows();
   else if (activeTab === "connect") loadConnect();
+  else if (activeTab === "keys") refreshKeys();
   else if (activeTab === "settings") renderSettings();
   else if (activeTab === "runs") { loadRuns(); if (selectedRun) refreshRunDetail(); }
   else if (activeTab === "types") loadTypes();

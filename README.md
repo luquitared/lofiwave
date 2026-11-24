@@ -164,14 +164,18 @@ Environment variables, or `KEY=VALUE` lines in `.env`:
 | `OUTPUT_TAIL_BYTES` | `65536` | How much of the end of each log is copied into the run record (`output`) |
 | `MAX_AGENT_RUNS` | *(from RAM)* | At most this many agent runs at once; more are refused with 429 or queued (see *Swarms*). Default: (total RAM − 1 GB) / 600 MB, between 1 and 16. `0` = no cap. |
 | `MIN_FREE_MEM_MB` | `500` | No agent run starts while less memory than this is available (Linux `MemAvailable`; macOS free + inactive pages). `0` = no check. |
+| `LOFIWAVE_KEYS_KEY` | *(unset)* | The master key that encrypts *Keys* (32 bytes, base64 or hex). Unset: generated once into `LOFIWAVE_KEYS_KEY_FILE`. Lose it and the stored keys are gone. |
+| `LOFIWAVE_KEYS_KEY_FILE` | `~/.config/lofiwave/keys.key` | Where the generated master key is kept (0600), outside `DATA_DIR` so a copy of the data folder alone doesn't give the keys away |
+| `KEYS_SCAN_ROOTS` | home | Colon-separated folders *Keys → Found on this computer* looks through for `.env` files (shell profiles are read too when home is one of them) |
+| `LOFIWAVE_AGENT_CONTEXT` | *(on)* | `off`: agent runs aren't told they run under lofiwave, or about `lw` and `ccx` (see *Keys*) |
 | `CWD_ROOTS` | home and temp dirs | Colon-separated folders under which `mkdir_cwd` may create a run's folder |
 | `OPEN_TERMINAL` | `auto` | Desktop terminal window opened on an interactive run. `auto` = iTerm then Terminal.app on macOS, the first of wezterm/kitty/alacritty/ghostty/foot/gnome-terminal/konsole/tilix/xfce4-terminal/mate-terminal/terminator/urxvt/xterm found on Linux; `none` to keep runs headless; or name one (`iterm`, `terminal`, `kitty`, …). Ignored on a headless machine (no `DISPLAY`/`WAYLAND_DISPLAY`). |
 
 ```
 lofiwave/
-├── src/       server.ts (HTTP + API), db.ts, runner.ts, targets.ts, configs.ts, e2b.ts, jobs.ts, capacity.ts, files.ts, connect.ts, vtscreen.ts, scheduler.ts, cron.ts, procs.ts, agents.ts, terminal.ts
+├── src/       server.ts (HTTP + API), db.ts, secrets.ts, lw.ts, runner.ts, targets.ts, configs.ts, e2b.ts, jobs.ts, capacity.ts, files.ts, connect.ts, vtscreen.ts, scheduler.ts, cron.ts, procs.ts, agents.ts, terminal.ts
 ├── public/    the single-page UI
-├── scripts/   start.sh, service installers, Claude Code session hook, Tailscale helpers
+├── scripts/   lw.ts + lw-keys.ts (the lw command), start.sh, service installers, Claude Code session hook, Tailscale helpers
 └── data/      database, logs, token (created on first start, git-ignored)
 ```
 
@@ -437,6 +441,38 @@ The Console's **Chat** view, and **View chat** on Claude sessions lofiwave didn'
 | `GET /api/runs/:id/chat/changes?prompt=` | what a turn changed in git: `{root, files: [{path, status, added, removed, binary?}], added, removed, truncated, live}`; 404 without checkpoints |
 | `GET /api/runs/:id/chat/changes/file?prompt=&path=` | one file's change in that turn: `{hunks, binary}` (hunks as in `structuredPatch`) |
 | `POST /api/hooks/message`, `/api/hooks/turn`, `/api/hooks/statusline` | called by Claude's `MessageDisplay`, `UserPromptSubmit`/`Stop` hooks and by `scripts/claude-statusline.ts` (same headers as above); all reply `{}` |
+
+### Keys (API keys and secrets for agents)
+
+The *Keys* tab holds the API keys, tokens and passwords this machine's agents use. Each has a name (`openai-personal`), the env var it usually goes in, a service, a note, fields that go with it (account, project, dashboard URL) and tags. The value is encrypted in the database (AES-256-GCM, with the master key outside it: `LOFIWAVE_KEYS_KEY_FILE`); the rest is plain, so it can be searched. *Found on this computer* lists the keys in `.env` files and shell profiles that lofiwave doesn't hold yet, grouped by value, for import; a stored key shows every file it is also written in, which is the list to update when you rotate it. Everyone who can use the console can use its keys, and every read is logged with who did it and for what.
+
+Agents use them through **`lw`**, lofiwave's command line, which is on every run's PATH (a shim in `DATA_DIR/bin`; link it onto your own PATH to use it in a terminal). `lw keys env`, `write` and `copy` hand a key to a command, a file or the clipboard without printing it, so it stays out of the conversation's transcript:
+
+```
+lw keys search openai                       # name, env var, service, note, fields
+lw keys show openai-personal                # all but the value: note, fields, where it's written, recent uses
+lw keys env openai-personal -- npm test     # OPENAI_API_KEY set for that command only (name=VAR to rename)
+lw keys write openai-personal stripe-test --to .env
+lw keys copy openai-personal                # onto this machine's clipboard
+lw keys add replicate --env REPLICATE_API_TOKEN --from-env REPLICATE_API_TOKEN --note "team account" --field dashboard=https://replicate.com/account
+lw keys import ~/projects/app/.env STRIPE_SECRET_KEY --name stripe-test
+lw keys set openai-personal --note "rotated 2026-11" --from-env NEW_KEY
+lw keys scan                                # found on this computer, not stored yet
+lw keys reveal openai-personal              # prints it: the last resort
+```
+
+Agent runs on this machine (not on a target or in a container) also start with a few lines of instructions, ahead of their config's: that they run under lofiwave, what `lw keys` is for, and, when it's installed, that `ccx` searches past conversations. `LOFIWAVE_AGENT_CONTEXT=off` leaves them out.
+
+| Method & path | Description |
+|---|---|
+| `GET /api/secrets?q=` | Keys without their values: `{name, env, service, hint, note, fields, tags, source, files, created_by, created_at, updated_at, used_at}`. `hint` is `sk-proj-…1234`; `files` is how many scanned files have the same value (null before the first scan) |
+| `POST /api/secrets` | `{name, value, env?, service?, note?, fields?, tags?}` → 201, with `same_value_as` when another key has that value |
+| `GET /api/secrets/:name` | One key, plus `where` (files with its value) and `events` (the last 30 uses and changes) |
+| `PUT /api/secrets/:name` | Any of `name` (rename), `value`, `env`, `service`, `note`, `tags`, `fields` (merged; `""` drops one; `replace_fields: true` replaces them) |
+| `DELETE /api/secrets/:name` | Delete it |
+| `POST /api/secrets/:name/value` | `{use: "reveal" \| "copy" \| "env" \| "write", detail?}` → `{name, env, value}`, logged with the caller and the run (`X-Lofiwave-Run`) |
+| `GET /api/secrets/scan?refresh=1` | `.env` files and profiles under `KEYS_SCAN_ROOTS`: `{files, roots, scanned_at, groups: [{fingerprint, hint, vars, files: [{file, var, line}], stored}]}`. Cached for 10 minutes |
+| `POST /api/secrets/import` | `{file, var, name?, …}`: store the value lofiwave reads from that file; it never passes through the caller |
 
 ### Conversation search (ccx)
 
