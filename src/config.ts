@@ -60,6 +60,8 @@ export const config = {
    * `--permission-mode <mode>` unless the run's args already pick one. E.g. `bypassPermissions` on a sandbox VM.
    */
   claudePermissionMode: process.env.CLAUDE_PERMISSION_MODE?.trim() || "",
+  /** Local claude runs also get CLAUDE_CODE_OAUTH_TOKEN from this env (a box with no claude login of its own). */
+  claudeOauthLocal: ["1", "true", "yes"].includes((process.env.CLAUDE_OAUTH_LOCAL ?? "").trim().toLowerCase()),
   /**
    * Sandbox every codex run starts in (headless, interactive, restart and resume): passed as `--sandbox <mode>` unless
    * the run's args already pick one. `read-only`, `workspace-write` or `danger-full-access`. Without it, Codex uses its
