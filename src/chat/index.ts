@@ -27,11 +27,13 @@ import { dirname, join } from "node:path";
 import { db, type RunRow, type SessionRow } from "../db";
 import { ApiError } from "../runner";
 import { claudeRegistry, claudeTranscriptPath } from "../agents";
+import { pidAlive } from "../procs";
 import { JsonlTail, readLineAt, type LineLoc } from "./tail";
 import { activeChain, capabilities, extractBlob, ingest, project, type Item, type Rec } from "./claude";
 import { onRequests, requestsFor, settleAnswered } from "./approvals";
 import { dropStream, onLive, streamsFor, usageFor } from "./live";
 import { checkpointedPrompts, turnChanges, type TurnChanges } from "./checkpoints";
+import { piSessionPath, piStatus, piToClaude } from "./pi";
 
 /** How much of the conversation a viewer gets on connect; "Load earlier" fetches the rest. */
 const WINDOW_TURNS = 30;
@@ -45,7 +47,11 @@ export type ChatData = { kind: "chat"; key: string; user: string };
 
 type Located = { path: string; sessionId: string; pid: number | null };
 /** readOnly(): nothing can be typed into it (not our run, or its pane is gone). approvals, live: started with our hooks. */
-type Source = { key: string; runId?: number; approvals?: boolean; live?: boolean; readOnly(): boolean; locate(): Located };
+/** agent: whose transcript format the source is in; pi sessions are rewritten into Claude's shape (./pi.ts). */
+type Source = { key: string; runId?: number; agent?: "claude" | "pi"; approvals?: boolean; live?: boolean; readOnly(): boolean; locate(): Located };
+
+/** A transcript line as the Claude projector reads it. */
+const asClaude = (agent: Source["agent"], e: any) => (agent === "pi" ? piToClaude(e) : e);
 
 /** The run's current Claude session: the newest of what the session hook recorded and what the pid file says. */
 function runSource(runId: number): Source {
@@ -55,6 +61,7 @@ function runSource(runId: number): Source {
   const rows = db.query<SessionRow, [number]>("SELECT * FROM sessions WHERE run_id = ? ORDER BY started_at").all(runId);
   if (meta.codex_session || rows.some((s) => s.agent === "codex") || /(^|\/)codex$/.test(typeTool(run.type_name)))
     throw new ApiError(400, "the chat view reads Claude Code sessions; Codex support comes later");
+  if (meta.pi_session || /(^|\/)pi$/.test(run.command) || /(^|\/)pi$/.test(typeTool(run.type_name))) return piRunSource(run);
   return {
     key: `run:${runId}`,
     runId,
@@ -75,6 +82,24 @@ function runSource(runId: number): Source {
       const mtime = (p: string) => { try { return p ? statSync(p).mtimeMs : -1; } catch { return -1; } };
       candidates.sort((a, b) => mtime(b.path) - mtime(a.path));
       return candidates[0] ?? { path: "", sessionId: "", pid };
+    },
+  };
+}
+
+/** A pi run: its session id is picked when it starts (`--session-id`), or is the one it resumed. */
+function piRunSource(run: RunRow): Source {
+  const runId = run.id;
+  const cur = () => db.query<RunRow, [number]>("SELECT * FROM runs WHERE id = ?").get(runId);
+  return {
+    key: `run:${runId}`,
+    runId,
+    agent: "pi",
+    readOnly() { const r = cur(); return !(r?.status === "running" && JSON.parse(r.meta || "{}").tmux); },
+    locate() {
+      const r = cur();
+      const meta = JSON.parse(r?.meta || "{}");
+      const sid = String(meta.pi_session || meta.resume_session || "");
+      return { path: piSessionPath(sid, r?.cwd ?? ""), sessionId: sid, pid: r?.status === "running" ? r.pid : null };
     },
   };
 }
@@ -108,7 +133,7 @@ class Transcript {
   private tail: JsonlTail;
   private timer: ReturnType<typeof setTimeout> | null = null;
 
-  constructor(readonly path: string, private onItems: () => void) {
+  constructor(readonly path: string, private onItems: () => void, private agent: Source["agent"] = "claude") {
     this.tail = new JsonlTail(path, (e, loc) => this.add(e, loc), () => this.schedule(), () => this.reset());
     this.tail.start();
     this.recompute();
@@ -117,7 +142,7 @@ class Transcript {
   close() { this.tail.close(); if (this.timer) clearTimeout(this.timer); }
 
   private add(e: any, loc: LineLoc) {
-    const r = ingest(e, loc);
+    const r = ingest(asClaude(this.agent, e), loc);
     if (!r) return;
     if (!this.byUuid.has(r.uuid)) this.order.push(r.uuid);
     this.byUuid.set(r.uuid, r);
@@ -231,14 +256,21 @@ class Feed {
     this.located = next;
     if (!changed && this.transcript) return;
     this.transcript?.close();
-    this.transcript = next.path ? new Transcript(next.path, () => this.broadcastItems()) : null;
+    this.transcript = next.path ? new Transcript(next.path, () => this.broadcastItems(), this.source.agent) : null;
     this.sent = new Map(this.items().map((i) => [i.id, JSON.stringify(i)]));
     for (const ws of this.subs) this.hello(ws);
   }
 
   private pollStatus() {
+    if (this.source.agent === "pi") {
+      const alive = Boolean(this.located.pid && pidAlive(this.located.pid));
+      return this.setStatus({ status: piStatus(this.transcript?.items ?? [], alive), waiting_for: "", read_only: this.source.readOnly() });
+    }
     const reg = this.located.pid ? claudeRegistry().byPid.get(this.located.pid) : this.located.sessionId ? claudeRegistry().bySession.get(this.located.sessionId) : undefined;
-    const next: Status = { status: reg?.status ?? "", waiting_for: (reg as any)?.waitingFor ?? "", read_only: this.source.readOnly() };
+    this.setStatus({ status: reg?.status ?? "", waiting_for: (reg as any)?.waitingFor ?? "", read_only: this.source.readOnly() });
+  }
+
+  private setStatus(next: Status) {
     if (next.status === this.status.status && next.waiting_for === this.status.waiting_for && next.read_only === this.status.read_only) return;
     const settled = this.status.status === "busy" && next.status !== "busy";
     this.status = next;
@@ -431,7 +463,7 @@ export function chatBlob(kind: "run" | "session", id: string, ref: string, agent
     file = feed.transcript?.path ?? ""; loc = feed.transcript?.loc(uuid);
   }
   if (!file || !loc) throw new ApiError(404, "no such payload in this session (it may have been rewound away)");
-  const blob = extractBlob(readLineAt(file, loc), path);
+  const blob = extractBlob(agent ? readLineAt(file, loc) : asClaude(feed.source.agent, readLineAt(file, loc)), path);
   if (!blob) throw new ApiError(404, "payload not found");
   if (blob.image) {
     if (!IMAGE_TYPES.has(blob.image.mediaType)) throw new ApiError(415, `unsupported image type ${blob.image.mediaType}`);
