@@ -852,3 +852,21 @@ dialog h3, .card h2 { font-family:var(--display); font-weight:700; letter-spacin
 @media (max-width:700px) {
   .dir-dialog[open] { width:100%; max-width:100%; height:100dvh; max-height:100dvh; margin:0; border-radius:0; padding:max(16px, env(safe-area-inset-top)) 14px max(16px, env(safe-area-inset-bottom)); }
 }
+
+/* ---- Keys */
+#secret-filter { flex:1 1 260px; max-width:420px; min-height:34px; }
+.svc-tag { margin-left:8px; font-size:12px; font-weight:400; }
+.secret-detail { max-width:none; }
+.secret-dl { display:grid; grid-template-columns:max-content minmax(0,1fr); gap:8px 18px; margin:0; font-size:13px; }
+.secret-dl dt { color:var(--muted); }
+.secret-dl dd { margin:0; min-width:0; overflow-wrap:anywhere; }
+.secret-dl dd.row { display:flex; gap:8px; align-items:center; }
+.secret-val { padding:4px 8px; background:var(--sunken); border:1px solid var(--line); border-radius:6px; overflow-wrap:anywhere; font-size:12px; }
+.secret-note { white-space:pre-wrap; }
+.secret-where { margin-top:12px; font-size:13px; }
+.secret-where summary { cursor:pointer; color:var(--muted); }
+.secret-where ul { margin:8px 0 0; padding-left:18px; font-size:12px; }
+.keys-help { font-size:12px; margin:10px 2px 18px; max-width:980px; }
+.found-card { max-width:none; }
+textarea.masked:not(:focus) { -webkit-text-security:disc; }
+@media (max-width: 720px) { .secret-dl { grid-template-columns:1fr; gap:2px; } .secret-dl dd { margin-bottom:8px; } }
