@@ -105,10 +105,14 @@ const toolName = (n) => (n || "").replace(/^mcp__/, "").replace(/__/g, " · ");
 
 // ---------------------------------------------------------------- the view
 class ChatView {
-  /** base: "/runs/12" or "/sessions/<id>". onTerminal: switches the pane to the terminal (null when there isn't one). */
-  constructor(base, { onTerminal = null } = {}) {
+  /**
+   * base: "/runs/12" or "/sessions/<id>". onTerminal: switches the pane to the terminal (null when there isn't one).
+   * ended: a run that has stopped, shown read-only with no composer.
+   */
+  constructor(base, { onTerminal = null, ended = false } = {}) {
     this.base = base;
     this.onTerminal = onTerminal;
+    this.ended = ended;
     this.items = new Map();
     this.floor = 0; this.hasEarlier = false;
     this.status = ""; this.waitingFor = ""; this.cwd = ""; this.sessionId = "";
@@ -138,7 +142,7 @@ class ChatView {
     /** What each finished turn changed in git, by prompt id: {root, files, added, removed, truncated}. */
     this.changes = new Map();
     this.scroller.append(this.top, this.list, this.pendingEl, this.state);
-    this.composer = base.startsWith("/runs/") ? new Composer(this) : null;
+    this.composer = base.startsWith("/runs/") && !ended ? new Composer(this) : null;
     this.files = new FilesPanel(this);
     this.root.append(h("div", { class: "chat-body" },
       h("div", { class: "chat-col" }, h("div", { class: "chat-main" }, this.scroller, this.jump), this.todoEl, this.cardsEl, this.banner, this.composer?.el ?? ""),
@@ -172,7 +176,7 @@ class ChatView {
     return h("div", { class: "chat-foot muted" },
       h("span", { class: "chat-pill" }, h("span", { class: "dot" }), h("span", { class: "chat-pill-text" }, "")),
       h("span", { class: "chat-usage", hidden: true }),
-      h("span", { class: "chat-foot-note" }, this.composer ? "" : "Read-only: this session runs outside lofiwave."),
+      h("span", { class: "chat-foot-note" }, this.composer ? "" : this.ended ? "Read-only: this session has ended. Turn it back on to keep going." : "Read-only: this session runs outside lofiwave."),
     );
   }
 

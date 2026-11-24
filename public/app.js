@@ -263,7 +263,7 @@ function switchTab(name, push = true) {
   if (name === "advanced") name = ADVANCED.includes(localStorage.getItem("ac_advanced")) ? localStorage.getItem("ac_advanced") : "runs";
   if (!TITLES[name]) name = "console";
   if (name !== "runs" && selectedRun) closeRun(false);
-  if (name !== "console") { closeTerm(); closeChat(); syncFull(false); drawerPicked(); }
+  if (name !== "console") { closeTerm(); closeChat(); closeEndedChat(); syncFull(false); drawerPicked(); }
   activeTab = name;
   document.body.dataset.tab = name;
   const advanced = ADVANCED.includes(name);
@@ -1218,8 +1218,8 @@ function selectEndedRun(run) {
 
 /** The Live / Ended switch at the top of the rail. */
 function railTabs() {
-  const tab = (view, label, n) => h("button", { role: "tab", class: consoleView === view ? "active" : "", "aria-selected": String(consoleView === view), onclick: () => setConsoleView(view) }, `${label} ${n}`);
-  return h("div", { class: "subnav rail-tabs", role: "tablist", "aria-label": "Sessions" }, tab("live", "Live", consoleData.live.length), tab("ended", "Ended", consoleData.ended.length));
+  const tab = (view, label) => h("button", { role: "tab", class: consoleView === view ? "active" : "", "aria-selected": String(consoleView === view), onclick: () => setConsoleView(view) }, label);
+  return h("div", { class: "subnav rail-tabs", role: "tablist", "aria-label": "Sessions" }, tab("live", `Live ${consoleData.live.length}`), tab("ended", "Ended"));
 }
 /** The drawer's top row: close, Live / Ended, and Resume. */
 const railBar = () => h("div", { class: "rail-bar" },
@@ -1370,12 +1370,25 @@ const turnBackOn = (r) => guard(async () => {
   await loadConsole();
 })();
 
-/** An ended session, read-only: its conversation from the transcript, else the terminal log saved when it stopped. */
+/** The chat view of the ended session on screen, if it has one. */
+let endedChat = null;
+function closeEndedChat() { endedChat?.close(); endedChat = null; }
+
+/**
+ * An ended session, read-only: a Claude conversation in the same chat view as a live one, else the messages from
+ * its transcript, else the terminal log saved when it stopped.
+ */
 function endedPaneFor(r) {
   const s = sessOf(r);
   const tokenQ = token ? `?token=${encodeURIComponent(token)}` : "";
-  const body = h("div", { id: "ended-read", class: "chat" }, h("div", { class: "muted" }, "loading…"));
-  (async () => {
+  closeEndedChat();
+  let body;
+  if (chatable(r) && s?.session_id) {
+    endedChat = new ChatView(`/runs/${r.id}`, { ended: true });
+    body = endedChat.root;
+    body.id = "ended-chat";
+  } else body = h("div", { id: "ended-read", class: "chat" }, h("div", { class: "muted" }, "loading…"));
+  if (body.id === "ended-read") (async () => {
     let items;
     try {
       if (!s?.transcript_path) throw new Error("no transcript");
@@ -1406,7 +1419,7 @@ function endedPaneFor(r) {
       ),
     ),
     body,
-    h("div", { class: "pane-foot muted" }, "Read-only. Turn it back on to keep going."),
+    endedChat ? "" : h("div", { class: "pane-foot muted" }, "Read-only. Turn it back on to keep going."),
   ];
 }
 
@@ -1529,14 +1542,16 @@ function enableRemote(pid, s, inPane) {
 function renderPane() {
   if (activeTab !== "console") return; // the list shows on every page; the session only on Sessions
   if (consoleView === "ended") {
-    closeTerm(); syncFull(false);
+    closeTerm(); closeChat(); syncFull(false);
     const sig = `ended:${endedRun?.id ?? ""}`;
     if (sig !== paneSig) {
       paneSig = sig;
+      closeEndedChat();
       $("#session-pane").replaceChildren(...(endedRun ? endedPaneFor(endedRun) : [h("div", { class: "pane-empty" }, h("h2", {}, "No ended sessions"))]));
     }
     return;
   }
+  closeEndedChat();
   const r = consoleRun;
   const mode = paneMode(r);
   if (!r || r.id !== liveTerm?.runId) closeTerm();
