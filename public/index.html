@@ -35,7 +35,6 @@
     <button data-tab="settings">Settings</button>
   </nav>
   <div class="topbar-right">
-    <span id="sysinfo" class="sysinfo"></span>
     <span id="people" class="people" hidden></span>
     <span class="connection" id="connection-status">Connecting…</span>
     <button id="refresh-btn" class="small" aria-label="Refresh current view">↻</button>
@@ -132,6 +131,11 @@
         <thead><tr><th>Name</th><th>Instructions</th><th>Env</th><th>Docker</th><th>Used by</th><th></th></tr></thead>
         <tbody></tbody>
       </table>
+    </div>
+    <div class="card">
+      <h2>This machine</h2>
+      <p class="muted">Where lofiwave is running, and the addresses it can be reached at.</p>
+      <dl class="machine-info" id="machine-info"></dl>
     </div>
     <div class="card">
       <h2>Appearance</h2>

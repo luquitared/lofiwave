@@ -125,6 +125,24 @@ const guard = (fn) => async (...a) => { try { return await fn(...a); } catch (e)
 function confirmDo(msg, fn) { if (confirm(msg)) return guard(fn)(); }
 
 // ---------------------------------------------------------------- path picker (combobox over /api/paths)
+const baseName = (p) => p.replace(/\/+$/, "").split("/").pop() || "/";
+/**
+ * Under a path field, the chosen folder by name: "lofiwave in ~/projects". On a phone the field is too narrow to show
+ * a long path, and its start (the part that is the same every time) is what stayed visible.
+ */
+function syncPathShow(input) {
+  const show = input.parentElement.nextElementSibling;
+  if (!show?.classList.contains("pp-show")) return;
+  const v = input.value.trim();
+  const path = v.replace(/(.)\/+$/, "$1"), cut = path.lastIndexOf("/");
+  const name = cut < 0 || path === "/" ? path : path.slice(cut + 1);
+  const parent = cut < 0 || path === "/" ? "" : shortCwd(path.slice(0, cut) || "/");
+  show.hidden = !v;
+  show.replaceChildren(h("b", {}, name), parent ? h("span", {}, ` in ${parent}`) : "");
+  show.title = v;
+  // and when the field isn't being typed in, scroll it to the end, where the folder's name is
+  if (document.activeElement !== input) input.scrollLeft = input.scrollWidth;
+}
 function attachPathPicker(input) {
   const wrap = input.parentElement;
   let menu = null, items = [], active = -1, timer = null, lastQ = null, closed = true;
@@ -153,11 +171,12 @@ function attachPathPicker(input) {
     $$(".pp-item", menu).forEach((el, j) => el.classList.toggle("active", j === active));
     $$(".pp-item", menu)[active]?.scrollIntoView({ block: "nearest" });
   };
+  wrap.after(h("small", { class: "pp-show", hidden: true, "aria-live": "polite" }));
   wrap.append(h("button", { type: "button", class: "pp-browse", title: "Browse folders", "aria-label": "Browse folders", onclick: () => { close(); openDirPicker(input); } }));
   input.addEventListener("focus", () => search(true));
   input.addEventListener("click", () => { if (closed) search(true); });
-  input.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(search, 120); });
-  input.addEventListener("blur", () => setTimeout(close, 100));
+  input.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(search, 120); syncPathShow(input); });
+  input.addEventListener("blur", () => { setTimeout(close, 100); syncPathShow(input); });
   input.addEventListener("keydown", (e) => {
     if (closed && (e.key === "ArrowDown" || e.key === "ArrowUp")) { e.preventDefault(); return search(true); }
     if (closed) return;
@@ -207,7 +226,6 @@ async function loadDirs() {
     dirEntries = paths; renderDirs();
   } catch (e) { if (seq === dirSeq) $("#dir-list").replaceChildren(h("div", { class: "pp-empty" }, e.message)); }
 }
-const baseName = (p) => p.replace(/\/+$/, "").split("/").pop() || "/";
 function renderDirs() {
   const browse = dirView === "browse";
   const at = dirAt.replace(/(.)\/+$/, "$1");
@@ -312,12 +330,15 @@ const loadSystem = guard(async () => {
   systemInfo = s;
   const addrs = Object.values(s.addresses).flat();
   const ts = s.tailscale;
-  // One short line in the top bar; the addresses are in its tooltip.
-  const el = $("#sysinfo");
-  el.replaceChildren(h("b", {}, s.hostname), ` · up ${fmtDur(s.uptime_ms / 1000)}`);
-  el.title = [`${s.hostname} · ${s.platform} · bun ${s.bun}`,
-    ts && ts.ips?.length ? `tailscale: ${ts.dns_name || ""} ${ts.ips.filter((ip) => !ip.includes(":")).join(", ")}${ts.state === "Running" ? "" : ` (${ts.state})`}` : ts ? `tailscale: ${ts.state}` : "tailscale: not installed",
-    addrs.length ? `lan: ${addrs.join(", ")}` : ""].filter(Boolean).join("\n");
+  // Settings → This machine. Not in the top bar: a hostname is often just the LAN address, and it isn't for every glance.
+  const row = (k, ...v) => [h("dt", {}, k), h("dd", {}, ...v)];
+  $("#machine-info").replaceChildren(
+    ...row("name", s.hostname),
+    ...row("system", `${s.platform} · bun ${s.bun}`),
+    ...row("up", fmtDur(s.uptime_ms / 1000)),
+    ...row("tailscale", ts && ts.ips?.length ? `${ts.dns_name || ""} ${ts.ips.filter((ip) => !ip.includes(":")).join(", ")}${ts.state === "Running" ? "" : ` (${ts.state})`}` : ts ? ts.state : h("span", { class: "muted" }, "not installed")),
+    ...row("lan", addrs.length ? addrs.join(", ") : h("span", { class: "muted" }, "–")),
+  );
 });
 
 /** An app's UI link as seen from this browser: {host} becomes the host the console was opened on (works over Tailscale too). */
@@ -566,7 +587,7 @@ function openStartDialog({ kind, type } = {}) {
   // On a phone, focusing a field pops the keyboard over the form: leave it until a field is tapped.
   if (!matchMedia("(pointer: coarse)").matches) (sf.cwd.value ? sf.prompt : sf.cwd).focus();
   // Prefill the folder with the one most recently used, so a test start is a single click.
-  if (!sf.cwd.value) get("/paths?limit=1").then(({ paths }) => { if (dlg.open && !sf.cwd.value && paths?.[0]) sf.cwd.value = paths[0].path; }).catch(() => {});
+  if (!sf.cwd.value) get("/paths?limit=1").then(({ paths }) => { if (dlg.open && !sf.cwd.value && paths?.[0]) { sf.cwd.value = paths[0].path; syncPathShow(sf.cwd); } }).catch(() => {});
 }
 /** Agents always start interactive (when tmux is here, or in a sandbox); apps run headless. The server applies the same default. */
 const startsInteractive = (t) => t?.kind === "agent" && (Boolean(sf.target.value) || Boolean(systemInfo?.tmux));
@@ -1039,7 +1060,7 @@ const refreshRunDetail = guard(async (full = false) => {
         r.out_dir ? h("dt", {}, "results") : "", r.out_dir ? h("dd", { class: "mono" }, r.out_dir, h("span", { class: "muted" }, "  (GET /api/runs/", String(r.id), "/results)")) : "",
         h("dt", {}, "pid"), h("dd", {}, r.pid ?? "–", r.meta?.orphan ? " (started by a previous console instance)" : ""),
         r.meta?.remote_url ? h("dt", {}, "remote") : "", r.meta?.remote_url ? h("dd", {}, h("a", { href: r.meta.remote_url, target: "_blank" }, r.meta.remote_url), h("span", { class: "muted" }, "  (same session in the Claude app)")) : "",
-        r.meta?.tmux ? h("dt", {}, "terminal") : "", r.meta?.tmux ? h("dd", {}, `tmux attach -t ${r.meta.tmux}`, r.status === "running" ? h("span", { class: "muted" }, "  (live screen below)") : h("span", { class: "muted" }, "  (ended; screen saved in the log)")) : "",
+        r.meta?.tmux ? h("dt", {}, "terminal") : "", r.meta?.tmux ? h("dd", {}, h("code", {}, `tmux attach -t ${r.meta.tmux}`), " ", h("button", { class: "small", title: "copy the command, to attach from a terminal on this machine", onclick: () => copy(`tmux attach -t ${r.meta.tmux}`, "tmux command") }, "Copy"), r.status === "running" ? h("span", { class: "muted" }, "  (live screen below)") : h("span", { class: "muted" }, "  (ended; screen saved in the log)")) : "",
         r.meta?.tmux && (r.meta.terminal || r.meta.terminal_error) ? h("dt", {}, "window") : "",
         r.meta?.tmux && (r.meta.terminal || r.meta.terminal_error)
           ? h("dd", {}, r.meta.terminal ? `opened in ${r.meta.terminal} on this machine` : h("span", { class: "muted" }, `no window opened — ${r.meta.terminal_error}`))
@@ -1584,7 +1605,9 @@ function paneFor(r) {
     ),
     mode === "terminal" ? h("div", { id: "console-term", class: "term" }, h("span", { class: "term-status" }, "connecting…")) : h("div", { id: "console-chat" }),
     mode === "terminal" ? h("div", { class: "term-hint muted" }, copyHint()) : "",
-    h("div", { class: "pane-foot muted mono" }, r.meta?.e2b ? `E2B sandbox ${r.meta.e2b.sandbox_id || "(starting…)"}${r.meta.e2b.paused ? " · paused while idle; opening the terminal resumes it" : ""}` : `tmux attach -t ${r.meta?.tmux || "?"}`),
+    // A phone's keyboard has no Enter-to-a-dialog, Esc, Tab or arrows for the TUI: the same row the run's Details has.
+    // The live terminal repaints on its own, so there is nothing to refresh after a send.
+    mode === "terminal" ? h("div", { class: "term-keys" }, keysForm(r.id, () => {})) : "",
   ];
 }
 
