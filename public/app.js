@@ -1118,9 +1118,29 @@ kf.addEventListener("submit", async (e) => {
   kdlg.close(); loadSecrets(); showSecret(saved.name, false); loadFound();
 });
 
+// ---------------------------------------------------------------- new sessions (Settings): window, tab, or managed
+const TERMINAL_MODES = [
+  { id: "managed", name: "Managed by lofiwave", note: "Nothing opens on the desktop. Open it from Sessions." },
+  { id: "window", name: "New terminal window", note: "Each session opens in a window of its own." },
+  { id: "tab", name: "New tab in an existing window", note: "A tab in the terminal's front window (a window when none is open)." },
+];
+const loadTerminalMode = guard(async () => {
+  const s = await get("/settings");
+  const set = async (mode) => {
+    try { renderTerminalMode(await put("/settings", { terminal_mode: mode })); toast("saved", true); } catch (e) { toast(e.message); }
+  };
+  const renderTerminalMode = (s) => {
+    $("#terminal-mode-picker").replaceChildren(...TERMINAL_MODES.map((m) => h("button", { class: "theme", role: "radio", "aria-checked": String(s.terminal_mode === m.id), onclick: () => set(m.id) },
+      h("span", { class: "theme-name" }, m.name, h("small", {}, m.note)))));
+    $("#terminal-mode-note").textContent = s.open_terminal === "none" ? "OPEN_TERMINAL=none is set for lofiwave, so nothing opens whatever you pick." : s.open_terminal !== "auto" ? `Terminal: ${s.open_terminal} (OPEN_TERMINAL).` : "";
+  };
+  renderTerminalMode(s);
+});
+
 function renderSettings() {
   loadTargets();
   loadConfigs();
+  loadTerminalMode();
   const pref = themePref();
   $("#theme-picker").replaceChildren(...THEMES.map((t) => h("button", { class: "theme", role: "radio", "aria-checked": String(pref === t.id), onclick: () => { try { localStorage.setItem("ac_theme", t.id); } catch {} applyTheme(t.id); renderSettings(); } },
     h("span", { class: "theme-swatch", "aria-hidden": "true" }, ...t.swatch.map((c) => h("span", { style: `background:${c}` }))),

@@ -11,6 +11,7 @@ import { config, logDir } from "./config";
 import { killTree, pidAlive } from "./procs";
 import { discoverCodexSession, codexRolloutPath, codexIndexReadable, findCodexThread, codexThreadTouched, claudeRegistry, claudeWebUrl, claudeTranscriptPath, claudeTranscriptHome, trustClaudeFolder } from "./agents";
 import { openTerminalForTmux, macTabOf, typeIntoMacTab } from "./terminal";
+import { getSettings } from "./settings";
 import { actor } from "./auth";
 import { ttyViewers } from "./tty";
 import { chatSettingsPath } from "./chat/settings";
@@ -483,12 +484,12 @@ export async function startRun(opts: StartOptions): Promise<RunRow> {
     // Record the pid now, not after the window opens: until it is in the row, the process list counts this
     // process as started outside the console and offers to take it over (a second copy of the same session).
     db.prepare("UPDATE runs SET pid = ? WHERE id = ?").run(pid, id);
-    // Show the session on this machine's desktop too. Failing to find a terminal is not fatal:
-    // the run keeps going in tmux, and the console's own screen view still works.
-    const term = await openTerminalForTmux(tmuxTarget(sess), { terminal: opts.terminal });
+    // Show the session on this machine's desktop too, unless Settings → New sessions keeps it in lofiwave (the
+    // default). Failing to find a terminal is not fatal: the run keeps going in tmux, and the console's own screen view still works.
+    const term = await openTerminalForTmux(tmuxTarget(sess), { terminal: opts.terminal, mode: getSettings().terminal_mode });
     if (term.opened) {
       meta.terminal = term.app;
-      sink.write(`# window: attached in ${term.app}\n`);
+      sink.write(`# window: attached in ${term.tab ? "a new tab of " : ""}${term.app}\n`);
     } else if (term.error) {
       meta.terminal_error = term.error;
       sink.write(`# window: no terminal window opened (${term.error}); attach with: tmux attach -t ${sess}\n`);

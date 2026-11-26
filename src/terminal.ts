@@ -1,15 +1,18 @@
 /**
- * Opens a real terminal window on an interactive run's tmux session, so a session started
+ * Opens a real terminal window (or a tab in one) on an interactive run's tmux session, so a session started
  * from the console also shows up on the machine's desktop (iTerm/Terminal on macOS, one of
  * the usual emulators on Linux). The tmux session stays the source of truth: the window is
- * just another client attached to it, and closing it leaves the run alone.
+ * just another client attached to it, and closing it leaves the run alone. Whether it opens at all is
+ * Settings → New sessions (src/settings.ts); by default it doesn't.
  */
 import { existsSync } from "node:fs";
+import type { TerminalMode } from "./settings";
 
 /** `auto` (default) picks the first terminal that is installed; `none`/`off` disables the window; anything else names one (e.g. `iterm`, `kitty`). */
 const preference = (process.env.OPEN_TERMINAL ?? process.env.AGENT_CONSOLE_TERMINAL ?? "auto").trim().toLowerCase();
 
-export type TerminalResult = { opened: boolean; app: string; error?: string };
+/** `tab`: it opened as a tab in an existing window (false: a window of its own). */
+export type TerminalResult = { opened: boolean; app: string; tab?: boolean; error?: string };
 
 async function run(cmd: string[], timeout?: number): Promise<{ code: number; out: string; err: string }> {
   const p = Bun.spawn(cmd, { stdin: "ignore", stdout: "pipe", stderr: "pipe", timeout });
@@ -33,28 +36,57 @@ async function macApp(name: string): Promise<boolean> {
 // An app with a modal dialog up never answers, and macOS only gives up on the Apple event after 2 minutes.
 const OPEN_TIMEOUT_MS = 10_000;
 
-async function openMac(shellCmd: string, want: string): Promise<TerminalResult> {
+async function openMac(shellCmd: string, want: string, tab: boolean): Promise<TerminalResult> {
   const tryITerm = want === "auto" || want === "iterm" || want === "iterm2";
   const tryTerminal = want === "auto" || want === "terminal" || want === "terminal.app" || want === "apple terminal";
   if (!tryITerm && !tryTerminal) return { opened: false, app: want, error: `unknown terminal "${want}" for macOS (use iterm, terminal, or none)` };
 
   if (tryITerm && ((await macApp("iTerm")) || existsSync("/Applications/iTerm.app"))) {
-    const script = `tell application "iTerm"
+    const cmd = appleQuote(shellCmd);
+    // Tab: in the current window, or a window of its own when iTerm has none open.
+    const script = tab ? `tell application "iTerm"
   activate
-  create window with default profile command "${appleQuote(shellCmd)}"
+  if (count of windows) is 0 then
+    create window with default profile command "${cmd}"
+    return "window"
+  end if
+  tell current window to create tab with default profile command "${cmd}"
+  return "tab"
+end tell` : `tell application "iTerm"
+  activate
+  create window with default profile command "${cmd}"
 end tell`;
     const r = await run(["osascript", "-e", script], OPEN_TIMEOUT_MS);
-    if (r.code === 0) return { opened: true, app: "iTerm" };
+    if (r.code === 0) return { opened: true, app: "iTerm", tab: r.out === "tab" };
     if (!tryTerminal) return { opened: false, app: "iTerm", error: r.err };
     // iTerm is installed but refused or hung (locked screen, no automation permission, a dialog up): fall through to Terminal.
   }
   if (tryTerminal) {
+    const cmd = appleQuote(shellCmd);
+    if (tab) {
+      // Terminal.app has no scripting command for a new tab: press ⌘T in its front window (needs Accessibility
+      // permission for lofiwave's process). Without that permission, a window of its own instead.
+      const script = `tell application "Terminal"
+  if (count of windows) is 0 then
+    activate
+    do script "${cmd}"
+    return "window"
+  end if
+  activate
+end tell
+tell application "System Events" to tell process "Terminal" to keystroke "t" using command down
+delay 0.3
+tell application "Terminal" to do script "${cmd}" in selected tab of front window
+return "tab"`;
+      const r = await run(["osascript", "-e", script], OPEN_TIMEOUT_MS);
+      if (r.code === 0) return { opened: true, app: "Terminal", tab: r.out === "tab" };
+    }
     const script = `tell application "Terminal"
   activate
-  do script "${appleQuote(shellCmd)}"
+  do script "${cmd}"
 end tell`;
     const r = await run(["osascript", "-e", script], OPEN_TIMEOUT_MS);
-    if (r.code === 0) return { opened: true, app: "Terminal" };
+    if (r.code === 0) return { opened: true, app: "Terminal", tab: false };
     return { opened: false, app: "Terminal", error: r.err };
   }
   return { opened: false, app: want, error: "iTerm is not installed" };
@@ -151,26 +183,28 @@ export async function typeIntoMacTab(tab: MacTab, text: string): Promise<void> {
 
 /**
  * Linux emulators, best first. `argv` takes the command as separate words; `shell` takes it as one
- * string (those emulators only accept a single --command argument).
+ * string (those emulators only accept a single --command argument). `tab`: the arguments that open it as a tab in
+ * the emulator's running window instead, for those that can (the others open a window in tab mode too).
+ * `tabChecked`: run it and fall back to a window when it fails (wezterm's cli needs a running wezterm).
  */
-const LINUX: { id: string; bin: string; argv?: (cmd: string[]) => string[]; shell?: (cmd: string) => string[] }[] = [
-  { id: "wezterm", bin: "wezterm", argv: (c) => ["start", "--", ...c] },
+const LINUX: { id: string; bin: string; argv?: (cmd: string[]) => string[]; shell?: (cmd: string) => string[]; tab?: (cmd: string[], shell: string) => string[]; tabChecked?: boolean }[] = [
+  { id: "wezterm", bin: "wezterm", argv: (c) => ["start", "--", ...c], tab: (c) => ["cli", "spawn", "--", ...c], tabChecked: true },
   { id: "kitty", bin: "kitty", argv: (c) => [...c] },
   { id: "alacritty", bin: "alacritty", argv: (c) => ["-e", ...c] },
   { id: "ghostty", bin: "ghostty", argv: (c) => ["-e", ...c] },
   { id: "foot", bin: "foot", argv: (c) => [...c] },
-  { id: "gnome-terminal", bin: "gnome-terminal", argv: (c) => ["--", ...c] },
-  { id: "konsole", bin: "konsole", argv: (c) => ["-e", ...c] },
+  { id: "gnome-terminal", bin: "gnome-terminal", argv: (c) => ["--", ...c], tab: (c) => ["--tab", "--", ...c] },
+  { id: "konsole", bin: "konsole", argv: (c) => ["-e", ...c], tab: (c) => ["--new-tab", "-e", ...c] },
   { id: "tilix", bin: "tilix", shell: (c) => ["-e", c] },
-  { id: "xfce4-terminal", bin: "xfce4-terminal", shell: (c) => ["--command", c] },
-  { id: "mate-terminal", bin: "mate-terminal", argv: (c) => ["--", ...c] },
+  { id: "xfce4-terminal", bin: "xfce4-terminal", shell: (c) => ["--command", c], tab: (_c, sh) => ["--tab", "--command", sh] },
+  { id: "mate-terminal", bin: "mate-terminal", argv: (c) => ["--", ...c], tab: (c) => ["--tab", "--", ...c] },
   { id: "terminator", bin: "terminator", shell: (c) => ["-x", c] },
   { id: "urxvt", bin: "urxvt", argv: (c) => ["-e", ...c] },
   { id: "xterm", bin: "xterm", argv: (c) => ["-e", ...c] },
   { id: "x-terminal-emulator", bin: "x-terminal-emulator", argv: (c) => ["-e", ...c] },
 ];
 
-function openLinux(argvCmd: string[], shellCmd: string, want: string): TerminalResult {
+async function openLinux(argvCmd: string[], shellCmd: string, want: string, tab: boolean): Promise<TerminalResult> {
   if (!process.env.DISPLAY && !process.env.WAYLAND_DISPLAY) {
     return { opened: false, app: "", error: "no DISPLAY/WAYLAND_DISPLAY: nothing to open a window on" };
   }
@@ -181,8 +215,13 @@ function openLinux(argvCmd: string[], shellCmd: string, want: string): TerminalR
   for (const t of candidates) {
     const bin = Bun.which(t.bin);
     if (!bin) continue;
+    if (tab && t.tab) {
+      const args = [bin, ...t.tab(argvCmd, shellCmd)];
+      if (!t.tabChecked) { launch(args); return { opened: true, app: t.id, tab: true }; }
+      if ((await run(args, OPEN_TIMEOUT_MS)).code === 0) return { opened: true, app: t.id, tab: true };
+    }
     launch([bin, ...(t.argv ? t.argv(argvCmd) : t.shell!(shellCmd))]);
-    return { opened: true, app: t.id };
+    return { opened: true, app: t.id, tab: false };
   }
   return {
     opened: false,
@@ -191,10 +230,15 @@ function openLinux(argvCmd: string[], shellCmd: string, want: string): TerminalR
   };
 }
 
-/** Attach a desktop terminal window to tmux `target` (an exact one: see tmuxTarget). Never throws: a missing terminal is reported, not fatal. */
-export async function openTerminalForTmux(target: string, opts: { terminal?: string } = {}): Promise<TerminalResult> {
+/**
+ * Attach a desktop terminal to tmux `target` (an exact one: see tmuxTarget), as a window or a tab per `mode`;
+ * "managed" opens nothing. `terminal` (or $OPEN_TERMINAL) picks the app, and "none" there opens nothing whatever the
+ * mode. Never throws: a missing terminal is reported, not fatal.
+ */
+export async function openTerminalForTmux(target: string, opts: { terminal?: string; mode?: TerminalMode } = {}): Promise<TerminalResult> {
   const want = (opts.terminal || preference).trim().toLowerCase() || "auto";
-  if (want === "none" || want === "off" || want === "false" || want === "0") return { opened: false, app: "", error: "" };
+  const mode = opts.mode ?? "window";
+  if (mode === "managed" || want === "none" || want === "off" || want === "false" || want === "0") return { opened: false, app: "", error: "" };
   const tmuxBin = Bun.which("tmux") ?? "tmux";
   // ignore-size: the window doesn't size the session while a browser viewer is attached. Without it, every focus
   // change on the desktop (switching apps, another run's window opening) claimed the size under `window-size latest`,
@@ -202,8 +246,8 @@ export async function openTerminalForTmux(target: string, opts: { terminal?: str
   const argvCmd = [tmuxBin, "attach-session", "-f", "ignore-size", "-t", target];
   const shellCmd = `${shellQuote(tmuxBin)} attach-session -f ignore-size -t ${shellQuote(target)}`;
   try {
-    if (process.platform === "darwin") return await openMac(shellCmd, want);
-    if (process.platform === "linux") return openLinux(argvCmd, shellCmd, want);
+    if (process.platform === "darwin") return await openMac(shellCmd, want, mode === "tab");
+    if (process.platform === "linux") return await openLinux(argvCmd, shellCmd, want, mode === "tab");
     return { opened: false, app: "", error: `opening a terminal window is not supported on ${process.platform}` };
   } catch (e: any) {
     return { opened: false, app: want, error: e?.message ?? String(e) };

@@ -141,6 +141,12 @@ CREATE TABLE IF NOT EXISTS configs (
   created_at   INTEGER NOT NULL,
   updated_at   INTEGER NOT NULL
 );
+-- Machine-wide settings changed from the UI (src/settings.ts): one JSON value per key.
+CREATE TABLE IF NOT EXISTS settings (
+  key        TEXT PRIMARY KEY,
+  value      TEXT NOT NULL,
+  updated_at INTEGER NOT NULL
+);
 `);
 
 // ---- migrations for columns added after the first release

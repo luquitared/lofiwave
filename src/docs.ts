@@ -155,6 +155,7 @@ export function apiIndex(base: string) {
       processes: [`GET ${api}/processes?type=&kind=`, `POST ${api}/processes`, `POST ${api}/processes/preview`, `DELETE ${api}/processes/:pid?force=1`, `POST ${api}/processes/:pid/remote-control {replace?}`],
       keys: [`GET|POST ${api}/keys`, `DELETE ${api}/keys/:id`],
       workflows: [`GET|POST ${api}/workflows`, `GET|PUT|DELETE ${api}/workflows/:id`, `POST ${api}/workflows/:id/run {target?}`],
+      settings: [`GET|PUT ${api}/settings {terminal_mode: managed|window|tab}`],
       targets: [`GET|POST ${api}/targets {name, kind: e2b, config}`, `GET|PUT|DELETE ${api}/targets/:name`, `POST ${api}/targets/:name/check`, `POST ${api}/processes {target, input_dir?}`],
       configs: [`GET|POST ${api}/configs {name, instructions?, env? (object or .env text), docker?: {image, volumes?, user?, network?, args?}}`, `GET|PUT|DELETE ${api}/configs/:name`, `GET ${api}/docker`, `POST ${api}/processes {config}`, `POST ${api}/workflows {config}`],
       runs: [`GET ${api}/runs?workflow_id=&status=&type=&group=&parent_run=&limit=&offset=`, `GET|DELETE ${api}/runs/:id`, `GET ${api}/runs/:id/wait?until=idle|done|replied&timeout=&after=&message=`, `GET ${api}/runs/:id/log?offset=|raw=1`, `POST ${api}/runs/:id/kill?force=1`, `POST ${api}/runs/:id/restart`],
