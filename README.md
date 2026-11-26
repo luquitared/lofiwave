@@ -20,7 +20,7 @@ It runs on [Bun](https://bun.sh) with SQLite and no other dependencies. Linux an
 
 - [Bun](https://bun.sh) 1.1+
 - [tmux](https://github.com/tmux/tmux), for interactive runs (`brew install tmux` / `apt install tmux`)
-- The agents you want to drive, on `PATH`: [Claude Code](https://docs.claude.com/en/docs/claude-code) (`claude`), [Codex](https://github.com/openai/codex) (`codex`), …
+- The agents you want to drive, on `PATH`: [Claude Code](https://docs.claude.com/en/docs/claude-code) (`claude`), [Codex](https://github.com/openai/codex) (`codex`), [pi](https://pi.dev) (`pi`), …
 - Optional: [ccx](https://github.com/luquitared/ccx), to search this machine's conversations from another one (*API → Conversation search*)
 
 ## Install
@@ -49,6 +49,21 @@ scripts/install-service-linux.sh    # systemd user service: starts at boot (jour
 ```
 
 Both use `scripts/start.sh`, which puts the usual tool folders (`~/.bun/bin`, `~/.local/bin`, Homebrew, nvm's node) on `PATH` so the service can find the agents, and loads `.env`.
+
+### pi with Gemini on Vertex AI (optional)
+
+The built-in `pi` type runs the [pi](https://pi.dev) coding agent (`bun add -g @earendil-works/pi-coding-agent`). Interactive pi runs get the chat view as well as the terminal. They also get a Resume button, because each run starts pi with a `--session-id` lofiwave picks and reads that session file. To run Gemini 4 Neon on it through your Google Cloud project's Vertex AI (no API key: pi uses Application Default Credentials), sign in once and run the setup script:
+
+```bash
+gcloud auth application-default login
+# .env
+GOOGLE_CLOUD_PROJECT=my-project
+GOOGLE_CLOUD_LOCATION=global
+
+scripts/setup-pi-vertex.sh        # PI_VERTEX_MODEL=gemini-4-argon to pick another default
+```
+
+It adds `google-vertex/gemini-4-neon` to `~/.pi/agent/models.json` (pi's catalog may not list it yet) and makes it pi's default model. pi runs need `GOOGLE_CLOUD_PROJECT` and `GOOGLE_CLOUD_LOCATION` in their environment: `.env` reaches them through `scripts/start.sh`, but an interactive run inherits the tmux server's environment, and a tmux server started before you added them keeps its old one. Setting them in the pi type's env (Types) always works. To use another model for one run, pass e.g. `--model google-vertex/gemini-4-argon` as extra args.
 
 ### Link sessions to their transcripts (optional)
 
@@ -88,6 +103,22 @@ For a console several people share (e.g. on a VM), set `PASSWORD` in `.env` (or 
 
 Wrong passwords are throttled (10 per address per 10 minutes; behind a reverse proxy on the same machine, the `X-Forwarded-For` address). Changing `PASSWORD` signs everyone out. Serve it over HTTPS, e.g. with Caddy in front (`reverse_proxy 127.0.0.1:7770`).
 
+### A team box to build apps on
+
+On a fresh Ubuntu VM, two scripts make a box a team builds apps on with agents, behind HTTPS:
+
+```bash
+sudo DOMAIN=203-0-113-7.sslip.io ANTHROPIC_API_KEY=sk-ant-... AGENT_SUDO=1 scripts/setup-dev-box.sh
+sudo DOMAIN=203-0-113-7.sslip.io APPS=1 PASSWORD='team password' scripts/setup-server-ubuntu.sh
+```
+
+`setup-dev-box.sh` installs Docker, Postgres 16 (`DATABASE_URL` in every agent's env), Node 22, Bun, uv, ffmpeg and gh,
+gives every claude run the API key with its first-run prompts pre-accepted and `CLAUDE_PERMISSION_MODE=bypassPermissions`,
+and writes `~/.claude/CLAUDE.md` from `scripts/dev-box-CLAUDE.md` so the agents know how the box works. With `APPS=1`
+Caddy serves any app listening on a port at `https://<port>.$DOMAIN`, with certificates issued on first visit.
+`AGENT_SUDO=1` lets agents install packages; use it only where everyone on the box trusts each other, since they
+already share one user, its files and its key.
+
 ### Sign in with Google
 
 Instead of the team password, or next to it, people can sign in with a Google account you allow. Make an OAuth client (Google Cloud → *APIs & Services* → *Credentials* → *OAuth client ID*, type *Web application*) and set:
@@ -124,6 +155,7 @@ Environment variables, or `KEY=VALUE` lines in `.env`:
 | `GIT_AUTHORS` | *(unset)* | Git identity per signed-in person: `"lucas=Lucas N <lucas@x.com>, seth=Seth N <seth@x.com>"` (key = first word of the sign-in name, any case). Runs they start get `GIT_AUTHOR_*`/`GIT_COMMITTER_*` set, so commits carry their name; everyone else uses git's own config. |
 | `DATA_DIR` | `./data` | SQLite database, run logs, generated token |
 | `CLAUDE_PERMISSION_MODE` | *(unset)* | Permission mode every `claude` run starts in — new, restarted and resumed, headless or interactive: adds `--permission-mode <mode>` (`acceptEdits`, `bypassPermissions`, …) unless the run's args already choose one. Unset: Claude Code's own default (prompts on). |
+| `CLAUDE_OAUTH_LOCAL` | *(unset)* | `1`: local runs also get `CLAUDE_CODE_OAUTH_TOKEN` from lofiwave's env (a `claude setup-token` token), for a box where claude has no login of its own. Unset, that token only goes to E2B sandboxes, so a local claude keeps its user's login. |
 | `CODEX_SANDBOX_MODE` | *(unset)* | The same for `codex`: adds `--sandbox <mode>` (`read-only`, `workspace-write`, `danger-full-access`) unless the run's args already choose a sandbox. Unset: Codex's own config, where `codex exec` defaults to `read-only`, so a headless run can't change files. |
 | `CLAUDE_TUI` | `default` | Claude Code renderer for interactive runs: adds `--settings '{"tui":"<value>"}'` unless the run's args already pass `--settings`. `default` keeps claude out of the alternate screen, so tmux keeps the history and scrolling up in the browser terminal is private and smooth; `fullscreen` hands the wheel to claude (every viewer's screen moves, one redraw per tick); `keep` uses your own `~/.claude/settings.json`. |
 | `SCHEDULER_INTERVAL_MS` | `15000` | How often scheduled workflows are checked |
@@ -132,14 +164,18 @@ Environment variables, or `KEY=VALUE` lines in `.env`:
 | `OUTPUT_TAIL_BYTES` | `65536` | How much of the end of each log is copied into the run record (`output`) |
 | `MAX_AGENT_RUNS` | *(from RAM)* | At most this many agent runs at once; more are refused with 429 or queued (see *Swarms*). Default: (total RAM − 1 GB) / 600 MB, between 1 and 16. `0` = no cap. |
 | `MIN_FREE_MEM_MB` | `500` | No agent run starts while less memory than this is available (Linux `MemAvailable`; macOS free + inactive pages). `0` = no check. |
+| `LOFIWAVE_KEYS_KEY` | *(unset)* | The master key that encrypts *Keys* (32 bytes, base64 or hex). Unset: generated once into `LOFIWAVE_KEYS_KEY_FILE`. Lose it and the stored keys are gone. |
+| `LOFIWAVE_KEYS_KEY_FILE` | `~/.config/lofiwave/keys.key` | Where the generated master key is kept (0600), outside `DATA_DIR` so a copy of the data folder alone doesn't give the keys away |
+| `KEYS_SCAN_ROOTS` | home | Colon-separated folders *Keys → Found on this computer* looks through for `.env` files (shell profiles are read too when home is one of them) |
+| `LOFIWAVE_AGENT_CONTEXT` | *(on)* | `off`: agent runs aren't told they run under lofiwave, or about `lw` and `ccx` (see *Keys*) |
 | `CWD_ROOTS` | home and temp dirs | Colon-separated folders under which `mkdir_cwd` may create a run's folder |
 | `OPEN_TERMINAL` | `auto` | Desktop terminal window opened on an interactive run. `auto` = iTerm then Terminal.app on macOS, the first of wezterm/kitty/alacritty/ghostty/foot/gnome-terminal/konsole/tilix/xfce4-terminal/mate-terminal/terminator/urxvt/xterm found on Linux; `none` to keep runs headless; or name one (`iterm`, `terminal`, `kitty`, …). Ignored on a headless machine (no `DISPLAY`/`WAYLAND_DISPLAY`). |
 
 ```
 lofiwave/
-├── src/       server.ts (HTTP + API), db.ts, runner.ts, targets.ts, configs.ts, e2b.ts, jobs.ts, capacity.ts, files.ts, connect.ts, vtscreen.ts, scheduler.ts, cron.ts, procs.ts, agents.ts, terminal.ts
+├── src/       server.ts (HTTP + API), db.ts, secrets.ts, lw.ts, runner.ts, targets.ts, configs.ts, e2b.ts, jobs.ts, capacity.ts, files.ts, connect.ts, vtscreen.ts, scheduler.ts, cron.ts, procs.ts, agents.ts, terminal.ts
 ├── public/    the single-page UI
-├── scripts/   start.sh, service installers, Claude Code session hook, Tailscale helpers
+├── scripts/   lw.ts + lw-keys.ts (the lw command), start.sh, service installers, Claude Code session hook, Tailscale helpers
 └── data/      database, logs, token (created on first start, git-ignored)
 ```
 
@@ -166,7 +202,7 @@ curl -H "authorization: Bearer $TOKEN" -X POST localhost:7770/api/process-types 
 }'
 ```
 
-**Interactive runs** – agent types start interactive by default (`POST /api/processes` with `interactive: false` for a headless run; apps are the other way round). An interactive run starts the type inside a detached **tmux** session (`ac-<run id>`) that stays open until the program exits or you stop the run. This is how you start a normal `claude` or `codex` TUI from your phone: the built-in `claude` type's interactive template is `claude [prompt] --remote-control`, so the session shows up in the Claude app / claude.ai as soon as it is up (the console picks the `https://claude.ai/code/session_…` link off the screen and shows it on the run as `meta.remote_url`), and the `codex` type opens the Codex TUI. The prompt is optional. Requires `tmux` on PATH. If the console is running on a desktop, it also opens a **real terminal window** attached to that session (iTerm, else Terminal.app, on macOS; the first emulator it finds on Linux) so the session is in front of you on the machine as well as in the browser — set `OPEN_TERMINAL=none` (or `terminal: "none"` on the request) if you don't want that, or `OPEN_TERMINAL=<name>` to pick one. The window is just another tmux client: closing it leaves the run running, and `meta.terminal` records which app was used (`meta.terminal_error` says why none opened). While it runs, *Sessions* shows it as a **real terminal** in the browser (xterm.js over a WebSocket, `GET /api/runs/:id/tty`, to its own `tmux attach` on a pty): colours, full-screen TUIs, Ctrl-keys, paste and mouse-wheel scrolling all work, and several people can watch and type into the same session at once (the window follows whoever typed last). For Claude runs the **Chat** view shows the same live session as messages, tool calls, diffs and images instead, read from its transcript (see *Chat view* below); it scrolls in each browser on its own, has a composer that types into the TUI, and answers Claude's permission prompts, questions and plans. Chat is the default on phones. Run details (*Advanced → Runs*) show a polled screen (`GET /api/runs/:id/screen`) with a text box (`POST /api/runs/:id/keys`) and buttons for Esc, Tab, arrows and Ctrl-C; on the machine itself `tmux attach -t ac-<id>` gives you the real terminal. When it ends, the screen and scrollback are saved as the run log. Each type has its own `interactive_args` template (*Advanced → Types*); when it is empty the normal `args` are used.
+**Interactive runs** – agent types start interactive by default (`POST /api/processes` with `interactive: false` for a headless run; apps are the other way round). An interactive run starts the type inside a detached **tmux** session (`ac-<run id>`) that stays open until the program exits or you stop the run. This is how you start a normal `claude` or `codex` TUI from your phone: the built-in `claude` type's interactive template is `claude [prompt] --remote-control`, so the session shows up in the Claude app / claude.ai as soon as it is up (the console picks the `https://claude.ai/code/session_…` link off the screen and shows it on the run as `meta.remote_url`), and the `codex` type opens the Codex TUI. The prompt is optional. Requires `tmux` on PATH. If the console is running on a desktop, it also opens a **real terminal window** attached to that session (iTerm, else Terminal.app, on macOS; the first emulator it finds on Linux) so the session is in front of you on the machine as well as in the browser — set `OPEN_TERMINAL=none` (or `terminal: "none"` on the request) if you don't want that, or `OPEN_TERMINAL=<name>` to pick one. The window is just another tmux client: closing it leaves the run running, and `meta.terminal` records which app was used (`meta.terminal_error` says why none opened). While it runs, *Sessions* shows it as a **real terminal** in the browser (xterm.js over a WebSocket, `GET /api/runs/:id/tty`, to its own `tmux attach` on a pty): colours, full-screen TUIs, Ctrl-keys, paste and mouse-wheel scrolling all work, and several people can watch and type into the same session at once (the window follows whoever typed last). For Claude runs the **Chat** view shows the same live session as messages, tool calls, diffs and images instead, read from its transcript (see *Chat view* below); it scrolls in each browser on its own, has a composer that types into the TUI, and answers Claude's permission prompts, questions and plans. Chat is the default on phones. On a phone the terminal has the same row under it: a text box plus ⏎, Esc, Tab, arrows and Ctrl-C, the keys a phone keyboard can't send. Run details (*Advanced → Runs*) show a polled screen (`GET /api/runs/:id/screen`) with a text box (`POST /api/runs/:id/keys`) and buttons for Esc, Tab, arrows and Ctrl-C; on the machine itself `tmux attach -t ac-<id>` (shown, with a Copy button, in the run's details) gives you the real terminal. When it ends, the screen and scrollback are saved as the run log. Each type has its own `interactive_args` template (*Advanced → Types*); when it is empty the normal `args` are used.
 
 **Process** – an OS process that either matches a type's `detect` regex or was started by the console. Console-started processes are *managed*: they have a run record, a log, and can be restarted. Children of a managed process are attributed to the same run (`child: true`).
 
@@ -229,6 +265,8 @@ API keys are named and revocable; make them on the *Connect* page. Runs started 
 | `GET /api/system` | hostname, platform, bun version, bind host/port, data dir, LAN addresses, tailscale `{state, ips, dns_name}` (null if not installed) |
 | `GET /api/system/usage` | what the machine has and what uses it (macOS and Linux; one `ps` per call, so poll it only while you show it): `machine: {mem_total_mb, mem_available_mb, mem_used_mb, swap: {total_mb, used_mb} \| null, cpus, load: [1m, 5m, 15m], cpu_busy_pct, disk: {path, total_mb, free_mb}}` (`cpu_busy_pct` is since the previous call, null on the first; `disk` is the filesystem holding `DATA_DIR`); `lofiwave: {server, tmux, runs: [{run_id, type, kind, workflow_name, group, cwd, started_at, …}], runs_total, total}`, where each entry is a whole process tree `{pid, procs, rss_mb, cpu, elapsed_sec}` (a run counts its tmux pane process and every descendant: claude + node + MCP servers; `tmux` is the tmux server holding the panes; `cpu` is % of one core); `outside: [{type, cmd, …tree}]` and `outside_total`: agents matched by a type's `detect` that lofiwave didn't start; `estimate: {per_agent_mb, per_agent_source: "measured"\|"assumed", measured_runs, min_free_mem_mb, by_memory, max_agent_runs, live_agent_runs, queued, by_slots, can_launch, limited_by: "memory"\|"slots"\|"both", blocked}`: `per_agent_mb` is the average RSS of the live agent runs (600 MB when none run), `by_memory` = (available − `MIN_FREE_MEM_MB`) ÷ `per_agent_mb`, `by_slots` = `MAX_AGENT_RUNS` − live − queued (null with no cap), `can_launch` the smaller |
 | `GET /api/system/limits` | Claude and Codex plan limits (*Advanced → Usage*): `{claude, codex, server_time}`, each null or `{plan, at, windows: [{label, used_percent, window_minutes, resets_at, reset, expected_percent}]}`. As of the agent's last request here: Claude's from the statusline of runs lofiwave started, Codex's from the newest rollout in `~/.codex/sessions`. `reset`: the window has started over since (used 0); `expected_percent`: where an even pace would be by now |
+| `GET /api/stats?days=7` | *Advanced → Stats*, over the last `days` (1–90): `{totals, people, sessions, folders}`. `people`: by messages sent, each `{person, messages, sessions, tokens, via, last_at}`; `person` is who sent each prompt from lofiwave (chat view, browser terminal, API), `""` for prompts without a known sender. `sessions` and `folders` (top 25 by tokens) cover every Claude session on the machine. `tokens`: `{input, output, cache_read, cache_write, total}`, from Claude's transcripts, subagents included |
+| `GET /api/stats/messages?person=&days=7` | What `person` sent (`""`: prompts without a known sender), newest first: `[{at, via, text, run_id, session_id, cwd, tokens}]` |
 
 ### Paths
 
@@ -403,6 +441,38 @@ The Console's **Chat** view, and **View chat** on Claude sessions lofiwave didn'
 | `GET /api/runs/:id/chat/changes?prompt=` | what a turn changed in git: `{root, files: [{path, status, added, removed, binary?}], added, removed, truncated, live}`; 404 without checkpoints |
 | `GET /api/runs/:id/chat/changes/file?prompt=&path=` | one file's change in that turn: `{hunks, binary}` (hunks as in `structuredPatch`) |
 | `POST /api/hooks/message`, `/api/hooks/turn`, `/api/hooks/statusline` | called by Claude's `MessageDisplay`, `UserPromptSubmit`/`Stop` hooks and by `scripts/claude-statusline.ts` (same headers as above); all reply `{}` |
+
+### Keys (API keys and secrets for agents)
+
+The *Keys* tab holds the API keys, tokens and passwords this machine's agents use. Each has a name (`openai-personal`), the env var it usually goes in, a service, a note, fields that go with it (account, project, dashboard URL) and tags. The value is encrypted in the database (AES-256-GCM, with the master key outside it: `LOFIWAVE_KEYS_KEY_FILE`); the rest is plain, so it can be searched. *Found on this computer* lists the keys in `.env` files and shell profiles that lofiwave doesn't hold yet, grouped by value, for import; a stored key shows every file it is also written in, which is the list to update when you rotate it. Everyone who can use the console can use its keys, and every read is logged with who did it and for what.
+
+Agents use them through **`lw`**, lofiwave's command line, which is on every run's PATH (a shim in `DATA_DIR/bin`; link it onto your own PATH to use it in a terminal). `lw keys env`, `write` and `copy` hand a key to a command, a file or the clipboard without printing it, so it stays out of the conversation's transcript:
+
+```
+lw keys search openai                       # name, env var, service, note, fields
+lw keys show openai-personal                # all but the value: note, fields, where it's written, recent uses
+lw keys env openai-personal -- npm test     # OPENAI_API_KEY set for that command only (name=VAR to rename)
+lw keys write openai-personal stripe-test --to .env
+lw keys copy openai-personal                # onto this machine's clipboard
+lw keys add replicate --env REPLICATE_API_TOKEN --from-env REPLICATE_API_TOKEN --note "team account" --field dashboard=https://replicate.com/account
+lw keys import ~/projects/app/.env STRIPE_SECRET_KEY --name stripe-test
+lw keys set openai-personal --note "rotated 2026-11" --from-env NEW_KEY
+lw keys scan                                # found on this computer, not stored yet
+lw keys reveal openai-personal              # prints it: the last resort
+```
+
+Agent runs on this machine (not on a target or in a container) also start with a few lines of instructions, ahead of their config's: that they run under lofiwave, what `lw keys` is for, and, when it's installed, that `ccx` searches past conversations. `LOFIWAVE_AGENT_CONTEXT=off` leaves them out.
+
+| Method & path | Description |
+|---|---|
+| `GET /api/secrets?q=` | Keys without their values: `{name, env, service, hint, note, fields, tags, source, files, created_by, created_at, updated_at, used_at}`. `hint` is `sk-proj-…1234`; `files` is how many scanned files have the same value (null before the first scan) |
+| `POST /api/secrets` | `{name, value, env?, service?, note?, fields?, tags?}` → 201, with `same_value_as` when another key has that value |
+| `GET /api/secrets/:name` | One key, plus `where` (files with its value) and `events` (the last 30 uses and changes) |
+| `PUT /api/secrets/:name` | Any of `name` (rename), `value`, `env`, `service`, `note`, `tags`, `fields` (merged; `""` drops one; `replace_fields: true` replaces them) |
+| `DELETE /api/secrets/:name` | Delete it |
+| `POST /api/secrets/:name/value` | `{use: "reveal" \| "copy" \| "env" \| "write", detail?}` → `{name, env, value}`, logged with the caller and the run (`X-Lofiwave-Run`) |
+| `GET /api/secrets/scan?refresh=1` | `.env` files and profiles under `KEYS_SCAN_ROOTS`: `{files, roots, scanned_at, groups: [{fingerprint, hint, vars, files: [{file, var, line}], stored}]}`. Cached for 10 minutes |
+| `POST /api/secrets/import` | `{file, var, name?, …}`: store the value lofiwave reads from that file; it never passes through the caller |
 
 ### Conversation search (ccx)
 

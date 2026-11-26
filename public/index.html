@@ -30,12 +30,12 @@
   <nav aria-label="Main navigation">
     <button data-tab="console" class="active">Sessions</button>
     <button data-tab="workflows">Workflows</button>
+    <button data-tab="keys">Keys</button>
     <button data-tab="connect">Connect</button>
     <button data-tab="advanced">Advanced</button>
     <button data-tab="settings">Settings</button>
   </nav>
   <div class="topbar-right">
-    <span id="sysinfo" class="sysinfo"></span>
     <span id="people" class="people" hidden></span>
     <span class="connection" id="connection-status">Connecting…</span>
     <button id="refresh-btn" class="small" aria-label="Refresh current view">↻</button>
@@ -49,7 +49,7 @@
   <div class="page-top">
     <h1 id="page-title">Sessions</h1>
     <div class="subnav" id="subnav" role="tablist" aria-label="Advanced" hidden>
-      <button data-sub="agents">Processes</button><button data-sub="apps">Apps</button><button data-sub="runs">Runs</button><button data-sub="types">Types</button><button data-sub="system">System</button><button data-sub="usage">Usage</button>
+      <button data-sub="agents">Processes</button><button data-sub="apps">Apps</button><button data-sub="runs">Runs</button><button data-sub="types">Types</button><button data-sub="system">System</button><button data-sub="usage">Usage</button><button data-sub="stats">Stats</button>
     </div>
   </div>
 
@@ -97,6 +97,28 @@
     </table>
   </section>
 
+  <section id="tab-keys" class="tab">
+    <div class="toolbar">
+      <button class="primary" id="secret-new-btn">+ Add key</button>
+      <input type="search" id="secret-filter" placeholder="Search names, env vars, services, notes" autocomplete="off" aria-label="Search keys">
+      <span id="secret-count" class="muted"></span>
+    </div>
+    <div id="secret-detail" class="card secret-detail" hidden></div>
+    <table id="secret-table">
+      <thead><tr><th>Key</th><th>Env var</th><th>Value</th><th>On disk</th><th>Last used</th><th></th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <p class="muted keys-help">Values are encrypted in lofiwave's database. Agents use them with <code>lw keys</code>: <code>lw keys env &lt;name&gt; -- &lt;command&gt;</code>, <code>lw keys write &lt;name&gt; --to .env</code>, <code>lw keys copy &lt;name&gt;</code>, so a key doesn't have to be printed into a transcript. Everyone who can use this console can use its keys; each use is logged.</p>
+    <div class="card found-card">
+      <div class="card-head"><h2>Found on this computer</h2><button class="small" id="secret-rescan">Rescan</button></div>
+      <p class="muted" id="found-info">Keys in .env files and shell profiles that lofiwave doesn't hold yet.</p>
+      <table id="found-table">
+        <thead><tr><th>Env var</th><th>Value</th><th>Written in</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
   <section id="tab-connect" class="tab">
     <div class="card">
       <h2>Let an agent run lofiwave</h2>
@@ -134,6 +156,11 @@
       </table>
     </div>
     <div class="card">
+      <h2>This machine</h2>
+      <p class="muted">Where lofiwave is running, and the addresses it can be reached at.</p>
+      <dl class="machine-info" id="machine-info"></dl>
+    </div>
+    <div class="card">
       <h2>Appearance</h2>
       <p class="muted">Saved in this browser.</p>
       <div class="themes" id="theme-picker" role="radiogroup" aria-label="Color scheme"></div>
@@ -159,6 +186,29 @@
   <section id="tab-usage" class="tab">
     <div id="usage-cards"></div>
     <p class="muted usage-note">Plan limits as of each agent's last request on this machine. Claude's come from the statusline of sessions lofiwave started; Codex's from its rollouts in <code>~/.codex/sessions</code>, which every Codex session writes. A bar's tick is where an even pace through the window would be by now.</p>
+  </section>
+
+  <section id="tab-stats" class="tab">
+    <div class="toolbar">
+      <div class="stats-range" id="stats-range" role="group" aria-label="Time range"></div>
+      <span id="stats-totals" class="muted"></span>
+    </div>
+    <h3 class="section-title">People <span class="muted">by messages sent · click one to see what they sent</span></h3>
+    <table id="stats-people" class="stats-table">
+      <thead><tr><th>Person</th><th>Messages</th><th>Tokens</th><th>Output</th><th>Sessions</th><th>Last message</th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <h3 class="section-title">Sessions <span class="muted">by tokens</span></h3>
+    <table id="stats-sessions" class="stats-table">
+      <thead><tr><th>Session</th><th>Folder</th><th>People</th><th>Messages</th><th>Tokens</th><th>Output</th><th>Last active</th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <h3 class="section-title">Folders <span class="muted">by tokens</span></h3>
+    <table id="stats-folders" class="stats-table">
+      <thead><tr><th>Folder</th><th>Sessions</th><th>People</th><th>Messages</th><th>Tokens</th><th>Output</th><th>Last active</th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <p class="muted sys-note">A message counts for whoever sent it from lofiwave: the chat view, the browser terminal (whoever pressed Enter) or the API. Messages typed where lofiwave can't see who (an ssh or tmux attach, Claude's remote control) and those from before this was tracked are under <i>No known sender</i>. Tokens come from Claude's transcripts on this machine, subagents included, for every Claude session here, lofiwave's or not: input, cache writes, cache reads and output. Output is what the model wrote.</p>
   </section>
 
   <section id="tab-runs" class="tab">
@@ -319,6 +369,24 @@
     <div class="wide row">
       <button type="submit" class="primary">Save</button>
       <button type="button" id="config-cancel" style="margin-left:auto">Cancel</button>
+    </div>
+  </form>
+</dialog>
+<dialog id="secret-dialog" aria-labelledby="secret-title">
+  <form id="secret-form" class="grid" method="dialog">
+    <h3 class="wide" id="secret-title">Add a key</h3>
+    <input type="hidden" name="orig"><input type="hidden" name="file"><input type="hidden" name="var">
+    <label>Name <input name="name" required autocomplete="off" spellcheck="false" pattern="[A-Za-z0-9][A-Za-z0-9_.:@\-]{0,79}" placeholder="openai-personal"></label>
+    <label>Env var <input name="env" autocomplete="off" spellcheck="false" pattern="[A-Za-z_][A-Za-z0-9_]*" placeholder="OPENAI_API_KEY"></label>
+    <label>Service <input name="service" autocomplete="off" placeholder="openai"></label>
+    <label>Tags <input name="tags" autocomplete="off" placeholder="comma separated: prod, billing"></label>
+    <label class="wide" id="secret-value-label">Value <textarea name="value" rows="2" class="mono masked" spellcheck="false" autocomplete="off" placeholder="paste the key"></textarea><small class="muted" id="secret-value-help"></small></label>
+    <label class="wide">Note <textarea name="note" rows="3" placeholder="what it's for, which account, where to rotate it, limits…"></textarea></label>
+    <label class="wide">Fields <textarea name="fields" rows="3" class="mono" spellcheck="false" placeholder="values that go with it, one per line:&#10;account: me@example.com&#10;project: my-project&#10;dashboard: https://…"></textarea></label>
+    <div id="secret-feedback" class="wide form-error" role="alert" hidden></div>
+    <div class="wide row">
+      <button type="submit" class="primary">Save</button>
+      <button type="button" id="secret-cancel" style="margin-left:auto">Cancel</button>
     </div>
   </form>
 </dialog>

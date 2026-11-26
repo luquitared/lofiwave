@@ -11,6 +11,7 @@
  *
  * Everything here is best-effort and cached; a missing file just means "unknown".
  */
+import { piSessionMeta, piSessionPath } from "./chat/pi";
 import { Database } from "bun:sqlite";
 import { existsSync, readdirSync, readFileSync, statSync, writeFileSync, renameSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
@@ -324,6 +325,11 @@ export function describeSession(agent: string, sessionId: string, hint: { cwd?: 
     const m = codexRolloutMeta(info.transcript_path);
     if (m) { info.cwd ||= m.cwd; info.model ||= m.model; info.title ||= m.firstPrompt; }
     info.resume_cmd = `codex resume ${sessionId}`;
+  } else if (agent === "pi") {
+    if (!info.transcript_path) info.transcript_path = piSessionPath(sessionId, info.cwd);
+    const m = info.transcript_path ? piSessionMeta(info.transcript_path) : null;
+    if (m) { info.name = m.name; info.model ||= m.model; info.title = m.firstPrompt; }
+    info.resume_cmd = `pi --session ${sessionId}`;
   }
   return info;
 }

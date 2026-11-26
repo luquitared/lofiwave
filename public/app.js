@@ -125,6 +125,24 @@ const guard = (fn) => async (...a) => { try { return await fn(...a); } catch (e)
 function confirmDo(msg, fn) { if (confirm(msg)) return guard(fn)(); }
 
 // ---------------------------------------------------------------- path picker (combobox over /api/paths)
+const baseName = (p) => p.replace(/\/+$/, "").split("/").pop() || "/";
+/**
+ * Under a path field, the chosen folder by name: "lofiwave in ~/projects". On a phone the field is too narrow to show
+ * a long path, and its start (the part that is the same every time) is what stayed visible.
+ */
+function syncPathShow(input) {
+  const show = input.parentElement.nextElementSibling;
+  if (!show?.classList.contains("pp-show")) return;
+  const v = input.value.trim();
+  const path = v.replace(/(.)\/+$/, "$1"), cut = path.lastIndexOf("/");
+  const name = cut < 0 || path === "/" ? path : path.slice(cut + 1);
+  const parent = cut < 0 || path === "/" ? "" : shortCwd(path.slice(0, cut) || "/");
+  show.hidden = !v;
+  show.replaceChildren(h("b", {}, name), parent ? h("span", {}, ` in ${parent}`) : "");
+  show.title = v;
+  // and when the field isn't being typed in, scroll it to the end, where the folder's name is
+  if (document.activeElement !== input) input.scrollLeft = input.scrollWidth;
+}
 function attachPathPicker(input) {
   const wrap = input.parentElement;
   let menu = null, items = [], active = -1, timer = null, lastQ = null, closed = true;
@@ -153,11 +171,12 @@ function attachPathPicker(input) {
     $$(".pp-item", menu).forEach((el, j) => el.classList.toggle("active", j === active));
     $$(".pp-item", menu)[active]?.scrollIntoView({ block: "nearest" });
   };
+  wrap.after(h("small", { class: "pp-show", hidden: true, "aria-live": "polite" }));
   wrap.append(h("button", { type: "button", class: "pp-browse", title: "Browse folders", "aria-label": "Browse folders", onclick: () => { close(); openDirPicker(input); } }));
   input.addEventListener("focus", () => search(true));
   input.addEventListener("click", () => { if (closed) search(true); });
-  input.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(search, 120); });
-  input.addEventListener("blur", () => setTimeout(close, 100));
+  input.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(search, 120); syncPathShow(input); });
+  input.addEventListener("blur", () => { setTimeout(close, 100); syncPathShow(input); });
   input.addEventListener("keydown", (e) => {
     if (closed && (e.key === "ArrowDown" || e.key === "ArrowUp")) { e.preventDefault(); return search(true); }
     if (closed) return;
@@ -176,9 +195,9 @@ const ddlg = $("#dir-dialog");
 let dirInput = null, dirView = "recent", dirAt = "", dirHome = "", dirEntries = [], dirSeq = 0;
 function openDirPicker(input) {
   dirInput = input;
-  const v = input.value.trim();
-  dirView = v ? "browse" : "recent";
-  dirAt = v;
+  // Recent folders first, even when the field has one: that's what you pick from most. Browse starts at the field's folder.
+  dirView = "recent";
+  dirAt = input.value.trim();
   $("#dir-filter").value = "";
   ddlg.showModal();
   $("#dir-close").focus();
@@ -207,7 +226,6 @@ async function loadDirs() {
     dirEntries = paths; renderDirs();
   } catch (e) { if (seq === dirSeq) $("#dir-list").replaceChildren(h("div", { class: "pp-empty" }, e.message)); }
 }
-const baseName = (p) => p.replace(/\/+$/, "").split("/").pop() || "/";
 function renderDirs() {
   const browse = dirView === "browse";
   const at = dirAt.replace(/(.)\/+$/, "$1");
@@ -254,16 +272,17 @@ let consoleView = localStorage.getItem("ac_console_view") === "ended" ? "ended" 
 const typeByName = (n) => types.find((t) => t.name === n);
 
 // ---------------------------------------------------------------- tabs
-// Main tabs: Sessions, Workflows, Connect, and Advanced, which holds the rest (processes, apps, runs, types, system, usage).
-const ADVANCED = ["agents", "apps", "runs", "types", "system", "usage"];
-const TITLES = { console: "Sessions", workflows: "Workflows", connect: "Connect", settings: "Settings", agents: "Advanced", apps: "Advanced", runs: "Advanced", types: "Advanced", system: "Advanced", usage: "Advanced" };
+// Main tabs: Sessions, Workflows, Connect, and Advanced, which holds the rest (processes, apps, runs, types, system, usage, stats).
+const ADVANCED = ["agents", "apps", "runs", "types", "system", "usage", "stats"];
+const TITLES = { console: "Sessions", workflows: "Workflows", keys: "Keys", connect: "Connect", settings: "Settings", agents: "Advanced", apps: "Advanced", runs: "Advanced", types: "Advanced", system: "Advanced", usage: "Advanced", stats: "Advanced" };
 $$("nav button").forEach((b) => b.addEventListener("click", () => switchTab(b.dataset.tab)));
 $$("#subnav button").forEach((b) => b.addEventListener("click", () => switchTab(b.dataset.sub)));
 function switchTab(name, push = true) {
   if (name === "advanced") name = ADVANCED.includes(localStorage.getItem("ac_advanced")) ? localStorage.getItem("ac_advanced") : "runs";
   if (!TITLES[name]) name = "console";
   if (name !== "runs" && selectedRun) closeRun(false);
-  if (name !== "console") { closeTerm(); closeChat(); syncFull(false); drawerPicked(); }
+  if (name !== "console") { closeTerm(); closeChat(); closeEndedChat(); syncFull(false); drawerPicked(); }
+  if (name === "keys" && activeTab !== "keys") secretsAt = 0;
   activeTab = name;
   document.body.dataset.tab = name;
   const advanced = ADVANCED.includes(name);
@@ -312,12 +331,15 @@ const loadSystem = guard(async () => {
   systemInfo = s;
   const addrs = Object.values(s.addresses).flat();
   const ts = s.tailscale;
-  // One short line in the top bar; the addresses are in its tooltip.
-  const el = $("#sysinfo");
-  el.replaceChildren(h("b", {}, s.hostname), ` · up ${fmtDur(s.uptime_ms / 1000)}`);
-  el.title = [`${s.hostname} · ${s.platform} · bun ${s.bun}`,
-    ts && ts.ips?.length ? `tailscale: ${ts.dns_name || ""} ${ts.ips.filter((ip) => !ip.includes(":")).join(", ")}${ts.state === "Running" ? "" : ` (${ts.state})`}` : ts ? `tailscale: ${ts.state}` : "tailscale: not installed",
-    addrs.length ? `lan: ${addrs.join(", ")}` : ""].filter(Boolean).join("\n");
+  // Settings → This machine. Not in the top bar: a hostname is often just the LAN address, and it isn't for every glance.
+  const row = (k, ...v) => [h("dt", {}, k), h("dd", {}, ...v)];
+  $("#machine-info").replaceChildren(
+    ...row("name", s.hostname),
+    ...row("system", `${s.platform} · bun ${s.bun}`),
+    ...row("up", fmtDur(s.uptime_ms / 1000)),
+    ...row("tailscale", ts && ts.ips?.length ? `${ts.dns_name || ""} ${ts.ips.filter((ip) => !ip.includes(":")).join(", ")}${ts.state === "Running" ? "" : ` (${ts.state})`}` : ts ? ts.state : h("span", { class: "muted" }, "not installed")),
+    ...row("lan", addrs.length ? addrs.join(", ") : h("span", { class: "muted" }, "–")),
+  );
 });
 
 /** An app's UI link as seen from this browser: {host} becomes the host the console was opened on (works over Tailscale too). */
@@ -566,7 +588,7 @@ function openStartDialog({ kind, type } = {}) {
   // On a phone, focusing a field pops the keyboard over the form: leave it until a field is tapped.
   if (!matchMedia("(pointer: coarse)").matches) (sf.cwd.value ? sf.prompt : sf.cwd).focus();
   // Prefill the folder with the one most recently used, so a test start is a single click.
-  if (!sf.cwd.value) get("/paths?limit=1").then(({ paths }) => { if (dlg.open && !sf.cwd.value && paths?.[0]) sf.cwd.value = paths[0].path; }).catch(() => {});
+  if (!sf.cwd.value) get("/paths?limit=1").then(({ paths }) => { if (dlg.open && !sf.cwd.value && paths?.[0]) { sf.cwd.value = paths[0].path; syncPathShow(sf.cwd); } }).catch(() => {});
 }
 /** Agents always start interactive (when tmux is here, or in a sandbox); apps run headless. The server applies the same default. */
 const startsInteractive = (t) => t?.kind === "agent" && (Boolean(sf.target.value) || Boolean(systemInfo?.tmux));
@@ -582,7 +604,7 @@ function applyStartType() {
   sf.prompt.placeholder = interactive ? "Optional first message" : "What should it do?";
   sf.cwd.value = t?.default_cwd || sf.cwd.value;
   sf.cwd.placeholder = t?.default_cwd ? t.default_cwd : "start typing to search";
-  sf.extra_args.placeholder = t?.name === "claude" ? "--permission-mode acceptEdits" : t?.name === "codex" ? "--sandbox workspace-write" : "";
+  sf.extra_args.placeholder = t?.name === "claude" ? "--permission-mode acceptEdits" : t?.name === "codex" ? "--sandbox workspace-write" : t?.name === "pi" ? "--model google-vertex/gemini-4-argon" : "";
   const c = configs.find((x) => x.name === sf.config.value);
   $("#start-config-hint").textContent = c ? configSummary(c) : "";
 }
@@ -789,7 +811,15 @@ $("#wf-save-run").onclick = async () => {
 // ---------------------------------------------------------------- connect (API docs URL + API keys)
 const docsUrl = () => `${location.origin}/api/docs`;
 const agentPrompt = (key) => `Read ${docsUrl()} and use the lofiwave API with the header "Authorization: Bearer ${key || "<API key>"}". `;
-function copy(text, what) { navigator.clipboard?.writeText(text).then(() => toast(`copied ${what}`, true), () => toast("couldn't copy; select it and copy by hand")); }
+function copy(text, what) {
+  // navigator.clipboard is only there on https and localhost: over plain http (Tailscale) fall back to a selection.
+  const fallback = () => {
+    const ta = h("textarea", { style: "position:fixed;opacity:0;top:0;left:0" }); ta.value = text; document.body.append(ta); ta.select();
+    const ok = document.execCommand("copy"); ta.remove();
+    toast(ok ? `copied ${what}` : "couldn't copy; select it and copy by hand", ok);
+  };
+  if (navigator.clipboard) navigator.clipboard.writeText(text).then(() => toast(`copied ${what}`, true), fallback); else fallback();
+}
 $("#copy-docs-url").onclick = () => copy(docsUrl(), "the URL");
 $("#copy-agent-prompt").onclick = () => copy(agentPrompt(lastKey), "the prompt");
 let lastKey = "";
@@ -968,6 +998,126 @@ cf.addEventListener("submit", async (e) => {
   toast("saved", true); cdlg.close(); loadConfigs();
 });
 
+// ---------------------------------------------------------------- keys (API keys and secrets for agents, src/secrets.ts)
+// The list never holds values: a value is fetched (and logged) only when someone reveals or copies it.
+let secrets = [], openSecret = null, secretTimer = null, secretsAt = 0;
+const encS = (n) => encodeURIComponent(n);
+const loadSecrets = guard(async () => {
+  secretsAt = Date.now();
+  const q = $("#secret-filter").value.trim();
+  secrets = await get(`/secrets${q ? `?q=${encS(q)}` : ""}`);
+  $("#secret-count").textContent = secrets.length ? `${secrets.length} key${secrets.length === 1 ? "" : "s"}` : "";
+  $("#secret-table tbody").replaceChildren(...secrets.map((k) => h("tr", { class: `clickable${openSecret === k.name ? " selected" : ""}`, onclick: () => showSecret(k.name) },
+    h("td", { class: "full" }, h("b", {}, k.name), k.service ? h("span", { class: "wf-tag svc-tag" }, k.service) : "",
+      k.note ? h("div", { class: "muted wf-sub trunc", title: k.note }, k.note.split("\n")[0]) : ""),
+    h("td", { class: "mono trunc", "data-l": "env var" }, k.env || h("span", { class: "muted" }, "–")),
+    h("td", { class: "mono trunc", "data-l": "value" }, k.hint),
+    h("td", { "data-l": "on disk", title: "how many .env files and profiles here have this value" }, k.files === null ? h("span", { class: "muted" }, "…") : k.files ? `${k.files} file${k.files === 1 ? "" : "s"}` : h("span", { class: "muted" }, "–")),
+    h("td", { "data-l": "last used" }, k.used_at ? fmtRel(k.used_at) : h("span", { class: "muted" }, "never")),
+    h("td", { class: "row" }, h("button", { class: "small", title: "copy the value", onclick: (e) => { e.stopPropagation(); copySecret(k.name); } }, "Copy")),
+  )));
+  if (!secrets.length) $("#secret-table tbody").replaceChildren(h("tr", {}, h("td", { colspan: 6, class: "muted empty" }, q ? "No key matches." : "No keys yet. Add one, or import one found on this computer below.")));
+});
+/** The tab polls slowly: a reveal or an open dialog shouldn't be redrawn under you, and the scan is cached anyway. */
+function refreshKeys() {
+  if (kdlg.open || Date.now() - secretsAt < 30_000) return;
+  loadSecrets(); loadFound();
+}
+async function secretValue(name, use) { return (await post(`/secrets/${encS(name)}/value`, { use, detail: "from the Keys page" })).value; }
+const copySecret = guard(async (name) => { copy(await secretValue(name, "copy"), name); });
+const showSecret = guard(async (name, toggle = true) => {
+  if (toggle && openSecret === name) { openSecret = null; $("#secret-detail").hidden = true; return loadSecrets(); }
+  const k = await get(`/secrets/${encS(name)}`);
+  openSecret = k.name;
+  $$("#secret-table tbody tr").forEach((tr) => tr.classList.toggle("selected", tr.querySelector("b")?.textContent === k.name));
+  const val = h("code", { class: "mono secret-val" }, k.hint);
+  let shown = false;
+  const reveal = h("button", { class: "small", onclick: guard(async () => {
+    shown = !shown; val.textContent = shown ? await secretValue(k.name, "reveal") : k.hint; reveal.textContent = shown ? "Hide" : "Reveal";
+  }) }, "Reveal");
+  const fields = Object.entries(k.fields);
+  $("#secret-detail").replaceChildren(
+    h("div", { class: "card-head" }, h("h2", {}, k.name, k.service ? h("span", { class: "wf-tag svc-tag" }, k.service) : ""),
+      h("div", { class: "row" },
+        h("button", { class: "small", onclick: () => copySecret(k.name) }, "Copy"),
+        h("button", { class: "small", onclick: () => openSecretDialog(k) }, "Edit"),
+        h("button", { class: "small danger", onclick: () => confirmDo(`Delete the key "${k.name}"? Its value can't be recovered from lofiwave afterwards.`, async () => { await del(`/secrets/${encS(k.name)}`); openSecret = null; $("#secret-detail").hidden = true; toast("deleted", true); loadSecrets(); }) }, "Delete"),
+        h("button", { class: "small", "aria-label": "Close", onclick: () => { openSecret = null; $("#secret-detail").hidden = true; loadSecrets(); } }, "✕"))),
+    h("dl", { class: "secret-dl" },
+      h("dt", {}, "Value"), h("dd", { class: "row" }, val, reveal),
+      h("dt", {}, "Env var"), h("dd", { class: "mono" }, k.env || "–"),
+      ...fields.flatMap(([f, v]) => [h("dt", {}, f), h("dd", {}, /^https?:\/\//.test(v) ? h("a", { href: v, target: "_blank", rel: "noopener" }, v) : v)]),
+      k.tags.length ? [h("dt", {}, "Tags"), h("dd", {}, k.tags.join(", "))] : "",
+      k.note ? [h("dt", {}, "Note"), h("dd", { class: "secret-note" }, k.note)] : "",
+      h("dt", {}, "Added"), h("dd", {}, `${fmtRel(k.created_at)}${k.created_by ? ` by ${k.created_by}` : ""}${k.source ? ` from ${k.source}` : ""}`),
+      h("dt", {}, "For agents"), h("dd", { class: "mono" }, `lw keys env ${k.name} -- <command>`),
+    ),
+    k.where.length ? h("details", { class: "secret-where" }, h("summary", {}, `Written in ${k.where.length} file${k.where.length === 1 ? "" : "s"} on this computer`),
+      h("ul", { class: "mono" }, ...k.where.map((f) => h("li", {}, `${f.file}:${f.line}`, h("span", { class: "muted" }, `  ${f.var}`))))) : "",
+    k.events.length ? h("details", { class: "secret-where" }, h("summary", {}, "Recent uses"),
+      h("ul", {}, ...k.events.map((e) => h("li", {}, `${fmtRel(e.at)} · ${e.action}${e.actor ? ` by ${e.actor}` : ""}${e.run_id ? ` (run ${e.run_id})` : ""}${e.detail ? `: ${e.detail}` : ""}`)))) : "",
+  );
+  $("#secret-detail").hidden = false;
+});
+const loadFound = guard(async (refresh = false) => {
+  if (refresh) $("#found-info").textContent = "Scanning…";
+  const s = await get(`/secrets/scan${refresh ? "?refresh=1" : ""}`);
+  const todo = s.groups.filter((g) => !g.stored);
+  $("#found-info").textContent = `${s.files} .env files and profiles under ${s.roots.join(", ")}, scanned ${fmtRel(s.scanned_at)}: ${todo.length} value${todo.length === 1 ? "" : "s"} lofiwave doesn't hold, ${s.groups.length - todo.length} it does.`;
+  $("#found-table tbody").replaceChildren(...todo.map((g) => h("tr", {},
+    h("td", { class: "mono trunc", "data-l": "env var", title: g.vars.join("\n") }, g.vars.join(", ")),
+    h("td", { class: "mono trunc", "data-l": "value" }, g.hint),
+    h("td", { class: "mono trunc", "data-l": "written in", title: g.files.map((f) => `${f.file}:${f.line}`).join("\n") }, g.files[0].file, g.files.length > 1 ? h("span", { class: "muted" }, ` +${g.files.length - 1}`) : ""),
+    h("td", { class: "row" }, h("button", { class: "small", onclick: () => importFoundDialog(g) }, "Import")),
+  )));
+  if (!todo.length) $("#found-table tbody").replaceChildren(h("tr", {}, h("td", { colspan: 4, class: "muted empty" }, s.groups.length ? "Every key found here is in lofiwave." : "No keys found in .env files or shell profiles.")));
+  if (secrets.some((k) => k.files === null)) loadSecrets();   // "on disk" counts come from the scan
+});
+$("#secret-rescan").onclick = () => loadFound(true).then(() => loadSecrets());
+$("#secret-filter").addEventListener("input", () => { clearTimeout(secretTimer); secretTimer = setTimeout(loadSecrets, 150); });
+
+const kdlg = $("#secret-dialog"), kf = $("#secret-form");
+const fieldsText = (f) => Object.entries(f ?? {}).map(([k, v]) => `${k}: ${v}`).join("\n");
+const parseFields = (t) => Object.fromEntries(t.split("\n").map((l) => l.match(/^\s*([^:=]+?)\s*[:=]\s*(.*?)\s*$/)).filter(Boolean).map((m) => [m[1], m[2]]));
+function openSecretDialog(k, found = null) {
+  kf.reset(); $("#secret-feedback").hidden = true;
+  kf.orig.value = k?.name ?? ""; kf.file.value = found?.file ?? ""; kf.var.value = found?.var ?? "";
+  kf.elements.namedItem("name").value = k?.name ?? found?.name ?? "";
+  kf.env.value = k?.env ?? found?.var ?? ""; kf.service.value = k?.service ?? found?.service ?? "";
+  kf.tags.value = (k?.tags ?? []).join(", "); kf.note.value = k?.note ?? ""; kf.fields.value = fieldsText(k?.fields);
+  $("#secret-title").textContent = k ? `Edit ${k.name}` : found ? `Import ${found.var}` : "Add a key";
+  $("#secret-value-label").hidden = Boolean(found);
+  kf.value.required = !k && !found;
+  $("#secret-value-help").textContent = k ? `Now ${k.hint}. Leave blank to keep it.` : "Stored encrypted; the list only shows its first and last characters.";
+  kdlg.showModal();
+  kf.elements.namedItem("name").focus();
+}
+const SERVICE_OF = [[/OPENAI/, "openai"], [/ANTHROPIC|CLAUDE/, "anthropic"], [/GEMINI|GOOGLE/, "google"], [/REPLICATE/, "replicate"], [/ELEVENLABS/, "elevenlabs"], [/OPENROUTER/, "openrouter"], [/SUPABASE/, "supabase"], [/STRIPE/, "stripe"], [/^R2_|CLOUDFLARE/, "cloudflare"], [/^AWS_/, "aws"], [/TELEGRAM/, "telegram"], [/DISCORD/, "discord"], [/GITHUB|^GH_/, "github"], [/SLACK/, "slack"], [/DATABASE_URL|POSTGRES|PG/, "database"]];
+const importFoundDialog = guard(async (g) => {
+  const f = g.files[0];
+  const { name } = await get(`/secrets/suggest-name?env=${encS(f.var)}&file=${encS(f.file)}`);
+  openSecretDialog(null, { file: f.file, var: f.var, name, service: SERVICE_OF.find(([re]) => re.test(f.var))?.[1] ?? "" });
+  if (g.files.length > 1) kf.note.value = `Also in ${g.files.length - 1} other file${g.files.length === 2 ? "" : "s"} (see where it's written).`;
+});
+$("#secret-new-btn").onclick = () => openSecretDialog(null);
+$("#secret-cancel").onclick = () => kdlg.close();
+kf.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  if (!kf.reportValidity()) return;
+  $("#secret-feedback").hidden = true;
+  const name = kf.elements.namedItem("name").value.trim();
+  const body = { env: kf.env.value.trim(), service: kf.service.value.trim(), note: kf.note.value, fields: parseFields(kf.fields.value), tags: kf.tags.value.split(",").map((t) => t.trim()).filter(Boolean) };
+  const orig = kf.orig.value;
+  let saved;
+  try {
+    if (orig) saved = await put(`/secrets/${encS(orig)}`, { ...body, name, replace_fields: true, ...(kf.value.value ? { value: kf.value.value } : {}) });
+    else if (kf.file.value) saved = await post("/secrets/import", { ...body, name, file: kf.file.value, var: kf.var.value });
+    else saved = await post("/secrets", { ...body, name, value: kf.value.value });
+  } catch (err) { $("#secret-feedback").textContent = err.message; $("#secret-feedback").hidden = false; return; }
+  toast(saved.same_value_as ? `saved; ${saved.same_value_as} has the same value` : "saved", true);
+  kdlg.close(); loadSecrets(); showSecret(saved.name, false); loadFound();
+});
+
 function renderSettings() {
   loadTargets();
   loadConfigs();
@@ -1039,7 +1189,7 @@ const refreshRunDetail = guard(async (full = false) => {
         r.out_dir ? h("dt", {}, "results") : "", r.out_dir ? h("dd", { class: "mono" }, r.out_dir, h("span", { class: "muted" }, "  (GET /api/runs/", String(r.id), "/results)")) : "",
         h("dt", {}, "pid"), h("dd", {}, r.pid ?? "–", r.meta?.orphan ? " (started by a previous console instance)" : ""),
         r.meta?.remote_url ? h("dt", {}, "remote") : "", r.meta?.remote_url ? h("dd", {}, h("a", { href: r.meta.remote_url, target: "_blank" }, r.meta.remote_url), h("span", { class: "muted" }, "  (same session in the Claude app)")) : "",
-        r.meta?.tmux ? h("dt", {}, "terminal") : "", r.meta?.tmux ? h("dd", {}, `tmux attach -t ${r.meta.tmux}`, r.status === "running" ? h("span", { class: "muted" }, "  (live screen below)") : h("span", { class: "muted" }, "  (ended; screen saved in the log)")) : "",
+        r.meta?.tmux ? h("dt", {}, "terminal") : "", r.meta?.tmux ? h("dd", {}, h("code", {}, `tmux attach -t ${r.meta.tmux}`), " ", h("button", { class: "small", title: "copy the command, to attach from a terminal on this machine", onclick: () => copy(`tmux attach -t ${r.meta.tmux}`, "tmux command") }, "Copy"), r.status === "running" ? h("span", { class: "muted" }, "  (live screen below)") : h("span", { class: "muted" }, "  (ended; screen saved in the log)")) : "",
         r.meta?.tmux && (r.meta.terminal || r.meta.terminal_error) ? h("dt", {}, "window") : "",
         r.meta?.tmux && (r.meta.terminal || r.meta.terminal_error)
           ? h("dd", {}, r.meta.terminal ? `opened in ${r.meta.terminal} on this machine` : h("span", { class: "muted" }, `no window opened — ${r.meta.terminal_error}`))
@@ -1218,8 +1368,8 @@ function selectEndedRun(run) {
 
 /** The Live / Ended switch at the top of the rail. */
 function railTabs() {
-  const tab = (view, label, n) => h("button", { role: "tab", class: consoleView === view ? "active" : "", "aria-selected": String(consoleView === view), onclick: () => setConsoleView(view) }, `${label} ${n}`);
-  return h("div", { class: "subnav rail-tabs", role: "tablist", "aria-label": "Sessions" }, tab("live", "Live", consoleData.live.length), tab("ended", "Ended", consoleData.ended.length));
+  const tab = (view, label) => h("button", { role: "tab", class: consoleView === view ? "active" : "", "aria-selected": String(consoleView === view), onclick: () => setConsoleView(view) }, label);
+  return h("div", { class: "subnav rail-tabs", role: "tablist", "aria-label": "Sessions" }, tab("live", `Live ${consoleData.live.length}`), tab("ended", "Ended"));
 }
 /** The drawer's top row: close, Live / Ended, and Resume. */
 const railBar = () => h("div", { class: "rail-bar" },
@@ -1370,12 +1520,25 @@ const turnBackOn = (r) => guard(async () => {
   await loadConsole();
 })();
 
-/** An ended session, read-only: its conversation from the transcript, else the terminal log saved when it stopped. */
+/** The chat view of the ended session on screen, if it has one. */
+let endedChat = null;
+function closeEndedChat() { endedChat?.close(); endedChat = null; }
+
+/**
+ * An ended session, read-only: a Claude conversation in the same chat view as a live one, else the messages from
+ * its transcript, else the terminal log saved when it stopped.
+ */
 function endedPaneFor(r) {
   const s = sessOf(r);
   const tokenQ = token ? `?token=${encodeURIComponent(token)}` : "";
-  const body = h("div", { id: "ended-read", class: "chat" }, h("div", { class: "muted" }, "loading…"));
-  (async () => {
+  closeEndedChat();
+  let body;
+  if (chatable(r) && s?.session_id) {
+    endedChat = new ChatView(`/runs/${r.id}`, { ended: true });
+    body = endedChat.root;
+    body.id = "ended-chat";
+  } else body = h("div", { id: "ended-read", class: "chat" }, h("div", { class: "muted" }, "loading…"));
+  if (body.id === "ended-read") (async () => {
     let items;
     try {
       if (!s?.transcript_path) throw new Error("no transcript");
@@ -1406,7 +1569,7 @@ function endedPaneFor(r) {
       ),
     ),
     body,
-    h("div", { class: "pane-foot muted" }, "Read-only. Turn it back on to keep going."),
+    endedChat ? "" : h("div", { class: "pane-foot muted" }, "Read-only. Turn it back on to keep going."),
   ];
 }
 
@@ -1529,14 +1692,16 @@ function enableRemote(pid, s, inPane) {
 function renderPane() {
   if (activeTab !== "console") return; // the list shows on every page; the session only on Sessions
   if (consoleView === "ended") {
-    closeTerm(); syncFull(false);
+    closeTerm(); closeChat(); syncFull(false);
     const sig = `ended:${endedRun?.id ?? ""}`;
     if (sig !== paneSig) {
       paneSig = sig;
+      closeEndedChat();
       $("#session-pane").replaceChildren(...(endedRun ? endedPaneFor(endedRun) : [h("div", { class: "pane-empty" }, h("h2", {}, "No ended sessions"))]));
     }
     return;
   }
+  closeEndedChat();
   const r = consoleRun;
   const mode = paneMode(r);
   if (!r || r.id !== liveTerm?.runId) closeTerm();
@@ -1584,7 +1749,9 @@ function paneFor(r) {
     ),
     mode === "terminal" ? h("div", { id: "console-term", class: "term" }, h("span", { class: "term-status" }, "connecting…")) : h("div", { id: "console-chat" }),
     mode === "terminal" ? h("div", { class: "term-hint muted" }, copyHint()) : "",
-    h("div", { class: "pane-foot muted mono" }, r.meta?.e2b ? `E2B sandbox ${r.meta.e2b.sandbox_id || "(starting…)"}${r.meta.e2b.paused ? " · paused while idle; opening the terminal resumes it" : ""}` : `tmux attach -t ${r.meta?.tmux || "?"}`),
+    // A phone's keyboard has no Enter-to-a-dialog, Esc, Tab or arrows for the TUI: the same row the run's Details has.
+    // The live terminal repaints on its own, so there is nothing to refresh after a send.
+    mode === "terminal" ? h("div", { class: "term-keys" }, keysForm(r.id, () => {})) : "",
   ];
 }
 
@@ -1643,12 +1810,12 @@ function paneMode(r) {
   return chatable(r) && matchMedia("(max-width: 700px)").matches ? "chat" : "terminal";
 }
 function setPaneMode(mode) { localStorage.setItem("ac_term_mode", mode); paneSig = ""; renderPane(); }
-/** The chat view reads Claude Code transcripts; other agents (Codex) and plain commands get the terminal only. */
+/** The chat view reads Claude Code and pi sessions; other agents (Codex) and plain commands get the terminal only. */
 function chatable(r) {
   if (!r) return false;
   const s = sessOf(r);
-  if (s) return s.agent === "claude";
-  return /(^|\/)claude$/.test(typeByName(r.type_name)?.command || "");
+  if (s) return s.agent === "claude" || s.agent === "pi";
+  return /(^|\/)(claude|pi)$/.test(typeByName(r.type_name)?.command || "");
 }
 function viewSwitch(r, mode) {
   const views = [["chat", "Chat", "the session as messages, tool calls and diffs, read from its transcript; scrolls on its own"], ["terminal", "Terminal", "a real terminal in the browser"]]
@@ -1885,7 +2052,9 @@ function closeTerm() {
   closeHistory(t);
   t.closed = true; clearTimeout(t.retry); clearTimeout(t.parkTimer); t.ro?.disconnect();
   t.el.remove();
-  paneSig = ""; // the pane lost its terminal: rebuild it next time
+  // The pane lost its terminal: rebuild it next time. A parked terminal was already out of the pane (it shows the chat),
+  // and rebuilding that would pull the chat out of the page and back, which drops its scroll to the top.
+  if (!t.parked) paneSig = "";
   try { t.ws?.close(); } catch {}
   t.term.dispose();
 }
@@ -1991,7 +2160,7 @@ function openChat(runId) {
   }
   // A rebuilt pane has a fresh placeholder: move the live view into it.
   const el = $("#console-chat"), root = liveChat.view.root;
-  if (el && el !== root) { el.replaceWith(root); root.id = "console-chat"; }
+  if (el && el !== root) { el.replaceWith(root); root.id = "console-chat"; liveChat.view.reattached(); }
 }
 // The pane loses its chat with it, so it is rebuilt next time (else a new view has no placeholder to move into).
 function closeChat() { if (liveChat) { liveChat.view.close(); liveChat.view.root.remove(); liveChat = null; paneSig = ""; } }
@@ -2020,7 +2189,7 @@ function emptyPane() {
 }
 
 // ---------------------------------------------------------------- usage (plan limits, GET /api/system/limits)
-const AGENT_NAMES = { claude: "Claude", codex: "Codex" };
+const AGENT_NAMES = { claude: "Claude", codex: "Codex", pi: "pi" };
 let limitsAt = 0;
 const loadLimits = guard(async () => {
   if (Date.now() - limitsAt < 15000 && $("#usage-cards").childElementCount) return; // the numbers change per request, not per second
@@ -2050,6 +2219,80 @@ function limitRow(w) {
     h("div", { class: "usage-meta muted" }, [resets, pace].filter(Boolean).join(" · ")));
 }
 
+// ---------------------------------------------------------------- stats (GET /api/stats): who sent what, and the tokens
+let statsAt = 0, statsData = null, statsPick = null, statsMsgs = null;
+let statsDays = (() => { try { return Number(localStorage.getItem("ac_stats_days")) || 7; } catch { return 7; } })();
+const fmtTok = (n) => (n >= 1e9 ? `${(n / 1e9).toFixed(1)}B` : n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : String(n));
+const tokTitle = (t) => `input ${t.input.toLocaleString()} · cache writes ${t.cache_write.toLocaleString()} · cache reads ${t.cache_read.toLocaleString()} · output ${t.output.toLocaleString()}`;
+const VIA = { chat: "chat", terminal: "terminal", api: "API" };
+const loadStats = guard(async (force = false) => {
+  if (!force && statsData && Date.now() - statsAt < 30000) return;
+  statsAt = Date.now();
+  statsData = await get(`/stats?days=${statsDays}`);
+  if (statsPick !== null) statsMsgs = await get(`/stats/messages?person=${encodeURIComponent(statsPick)}&days=${statsDays}`);
+  renderStats();
+});
+const pickPerson = guard(async (person) => {
+  if (statsPick === person) { statsPick = null; statsMsgs = null; renderStats(); return; }
+  statsPick = person; statsMsgs = null; renderStats();
+  statsMsgs = await get(`/stats/messages?person=${encodeURIComponent(person)}&days=${statsDays}`);
+  renderStats();
+});
+function statsMeter(value, max) {
+  return h("span", { class: "stats-meter" }, h("i", { style: `width:${max ? Math.max(2, (value / max) * 100) : 0}%` }));
+}
+function renderStats() {
+  const s = statsData;
+  if (!s) return;
+  const span = s.days === 1 ? "24h" : `${s.days} days`;
+  $("#stats-range").replaceChildren(...[1, 7, 30].map((d) =>
+    h("button", { class: d === s.days ? "active" : "", "aria-pressed": String(d === s.days), onclick: () => { statsDays = d; try { localStorage.setItem("ac_stats_days", d); } catch {} loadStats(true); } }, d === 1 ? "24h" : `${d}d`)));
+  const t = s.totals;
+  $("#stats-totals").textContent = `last ${span}: ${t.messages} messages (${t.tracked_messages} with a known sender) · ${fmtTok(t.tokens.total)} tokens · ${t.sessions} sessions · ${t.people} people`;
+
+  const maxMsg = Math.max(0, ...s.people.map((p) => p.messages));
+  const rows = [];
+  for (const p of s.people) {
+    const name = p.person || "No known sender";
+    const via = Object.entries(p.via).map(([k, n]) => `${n} ${VIA[k] ?? k}`).join(" · ");
+    const open = statsPick === p.person;
+    rows.push(h("tr", { class: `clickable${open ? " selected" : ""}`, onclick: () => pickPerson(p.person) },
+      h("td", { class: "stats-who" }, h("b", { class: p.person ? "" : "muted" }, name), via ? h("div", { class: "by" }, via) : ""),
+      h("td", { "data-l": "messages", class: "stats-num" }, h("span", {}, String(p.messages)), statsMeter(p.messages, maxMsg)),
+      h("td", { "data-l": "tokens", title: tokTitle(p.tokens) }, fmtTok(p.tokens.total)),
+      h("td", { "data-l": "output" }, fmtTok(p.tokens.output)),
+      h("td", { "data-l": "sessions" }, String(p.sessions)),
+      h("td", { "data-l": "last" }, p.last_at ? fmtRel(p.last_at) : "–")));
+    if (open) rows.push(h("tr", { class: "stats-msgs-row" }, h("td", { colspan: "6", class: "full" }, statsMessages(statsMsgs, p))));
+  }
+  $("#stats-people tbody").replaceChildren(...(rows.length ? rows : [h("tr", {}, h("td", { colspan: "6", class: "muted" }, `No messages in the last ${span}.`))]));
+
+  const folderCell = (cwd) => h("td", { "data-l": "folder", class: "mono trunc", title: cwd }, cwd.replace(/^\/(home|Users)\/[^/]+/, "~"));
+  const peopleCell = (ps) => h("td", { "data-l": "people" }, ps.length ? ps.join(", ") : h("span", { class: "muted" }, "–"));
+  $("#stats-sessions tbody").replaceChildren(...(s.sessions.length ? s.sessions.map((x) => h("tr", { class: x.run_id ? "clickable" : "", title: x.run_id ? "Open this session" : "Not started from lofiwave", onclick: x.run_id ? () => openSessionLink(x.run_id) : undefined },
+    h("td", { class: "trunc" }, x.title || h("span", { class: "muted mono" }, x.session_id.slice(0, 8))),
+    folderCell(x.cwd), peopleCell(x.people),
+    h("td", { "data-l": "messages" }, String(x.messages)),
+    h("td", { "data-l": "tokens", title: tokTitle(x.tokens) }, fmtTok(x.tokens.total)),
+    h("td", { "data-l": "output" }, fmtTok(x.tokens.output)),
+    h("td", { "data-l": "last" }, fmtRel(x.last_at)))) : [h("tr", {}, h("td", { colspan: "7", class: "muted" }, "No Claude sessions used tokens in this window."))]));
+  $("#stats-folders tbody").replaceChildren(...(s.folders.length ? s.folders.map((f) => h("tr", {},
+    folderCell(f.cwd),
+    h("td", { "data-l": "sessions" }, String(f.sessions)), peopleCell(f.people),
+    h("td", { "data-l": "messages" }, String(f.messages)),
+    h("td", { "data-l": "tokens", title: tokTitle(f.tokens) }, fmtTok(f.tokens.total)),
+    h("td", { "data-l": "output" }, fmtTok(f.tokens.output)),
+    h("td", { "data-l": "last" }, fmtRel(f.last_at)))) : [h("tr", {}, h("td", { colspan: "7", class: "muted" }, "Nothing in this window."))]));
+}
+function statsMessages(list, p) {
+  if (!list) return h("p", { class: "muted" }, "Loading…");
+  if (!list.length) return h("p", { class: "muted" }, p.person ? "Nothing sent from lofiwave in this window." : "These came from sessions lofiwave didn't start or watch; their text isn't recorded here.");
+  return h("ol", { class: "stats-msgs" }, ...list.map((m) => h("li", { class: m.run_id ? "clickable" : "", onclick: (e) => { e.stopPropagation(); if (m.run_id) openSessionLink(m.run_id); } },
+    h("div", { class: "stats-msg-meta muted" }, fmtTime(m.at), m.via ? ` · ${VIA[m.via] ?? m.via}` : "", " · ", h("span", { class: "mono" }, m.cwd.replace(/^\/(home|Users)\/[^/]+/, "~")),
+      h("span", { class: "stats-msg-tok", title: tokTitle(m.tokens) }, m.tokens.total ? `${fmtTok(m.tokens.total)} tokens` : "")),
+    h("div", { class: "stats-msg-text" }, m.text || h("span", { class: "muted" }, "(no text recorded)")))));
+}
+
 // ---------------------------------------------------------------- refresh loop
 function refresh() {
   if (document.hidden) return;
@@ -2059,11 +2302,13 @@ function refresh() {
   else if (activeTab === "apps") loadTypes().then(loadApps);
   else if (activeTab === "workflows") loadWorkflows();
   else if (activeTab === "connect") loadConnect();
+  else if (activeTab === "keys") refreshKeys();
   else if (activeTab === "settings") renderSettings();
   else if (activeTab === "runs") { loadRuns(); if (selectedRun) refreshRunDetail(); }
   else if (activeTab === "types") loadTypes();
   else if (activeTab === "system") loadUsage();
   else if (activeTab === "usage") loadLimits();
+  else if (activeTab === "stats") loadStats();
 }
 setInterval(refresh, 3000);
 setInterval(loadSystem, 30000);

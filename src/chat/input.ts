@@ -106,6 +106,24 @@ function serialized<T>(runId: number, fn: () => Promise<T>): Promise<T> {
   return next;
 }
 
+/** A pi run (see ./pi.ts): its editor isn't Claude's, so none of the input-box checks above apply. */
+export const isPiRun = (run: RunRow) => Boolean(JSON.parse(run.meta || "{}").pi_session) || /(^|\/)pi$/.test(run.command);
+
+/**
+ * Typing into pi's editor: files go in as `@/abs/path` references (pi attaches images it's given that way too),
+ * then the text as one bracketed paste, then Enter. A message sent while pi works is queued by pi as a steering
+ * message.
+ */
+async function piSend(target: string, text: string, files: { path: string }[]): Promise<{ ok: true; queued: boolean }> {
+  const refs = files.map((f) => `@${f.path}`);
+  const body = refs.length ? refs.join(" ") + (text.trim() ? "\n" + text : " ") : text;
+  await paste(target, body);
+  await Bun.sleep(150);
+  const r = await tmux("send-keys", "-t", target, "Enter");
+  if (r.code !== 0) throw new ApiError(500, `tmux send-keys failed: ${r.err}`);
+  return { ok: true, queued: false };
+}
+
 export type SendOptions = { text: string; files: string[]; draft?: "replace" | "append" | "" };
 
 export function chatSend(runId: number, o: SendOptions): Promise<{ ok: true; queued: boolean }> {
@@ -115,6 +133,7 @@ export function chatSend(runId: number, o: SendOptions): Promise<{ ok: true; que
     if (o.text.length > TEXT_MAX) throw new ApiError(413, `message is too long (${o.text.length} characters; the limit is ${TEXT_MAX})`);
     const files = o.files.map((f) => uploadPath(runId, f));
     if (!o.text.trim() && !files.length) throw new ApiError(400, "nothing to send");
+    if (isPiRun(run)) return piSend(target, o.text, files);
 
     const reg = claudeRegistry(true).byPid.get(pid);
     if (reg?.status === "waiting") throw new ApiError(409, `Claude is waiting${(reg as any).waitingFor ? ` (${(reg as any).waitingFor})` : ""}; answer it in the terminal first`);
@@ -151,7 +170,14 @@ export function chatSend(runId: number, o: SendOptions): Promise<{ ok: true; que
 
 /** Stop the current turn: Escape, which the TUI takes as an interrupt while it works. Only sent while busy. */
 export async function chatInterrupt(runId: number): Promise<{ ok: true }> {
-  const { target, pid } = paneOf(getRun(runId));
+  const run = getRun(runId);
+  const { target, pid } = paneOf(run);
+  if (isPiRun(run)) {
+    // pi aborts the current turn on Escape; it's harmless when idle.
+    const r = await tmux("send-keys", "-t", target, "Escape");
+    if (r.code !== 0) throw new ApiError(500, `tmux send-keys failed: ${r.err}`);
+    return { ok: true };
+  }
   const st = claudeRegistry(true).byPid.get(pid)?.status;
   if (st !== "busy") throw new ApiError(409, st ? `Claude isn't working (it's ${st})` : "can't tell whether Claude is working");
   const r = await tmux("send-keys", "-t", target, "Escape");

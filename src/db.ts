@@ -184,6 +184,64 @@ if (sessionsUniqueOnIdOnly) {
     CREATE INDEX IF NOT EXISTS sessions_run_idx ON sessions(run_id, started_at);
   `);
 }
+// One row per prompt Claude takes in a lofiwave run (UserPromptSubmit), closed by its Stop: what Advanced's team bar
+// counts (src/stats.ts). Made after checkpoints existed, so the first time it's filled in from their start/end pairs.
+if (!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'turns'").get()) {
+  db.exec(`
+    CREATE TABLE turns (
+      id         INTEGER PRIMARY KEY,
+      run_id     INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+      session_id TEXT NOT NULL DEFAULT '',
+      prompt_id  TEXT NOT NULL,
+      started_at INTEGER NOT NULL,
+      ended_at   INTEGER,
+      UNIQUE(run_id, prompt_id)
+    );
+    CREATE INDEX turns_started_idx ON turns(started_at);
+    INSERT OR IGNORE INTO turns (run_id, session_id, prompt_id, started_at, ended_at)
+      SELECT run_id, MIN(session_id), prompt_id, MIN(CASE WHEN kind = 'start' THEN at END), MAX(CASE WHEN kind = 'end' THEN at END)
+      FROM checkpoints GROUP BY run_id, prompt_id HAVING MIN(CASE WHEN kind = 'start' THEN at END) IS NOT NULL;
+  `);
+}
+// Who sent each prompt (the signed-in name or API actor, '' when it came from outside lofiwave: an ssh/tmux attach,
+// Claude's remote control) and how: chat | terminal | api | ''. Turns from before this have none.
+const turnCols = new Set(db.query<{ name: string }, []>("PRAGMA table_info(turns)").all().map((c) => c.name));
+if (!turnCols.has("sent_by")) db.exec("ALTER TABLE turns ADD COLUMN sent_by TEXT NOT NULL DEFAULT ''");
+if (!turnCols.has("via")) db.exec("ALTER TABLE turns ADD COLUMN via TEXT NOT NULL DEFAULT ''");
+if (!turnCols.has("text")) db.exec("ALTER TABLE turns ADD COLUMN text TEXT NOT NULL DEFAULT ''");
+db.exec("CREATE INDEX IF NOT EXISTS turns_prompt_idx ON turns(prompt_id)");
+// Token usage per API call, read from Claude transcripts (src/tokens.ts): every session on this machine, lofiwave's or
+// not, subagents included. prompt_id ties a call to the prompt (turns.prompt_id) and so to who sent it.
+db.exec(`
+CREATE TABLE IF NOT EXISTS token_calls (
+  msg_id      TEXT PRIMARY KEY,
+  session_id  TEXT NOT NULL,
+  prompt_id   TEXT NOT NULL DEFAULT '',
+  cwd         TEXT NOT NULL DEFAULT '',
+  model       TEXT NOT NULL DEFAULT '',
+  at          INTEGER NOT NULL,
+  input       INTEGER NOT NULL DEFAULT 0,
+  output      INTEGER NOT NULL DEFAULT 0,
+  cache_read  INTEGER NOT NULL DEFAULT 0,
+  cache_write INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS token_calls_at_idx ON token_calls(at);
+CREATE INDEX IF NOT EXISTS token_calls_prompt_idx ON token_calls(prompt_id);
+CREATE INDEX IF NOT EXISTS token_calls_session_idx ON token_calls(session_id);
+-- Each session's titles, from its transcript's ai-title and custom-title (/rename) lines.
+CREATE TABLE IF NOT EXISTS token_sessions (
+  session_id   TEXT PRIMARY KEY,
+  ai_title     TEXT NOT NULL DEFAULT '',
+  custom_title TEXT NOT NULL DEFAULT ''
+);
+-- How far each transcript has been read, and the prompt its last line was in (assistant lines don't carry one).
+CREATE TABLE IF NOT EXISTS token_files (
+  path      TEXT PRIMARY KEY,
+  offset    INTEGER NOT NULL DEFAULT 0,
+  prompt_id TEXT NOT NULL DEFAULT '',
+  cwd       TEXT NOT NULL DEFAULT ''
+);
+`);
 db.exec("UPDATE process_types SET kind = 'agent' WHERE builtin = 1 AND kind = 'app'");
 // Runs started together for one job (a swarm) share meta.group; GET /api/runs?group= and /api/groups read it.
 db.exec("CREATE INDEX IF NOT EXISTS runs_group_idx ON runs(json_extract(meta, '$.group'))");
@@ -258,6 +316,16 @@ const BUILTIN_TYPES = [
     resume_args: ["resume", "{session}"],
     env: {},
     detect: CODEX_DETECT,
+  },
+  {
+    name: "pi",
+    description: "pi coding agent (pi.dev). Prompt is passed with -p (headless) or as the first message (interactive). Uses pi's default model: scripts/setup-pi-vertex.sh makes that Gemini 4 Neon on Vertex AI; add e.g. --model google-vertex/gemini-4-argon to pick another. Interactive runs get a chat view.",
+    command: "pi",
+    args: ["-p", "{prompt}"],
+    interactive_args: ["{prompt}"],
+    resume_args: ["--session", "{session}"],
+    env: {},
+    detect: "(^|/|\\s)pi(\\s|$)",
   },
 ];
 

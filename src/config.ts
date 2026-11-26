@@ -60,6 +60,8 @@ export const config = {
    * `--permission-mode <mode>` unless the run's args already pick one. E.g. `bypassPermissions` on a sandbox VM.
    */
   claudePermissionMode: process.env.CLAUDE_PERMISSION_MODE?.trim() || "",
+  /** Local claude runs also get CLAUDE_CODE_OAUTH_TOKEN from this env (a box with no claude login of its own). */
+  claudeOauthLocal: ["1", "true", "yes"].includes((process.env.CLAUDE_OAUTH_LOCAL ?? "").trim().toLowerCase()),
   /**
    * Sandbox every codex run starts in (headless, interactive, restart and resume): passed as `--sandbox <mode>` unless
    * the run's args already pick one. `read-only`, `workspace-write` or `danger-full-access`. Without it, Codex uses its
@@ -102,6 +104,8 @@ export const config = {
   maxAgentRuns: Number(process.env.MAX_AGENT_RUNS ?? Math.max(1, Math.min(16, Math.floor((totalmem() / 2 ** 20 - 1024) / 600)))),
   minFreeMemMb: Number(process.env.MIN_FREE_MEM_MB ?? 500),
   /** `mkdir_cwd` on POST /api/processes may only create folders under these (colon-separated; default: home and temp dirs). */
+  /** Tell agent runs they are under lofiwave, and about `lw` and `ccx` (src/lw.ts). LOFIWAVE_AGENT_CONTEXT=off leaves it out. */
+  agentContext: !/^(0|off|false|no)$/i.test(process.env.LOFIWAVE_AGENT_CONTEXT?.trim() ?? ""),
   cwdRoots: (process.env.CWD_ROOTS ?? `${homedir()}:${tmpdir()}`).split(":").map((p) => p.trim()).filter(Boolean).map((p) => resolve(p)),
 };
 

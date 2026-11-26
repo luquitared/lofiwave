@@ -111,6 +111,16 @@ export type StartOptions = {
   config?: string;
 };
 
+/**
+ * Set by src/autopilot: what every local run is started with besides its own prompt and config (how to reach people,
+ * the rules that apply, its programme's context), and a call once the run has its id. Kept as hooks so this file
+ * doesn't depend on the autopilot modules.
+ */
+export const runHooks: {
+  context?: (meta: Record<string, any>, o: { agent: boolean; cwd: string }) => { instructions: string; env: Record<string, string> } | null;
+  started?: (runId: number, meta: Record<string, any>) => void;
+} = {};
+
 /** A run config by name, with ConfigErrors as ApiErrors. */
 export function configOf(name: string): RunConfig {
   try { return getConfig(name); } catch (e) { if (e instanceof ConfigError) throw new ApiError(e.status, e.message); throw e; }
@@ -188,9 +198,9 @@ export async function tmux(...args: string[]): Promise<{ code: number; out: stri
   return tmuxWith(args);
 }
 /** `input` goes to tmux's stdin (load-buffer -). Code -1: tmux could not be started at all (e.g. out of memory). */
-async function tmuxWith(args: string[], input?: string): Promise<{ code: number; out: string; err: string }> {
+async function tmuxWith(args: string[], input?: string, env?: Record<string, string>): Promise<{ code: number; out: string; err: string }> {
   try {
-    const p = Bun.spawn(["tmux", ...args], { stdin: input === undefined ? "ignore" : new TextEncoder().encode(input), stdout: "pipe", stderr: "pipe" });
+    const p = Bun.spawn(["tmux", ...args], { stdin: input === undefined ? "ignore" : new TextEncoder().encode(input), stdout: "pipe", stderr: "pipe", ...(env ? { env: { ...process.env, ...env } } : {}) });
     const [out, err, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
     return { code, out: out.replace(/\n$/, ""), err: err.trim() };
   } catch (e: any) {
@@ -282,7 +292,13 @@ export async function startRun(opts: StartOptions): Promise<RunRow> {
   if (!target && (!existsSync(cwd) || !statSync(cwd).isDirectory())) throw new ApiError(400, `cwd does not exist: ${cwd}`);
   const interactive = Boolean(opts.interactive) || Boolean(opts.resumeSession);
   if (interactive && !e2b && !tmuxPath()) throw new ApiError(400, "interactive runs need tmux on PATH (brew install tmux / apt install tmux)");
-  let { command, args, template_len } = buildCommand(type, { ...opts, cwd, permissionMode: e2b?.permission_mode, runConfig });
+  // Agent runs on this machine also get lofiwave's own instructions (src/autopilot): they ride with the config's.
+  // Not on a target or in a container, where neither `lw` nor the context file can be reached.
+  const ctx = !target && !docker ? runHooks.context?.(opts.meta ?? {}, { agent: type.kind === "agent", cwd }) ?? null : null;
+  const cmdConfig: RunConfig | null = ctx?.instructions
+    ? { name: runConfig?.name ?? "", description: "", env: {}, docker: null, ...(runConfig ?? {}), instructions: [ctx.instructions, runConfig?.instructions ?? ""].filter((x) => x.trim()).join("\n\n") }
+    : runConfig;
+  let { command, args, template_len } = buildCommand(type, { ...opts, cwd, permissionMode: e2b?.permission_mode, runConfig: cmdConfig });
   // Remote Control needs a claude.ai login: in a sandbox that only has an API key, leave it out.
   if (e2b && !sandboxEnv(e2b, { ...JSON.parse(type.env || "{}"), ...(runConfig?.env ?? {}), ...(opts.env ?? {}) }, [config.authToken]).CLAUDE_CODE_OAUTH_TOKEN) {
     const drop = args.slice(0, template_len).filter((a) => a === "--remote-control").length;
@@ -294,6 +310,12 @@ export async function startRun(opts: StartOptions): Promise<RunRow> {
   const picksSession = args.some((a) => ["--session-id", "--resume", "-r", "--continue", "-c"].includes(a) || a.startsWith("--session-id="));
   const targetSession = target && basename(command) === "claude" && !picksSession ? randomUUID() : "";
   if (targetSession) { args = [...args.slice(0, template_len), "--session-id", targetSession, ...args.slice(template_len)]; template_len += 2; }
+  // A pi run on this machine gets its session id picked here too, so the chat view knows which session file is its
+  // (pi files sessions by cwd and time, and keeps no registry of running processes). A resume reopens the one asked for.
+  const isPi = basename(command) === "pi" && !target && !docker;
+  const piPicks = args.some((a) => ["--session-id", "--session", "--resume", "-r", "--continue", "-c", "--fork", "--no-session", "-p", "--print"].includes(a) || a.startsWith("--session-id=") || a.startsWith("--session="));
+  const piSession = isPi && !piPicks ? randomUUID() : isPi ? opts.resumeSession ?? "" : "";
+  if (isPi && !piPicks) { args = [...args.slice(0, template_len), "--session-id", piSession, ...args.slice(template_len)]; template_len += 2; }
   // Too many agents (or too little memory) and one more could take the machine down: refuse; the caller may queue.
   const blocked = type.kind === "agent" && !target ? admissionBlocker() : null;
   if (blocked) throw new ApiError(429, `machine is full: ${blocked}. Try again later, or pass "queue": true to start it when there is room.`);
@@ -306,11 +328,12 @@ export async function startRun(opts: StartOptions): Promise<RunRow> {
   const configEnv: Record<string, string> = runConfig
     ? { LOFIWAVE_CONFIG: runConfig.name, ...(runConfig.instructions.trim() ? { LOFIWAVE_INSTRUCTIONS: runConfig.instructions } : {}), ...runConfig.env }
     : {};
-  const launchEnv: Record<string, string> = { LOFIWAVE_OUT_DIR: outDir, ...typeEnv, ...configEnv, ...(opts.env ?? {}) };
+  const launchEnv: Record<string, string> = { LOFIWAVE_OUT_DIR: outDir, ...(ctx?.env ?? {}), ...typeEnv, ...configEnv, ...(opts.env ?? {}) };
   const t = now();
   const timeoutSec = opts.timeoutSec ?? opts.workflow?.timeout_sec ?? 0;
   const meta: Record<string, any> = { ...(opts.meta ?? {}), timeout_sec: timeoutSec, template_len };
   if (opts.resumeSession) meta.resume_session = opts.resumeSession;
+  if (piSession) meta.pi_session = piSession;
   if (opts.stopWhenIdle && interactive) meta.stop_when_idle = true;
   if (args.includes(chatSettingsPath())) { meta.approvals = true; meta.live = true; }
   if (opts.idleStopSec !== undefined) meta.idle_stop_sec = opts.idleStopSec;
@@ -368,10 +391,13 @@ export async function startRun(opts: StartOptions): Promise<RunRow> {
     id = Number(ins.lastInsertRowid);
   }
   starting.add(id);
+  try { runHooks.started?.(id, meta); } catch (e) { console.error("[runs] started hook", e); }
   const logPath = join(logDir, `run-${id}.log`);
   if (interactive) { meta.interactive = true; if (!e2b) meta.tmux = tmuxSessionName(id); }
   if (e2b) meta.e2b = { tag: `lofiwave-${id}` };
   db.prepare("UPDATE runs SET log_path = ?, meta = ? WHERE id = ?").run(logPath, JSON.stringify(meta), id);
+  // A new pi session is this run's from the start: it gets a transcript, and a Resume button once the run ends.
+  if (piSession && !opts.resumeSession) recordSession(id, { session_id: piSession, agent: "pi", cwd, source: "started" });
 
   const sink = Bun.file(logPath).writer();
   const header = `# lofiwave run ${id} | ${new Date(t).toISOString()} | ${target ? `target=${target.name} (${target.kind}) | ` : ""}cwd=${cwd}\n# $ ${[command, ...args].map(shellQuote).join(" ")}\n` +
@@ -382,8 +408,8 @@ export async function startRun(opts: StartOptions): Promise<RunRow> {
 
   // lofiwave's own CLAUDE_CODE_OAUTH_TOKEN (from .env, kept for E2B sandboxes) is an inference-only token: a local
   // claude that inherits it skips the user's login and loses their claude.ai MCP connectors. Local runs only get it
-  // when the run type or run config sets it on purpose.
-  const stripEnv = ["CLAUDE_CODE_OAUTH_TOKEN"].filter((k) => !(k in launchEnv));
+  // when the run type or run config sets it on purpose, or CLAUDE_OAUTH_LOCAL says this machine has no login of its own.
+  const stripEnv = config.claudeOauthLocal ? [] : ["CLAUDE_CODE_OAUTH_TOKEN"].filter((k) => !(k in launchEnv));
   const inherited: Record<string, string | undefined> = { ...process.env };
   for (const k of stripEnv) delete inherited[k];
   const childEnv = {
@@ -445,7 +471,9 @@ export async function startRun(opts: StartOptions): Promise<RunRow> {
     // A tmux pane inherits the tmux server's environment (started by lofiwave, so it has the stripped vars too): unset them in the pane.
     const runCmd = stripEnv.length ? ["env", ...stripEnv.flatMap((k) => ["-u", k]), command, ...args] : [command, ...args];
     const paneCmd = secretFile ? ["sh", "-c", '. "$0"; rm -f "$0"; exec "$@"', secretFile, ...runCmd] : runCmd;
-    const created = await tmux("new-session", "-d", "-s", sess, "-c", cwd, "-x", "180", "-y", "48", ...envFlags, "--", ...paneCmd);
+    // tmux gives a new pane the PATH of the client that created it, whatever `-e PATH=` says: the run's PATH (which
+    // has the `lw` command on it) has to be this tmux client's own.
+    const created = await tmuxWith(["new-session", "-d", "-s", sess, "-c", cwd, "-x", "180", "-y", "48", ...envFlags, "--", ...paneCmd], undefined, { PATH: launchEnv.PATH ?? process.env.PATH ?? "" });
     if (created.code !== 0) { if (secretFile) rmSync(secretFile, { force: true }); await fail(`failed to start tmux session: ${created.err || created.out}`); }
     await tmux("set-option", "-t", tmuxTarget(sess), "remain-on-exit", "on");
     const pane = await tmux("display-message", "-p", "-t", tmuxTarget(sess), "#{pane_pid}");

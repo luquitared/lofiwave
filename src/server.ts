@@ -26,8 +26,12 @@ import { startJob, startQueue } from "./jobs";
 import { capacity } from "./capacity";
 import { systemUsage } from "./usage";
 import { planLimits } from "./limits";
+import { stats, sentMessages, noteSender } from "./stats";
+import { startTokenIndex, tokensFresh } from "./tokens";
 import { ccxStatus, ccxSearch, ccxSessions, ccxShow } from "./ccx";
 import { insidePath, listDir, writeFiles, decodeContent, extractInto, archiveOf, resultsOf, makeFolder } from "./files";
+import { registerLw } from "./lw";
+import { listSecrets, createSecret, updateSecret, deleteSecret, readValue, secretDetail, scanOut, importFound, suggestName, type Who } from "./secrets";
 
 const PUBLIC_DIR = join(config.root, "public");
 const startedAt = now();
@@ -260,6 +264,12 @@ route("GET", "/api/system/usage", async () => json(await systemUsage()));
 /** Claude and Codex plan limits: used %, resets and pace per window, as of each agent's last request here. */
 route("GET", "/api/system/limits", () => json(planLimits()));
 
+/** Advanced → Stats: messages and tokens per person (by who sent each prompt), per session and per folder. */
+route("GET", "/api/stats", async (_req, _p, url) => { await tokensFresh(); return json(stats(Number(url.searchParams.get("days") ?? 7))); });
+/** What one person sent (?person=, '' = no known sender), newest first, with each prompt's tokens. */
+route("GET", "/api/stats/messages", (_req, _p, url) =>
+  json(sentMessages(url.searchParams.get("person") ?? "", Number(url.searchParams.get("days") ?? 7), now(), Number(url.searchParams.get("limit") ?? 100) || 100)));
+
 // ---- people (with PASSWORD set: name + shared password login; with GOOGLE_*: Google sign-in; and who's online)
 route("GET", "/api/auth", () => json({ password_login: Boolean(config.password), google_login: googleLogin() }));
 
@@ -332,6 +342,45 @@ route("DELETE", "/api/keys/:id", (_r, p) => {
   keyAdmin();
   if (!db.prepare("DELETE FROM api_keys WHERE id = ?").run(Number(p.id)).changes) throw new ApiError(404, `API key ${p.id} not found`);
   return json({ ok: true });
+});
+
+// ---- keys: API keys and secrets for this machine's agents, encrypted at rest (src/secrets.ts; `lw keys` in a run).
+// Not /api/keys, which is the console's own API keys above.
+const keyUser = (req: Request): Who => {
+  const run = Number(req.headers.get("x-lofiwave-run") ?? "");
+  return { actor: actor.getStore() ?? "", run: Number.isInteger(run) && run > 0 ? run : null };
+};
+const tagList = (v: unknown) => (v === undefined ? undefined : strArray(v, "tags"));
+route("GET", "/api/secrets", (_r, _p, url) => json(listSecrets(url.searchParams.get("q") ?? "")));
+route("POST", "/api/secrets", async (req) => {
+  const b = await body(req);
+  return json(createSecret({
+    name: str(b.name, "name", { required: true }), value: str(b.value, "value", { required: true }), env: str(b.env, "env"), service: str(b.service, "service"),
+    note: str(b.note, "note"), fields: strMap(b.fields, "fields"), tags: tagList(b.tags),
+  }, keyUser(req)), 201);
+});
+route("GET", "/api/secrets/scan", async (_r, _p, url) => json(await scanOut(url.searchParams.get("refresh") === "1")));
+route("POST", "/api/secrets/import", async (req) => {
+  const b = await body(req);
+  const file = str(b.file, "file", { required: true }), v = str(b.var, "var", { required: true });
+  return json(await importFound({ file, var: v, name: str(b.name, "name") || undefined, env: str(b.env, "env") || undefined, service: str(b.service, "service"), note: str(b.note, "note"), fields: strMap(b.fields, "fields"), tags: tagList(b.tags) }, keyUser(req)), 201);
+});
+route("GET", "/api/secrets/suggest-name", (_r, _p, url) => json({ name: suggestName(url.searchParams.get("env") ?? "key", url.searchParams.get("file") ?? "") }));
+route("GET", "/api/secrets/:name", (_r, p) => json(secretDetail(p.name)));
+route("PUT", "/api/secrets/:name", async (req, p) => {
+  const b = await body(req);
+  return json(updateSecret(p.name, {
+    rename: b.name === undefined ? undefined : str(b.name, "name"), value: b.value === undefined ? undefined : str(b.value, "value"),
+    env: b.env === undefined ? undefined : str(b.env, "env"), service: b.service === undefined ? undefined : str(b.service, "service"),
+    note: b.note === undefined ? undefined : str(b.note, "note"), fields: b.fields === undefined ? undefined : (b.fields as Record<string, string>),
+    tags: tagList(b.tags), replace_fields: b.replace_fields === true,
+  }, keyUser(req)));
+});
+route("DELETE", "/api/secrets/:name", (_r, p) => { deleteSecret(p.name); return json({ ok: true }); });
+// The value itself: POST, so it is never cached or prefetched, and logged with what it is for.
+route("POST", "/api/secrets/:name/value", async (req, p) => {
+  const b = await body(req).catch(() => ({}));
+  return json(readValue(p.name, typeof b.use === "string" ? b.use : "reveal", keyUser(req), typeof b.detail === "string" ? b.detail : ""));
 });
 
 // ---- paths (recent working directories + filesystem completion, for the UI's path picker)
@@ -843,6 +892,7 @@ route("GET", "/api/runs/:id/screen", async (_r, p, url) => json(await screenOf(g
 route("GET", "/api/runs/:id/history", async (_r, p, url) => json(await historyOf(getRun(Number(p.id)), int(url.searchParams.get("lines"), "lines", 5000) || 5000)));
 route("POST", "/api/runs/:id/keys", async (req, p) => {
   const b = await body(req);
+  if (bool(b.enter, true) || strArray(b.keys, "keys").some((k) => /^(Enter|C-m)$/i.test(k))) noteSender(Number(p.id), actor.getStore(), "api");
   const r = await sendKeys(getRun(Number(p.id)), str(b.text, "text"), strArray(b.keys, "keys"), bool(b.enter, true));
   return json({ ok: true, ...r });
 });
@@ -853,6 +903,7 @@ route("POST", "/api/runs/:id/message", async (req, p) => {
   const run = getRun(Number(p.id));
   const text = str(b.text, "text", { required: true });
   const mark = transcriptMark(run);
+  noteSender(run.id, actor.getStore(), "api");
   const r = await sendMessage(run, text);
   const message_id = recordMessage(run, text, r, mark, actor.getStore() ?? "");
   return json({ message_id, ...r, run: runOut(getRun(run.id), { withOutput: false }) });
@@ -977,6 +1028,7 @@ route("POST", "/api/runs/:id/chat/send", async (req, p) => {
   const draft = str(b.draft, "draft");
   if (draft && draft !== "replace" && draft !== "append") throw new ApiError(400, `draft must be "replace" or "append"`);
   const text = str(b.text, "text");
+  noteSender(Number(p.id), actor.getStore(), "chat");
   const r = await chatSend(Number(p.id), { text, files: strArray(b.files, "files"), draft: draft as "replace" | "append" | "" });
   return json({ ...r, opens_menu: opensMenu(text) });
 });
@@ -1142,8 +1194,11 @@ async function dispatch(req: Request, url: URL): Promise<Response> {
   }
 }
 
+// After every other hook (src/autopilot's), so lofiwave's own lines and `lw` on the PATH compose with them.
+registerLw();
 startScheduler();
 startQueue();
+startTokenIndex();
 console.log(`lofiwave listening on http://${server.hostname}:${server.port}  (data: ${config.dataDir})`);
 if (config.tokenGenerated) {
   // First start: hand the person a link that logs the browser in (the UI keeps the token and drops it from the URL).
