@@ -31,6 +31,7 @@ import { startTokenIndex, tokensFresh } from "./tokens";
 import { ccxStatus, ccxSearch, ccxSessions, ccxShow } from "./ccx";
 import { insidePath, listDir, writeFiles, decodeContent, extractInto, archiveOf, resultsOf, makeFolder } from "./files";
 import { registerLw } from "./lw";
+import { getSettings, updateSettings, SettingsError, TERMINAL_MODES } from "./settings";
 import { listSecrets, createSecret, updateSecret, deleteSecret, readValue, secretDetail, scanOut, importFound, suggestName, type Who } from "./secrets";
 
 const PUBLIC_DIR = join(config.root, "public");
@@ -263,6 +264,15 @@ route("GET", "/api/system/usage", async () => json(await systemUsage()));
 
 /** Claude and Codex plan limits: used %, resets and pace per window, as of each agent's last request here. */
 route("GET", "/api/system/limits", () => json(planLimits()));
+
+// Machine-wide settings from Settings in the UI (src/settings.ts). `open_terminal`: $OPEN_TERMINAL, which picks the app.
+const settingsOut = () => ({ ...getSettings(), terminal_modes: TERMINAL_MODES, open_terminal: (process.env.OPEN_TERMINAL ?? process.env.AGENT_CONSOLE_TERMINAL ?? "auto").trim().toLowerCase() || "auto", platform: process.platform });
+route("GET", "/api/settings", () => json(settingsOut()));
+route("PUT", "/api/settings", async (req) => {
+  const b = await body(req);
+  try { updateSettings(b && typeof b === "object" ? b : {}); } catch (e) { if (e instanceof SettingsError) throw new ApiError(400, e.message); throw e; }
+  return json(settingsOut());
+});
 
 /** Advanced → Stats: messages and tokens per person (by who sent each prompt), per session and per folder. */
 route("GET", "/api/stats", async (_req, _p, url) => { await tokensFresh(); return json(stats(Number(url.searchParams.get("days") ?? 7))); });
