@@ -40,6 +40,7 @@ export function agentContext(): string {
     "## lofiwave",
     "You are running inside lofiwave, a console on this machine that starts and watches coding agents. People may be following this session in a browser and typing to it.",
     "- `lw` is lofiwave's command line, on your PATH (`lw help`). `lw keys` holds this machine's API keys and secrets, encrypted: `lw keys search <words>` finds one, `lw keys env <name> -- <command>` runs a command with it, `lw keys write <name> --to .env` puts it in a file, `lw keys add` / `lw keys import` saves a new one with a note. Use these instead of printing a key (what you print stays in this conversation's transcript), and look there before asking someone for a key.",
+    "- Waiting on something (a build, CI, a deploy, a job, a file, another run)? Don't end your turn saying you'll report back (nothing wakes you) and don't loop on sleep: `lw watch --until-cmd \"<check>\" --then \"<what to do next>\"` (or `--until-exit <pid>`, `--until-file`, `--until-run <run>`, `--in 20m`; add `--progress \"<cmd>\" --stall 30m` to hear about stalls), then end your turn. lofiwave messages you when it happens, and people see it in the Watching tab.",
   ];
   if (ccxInstalled()) lines.push("- `ccx` searches the Claude Code conversations on this machine: `ccx search \"<words>\"`, then `ccx show <session> --line <n>`. Use it to find how something was done or decided before.");
   return lines.join("\n");

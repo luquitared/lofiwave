@@ -121,7 +121,7 @@ function finish(f: Fate, at: number | null) {
 }
 
 /** Complete JSONL lines from `offset` on (a line still being written is left for next time). */
-function readLines(path: string, offset: number): { entries: any[]; offset: number } {
+export function readLines(path: string, offset: number): { entries: any[]; offset: number } {
   const size = statSync(path).size;
   if (size <= offset) return { entries: [], offset: Math.min(offset, size) };
   const fd = openSync(path, "r");

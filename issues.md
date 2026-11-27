@@ -5,6 +5,21 @@ Open work, newest first within each status. One heading per issue; close it by m
 
 ## Open
 
+### #12 Watching: what's left
+*Opened 2026-11-27 · after the Watching tab and `lw watch` (docs/watching.md)*
+
+- [ ] Push notifications when a session starts needing someone (the nav badge only shows while the page is open).
+      Web Push needs a service worker and VAPID keys; a webhook or ntfy topic per console would be simpler.
+- [ ] Shells started by subagents: their transcripts are separate files (`<session>/subagents/*.jsonl`), so a
+      subagent "waiting on 1 shell" shows as nothing open. Read those too.
+- [ ] "Watch this shell": a button on a background shell in Watching that makes a watch from its pid and output file
+      (needs the shell's pid: the claude process's children, matched by command).
+- [ ] Watches on runs on a target or in a container: the checks run on this machine, so `until_exit` and file
+      conditions don't see inside them.
+- [ ] Tune from `/api/watches/stats` after a few weeks: the 30m default stall, the 2h quiet-shell flag, and the
+      promise regex (it flags 55 of the 117 messages that preceded a person asking "status?").
+- [ ] Codex sessions: no transcript parsing yet, so Watching only shows their activity and watches.
+
 ### #11 Keys: what's left
 *Opened 2026-11-24 · after the Keys tab and `lw keys` (#10 is Autopilot's, in its PR)*
 

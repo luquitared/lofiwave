@@ -29,6 +29,7 @@
   <a class="brand" href="#console" aria-label="lofiwave home"><img class="brand-mark" src="/logo.png" alt="" width="30" height="30"><span>lofiwave</span></a>
   <nav aria-label="Main navigation">
     <button data-tab="console" class="active">Sessions</button>
+    <button data-tab="watching">Watching <span id="watching-count" class="nav-count" hidden></span></button>
     <button data-tab="workflows">Workflows</button>
     <button data-tab="keys">Keys</button>
     <button data-tab="connect">Connect</button>
@@ -95,6 +96,18 @@
       <thead><tr><th>Workflow</th><th>Schedule</th><th>Last run</th><th>On</th><th></th></tr></thead>
       <tbody></tbody>
     </table>
+  </section>
+
+  <section id="tab-watching" class="tab">
+    <div class="toolbar">
+      <span id="watching-summary" class="muted"></span>
+    </div>
+    <div id="watching-runs"></div>
+    <p class="muted keys-help">What each session is waiting on: its background shells, agents and monitors (read from its transcript), a scheduled wakeup, and lofiwave's own watches. Agents set a watch with <code>lw watch --until-cmd "&lt;check&gt;" --then "&lt;next step&gt;"</code> (<code>lw watch help</code>); lofiwave checks it and messages the session when it's done, when its progress stalls, or when it expires.</p>
+    <div class="card" id="watch-stats-card">
+      <div class="card-head"><h2>Stall detection, last 30 days</h2></div>
+      <div id="watch-stats" class="muted">–</div>
+    </div>
   </section>
 
   <section id="tab-keys" class="tab">

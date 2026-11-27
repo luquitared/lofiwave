@@ -40,9 +40,9 @@ export const KEYS_HELP = `Keys (API keys and secrets on this machine, encrypted 
   lw keys where <name>             the files that have this key's value
 `;
 
-function die(msg: string, code = 1): never { console.error(`lw: ${msg}`); process.exit(code); }
+export function die(msg: string, code = 1): never { console.error(`lw: ${msg}`); process.exit(code); }
 
-async function call(method: string, path: string, body?: unknown): Promise<any> {
+export async function call(method: string, path: string, body?: unknown): Promise<any> {
   let res: Response;
   try {
     res = await fetch(`${URL_}/api${path}`, {
@@ -59,7 +59,7 @@ async function call(method: string, path: string, body?: unknown): Promise<any> 
 }
 
 /** Positionals and --flags; `multi` flags may repeat, `bools` take no value. Everything after `--` is kept apart. */
-function parse(argv: string[], bools: string[] = [], multi: string[] = []) {
+export function parse(argv: string[], bools: string[] = [], multi: string[] = []) {
   const pos: string[] = [], flags: Record<string, string> = {}, lists: Record<string, string[]> = {};
   let after: string[] | null = null;
   for (let i = 0; i < argv.length; i++) {

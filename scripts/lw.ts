@@ -4,10 +4,12 @@
  * that started the run with the run's own environment; in your own terminal, link the shim onto your PATH.
  */
 import { keysCommand, KEYS_HELP } from "./lw-keys";
+import { watchCommand, WATCH_HELP } from "./lw-watch";
 
 const HELP = `lw: lofiwave from the command line
 
-${KEYS_HELP}`;
+${KEYS_HELP}
+${WATCH_HELP}`;
 
 const [cmd, ...rest] = process.argv.slice(2);
 switch (cmd) {
@@ -16,6 +18,9 @@ switch (cmd) {
     break;
   case "keys": case "key": case "secrets":
     await keysCommand(rest);
+    break;
+  case "watch": case "watches":
+    await watchCommand(rest);
     break;
   default:
     console.error(`lw: unknown command "${cmd}" (lw help)`);

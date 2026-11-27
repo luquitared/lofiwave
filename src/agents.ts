@@ -25,7 +25,7 @@ const CODEX_SESSIONS = join(CODEX_HOME, "sessions");
 
 export type ClaudeRegistryEntry = {
   pid: number; sessionId: string; cwd: string; name: string; nameSource?: string; kind?: string;
-  /** idle | busy | waiting (on a permission prompt or a question; `waitingFor` says which), since `statusUpdatedAt`. */
+  /** idle | busy | waiting (on a permission prompt or a question; `waitingFor` says which) | shell (idle, background shells still running), since `statusUpdatedAt`. */
   status?: string; statusUpdatedAt?: number; waitingFor?: string; bridgeSessionId?: string; tmux?: string; startedAt?: number;
 };
 

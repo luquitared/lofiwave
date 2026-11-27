@@ -355,9 +355,23 @@ Restarting is done through the run: `POST /api/runs/:id/restart`.
 
 Run record fields: `id, workflow_id, workflow_name, type_name, type (the same as type_name), cwd, command, args, prompt, env, trigger (manual|schedule|restart), status, pid, started_at, ended_at, exit_code, log_path, output, error, pinned_at, live, duration_ms, activity, activity_since, waiting_for?, group, parent_run, out_dir, meta {timeout_sec, orphan, interactive, tmux, stop_when_idle, idle_stop_sec, trust, group, parent_run, queued_at, ...}`. `GET /api/runs/:id` also includes `sessions` (below).
 
-`activity` is what the agent is doing now: `working` (on a turn), `idle` (its turn is over), `waiting_input` (a permission prompt or question, or the folder trust dialog; `waiting_for` says which when known) or `done` (the run ended); `activity_since` is when that began. For claude it comes from Claude Code's own session registry; for other TUIs from the screen (`esc to interrupt` means working); a headless run is `working` until it ends.
+`activity` is what the agent is doing now: `working` (on a turn), `idle` (its turn is over; `background_shells: true` when background shells it started are still running), `waiting_input` (a permission prompt or question, or the folder trust dialog; `waiting_for` says which when known) or `done` (the run ended); `activity_since` is when that began. For claude it comes from Claude Code's own session registry; for other TUIs from the screen (`esc to interrupt` means working); a headless run is `working` until it ends.
 
 List shapes: `GET /api/runs` is paginated, so its list is under `runs`; the other list endpoints (`/processes`, `/workflows`, `/process-types`, `/runs/:id/sessions`) return a bare array.
+
+### Watches (lofiwave waits on something and tells the run)
+
+A watch belongs to an interactive run: a condition, optionally a progress reading with stall detection, and a note. lofiwave checks it every `every_sec`; when the condition is met, progress hasn't changed for `stall_sec`, or it expires, it types `[lofiwave watch #N "label"] …` plus the note into the session, once the agent is idle (it holds while the agent waits on a person). Agents use `lw watch` (`lw watch help`). Design and the findings behind it: `docs/watching.md`.
+
+| | |
+|---|---|
+| `POST /api/watches` | `{run_id (default: the X-Lofiwave-Run header), label?, message?` (the note), one condition: `until_exit` (pid), `until_cmd` (exits 0; its output goes in the message), `until_file` (appears, or changes if it's there), `at` (Unix ms or ISO) / `in_sec`, `until_run` (`"21"` or `"21:idle"`: an idle that began after the watch was made; `"21:done"`: it ended); and/or `progress_cmd` (last line of output) or `progress_file` (size and time), `stall_sec` (default 1800 with a progress reading, 0 = off), `every_sec` (default 60, min 10), `for_sec` (expiry, default 86400, max 7 days)}` → 201, the watch |
+| `GET /api/watches?run=&all=1` | active watches and those that ended in the last 48h (`all`: every one): `{id, run_id, label, until, status (active\|delivering\|done\|cancelled), outcome (met\|expired\|fired\|run_ended\|cancelled), progress, progress_at, quiet_sec, stalled, stalls, max_quiet_sec, checks, check_error, pending, delivered, last_message_id, …}` |
+| `GET /api/watches/:id` | one watch with `events` (its log: `created, progress, stall, stall_cleared, met, expired, fired, delivered, deliver_error, run_ended, cancelled, check_error`, each with `at` and `detail`) |
+| `DELETE /api/watches/:id` | stop it (the agent isn't told) |
+| `POST /api/watches/:id/fire` | deliver its message now |
+| `GET /api/watches/stats?days=30` | is stall detection firing too much or too little: `{watches, outcomes, stalls, stalls_cleared, stalls_cleared_within_stall_sec, median_stalled_for_sec, stalls_never_cleared, near_misses, median_quiet_over_stall, deliveries, median_delivery_wait_sec, reading}` |
+| `GET /api/watching` | what each live session is waiting on: `{attention, runs: [{run_id, name, activity, background_shells, tasks: [{id, kind (shell\|agent\|monitor), description, started_at, output_file, output_bytes, output_changed_at, ended_at, end_status}], wakeup: {wake_at, reason, missed}, last_said, watches, flags: [{kind, text, since}]}]}`. Flag kinds: `needs_you, asked, api_error, unbacked_promise, missed_wakeup, stale_shell, lost_shells` (see `docs/watching.md`). Tasks and wakeups are read from claude transcripts. |
 
 ### Swarms: runs as jobs (groups, files, results, capacity)
 
