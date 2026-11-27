@@ -1447,7 +1447,7 @@ const setPinned = (r, pinned) => guard(async () => {
 /** A rail card with its pin toggle beside it (a button can't hold another button). */
 function pinnable(r, card) {
   const on = Boolean(r.pinned_at);
-  return h("div", { class: `rail-slot ${on ? "pinned" : ""}` }, card,
+  return h("div", { class: `rail-slot ${on ? "pinned" : ""}`, "data-key": `run-${r.id}` }, card,
     h("button", { class: "rail-pin", title: on ? "Unpin" : "Pin to the top", "aria-label": `${on ? "Unpin" : "Pin"} ${runLabel(r)}`, "aria-pressed": String(on), onclick: () => setPinned(r, !on) }));
 }
 /** With anything pinned, the list reads "Pinned", then the rest under `rest`; with nothing pinned, no headings. */
@@ -1463,8 +1463,8 @@ function renderRail() {
   const sig = JSON.stringify([consoleView, live.map((r) => [r.id, runLabel(r), r.pinned_at]), headless.map((r) => [r.id, runLabel(r)]), adoptable.map((p) => [p.pid, p.session?.session_id || "", p.session?.web_url || "", p.live_run]), ended.map((r) => [r.id, runLabel(r), r.pinned_at]), endedRun?.id]);
   if (sig === railSig) return patchRail();
   railSig = sig;
-  if (consoleView === "ended") return $("#session-rail").replaceChildren(railBar(), h("div", { class: "rail-strip" }, ...endedRail()));
-  $("#session-rail").replaceChildren(railBar(), h("div", { class: "rail-strip" },
+  if (consoleView === "ended") return fillRail(endedRail());
+  fillRail([
     ...pinGroups(live, "Live", (r) => pinnable(r, h("button", { class: `rail-item tile ${consoleRun?.id === r.id ? "active" : ""} ${actOf(r) === "waiting_input" ? "needs" : ""}`, "data-run": r.id, "aria-current": consoleRun?.id === r.id ? "true" : "false", onclick: () => selectConsoleRun(r) },
       h("div", { class: `tile-act ${actOf(r)}` }, h("span", { class: `dot ${actOf(r)}` }), h("span", { class: "tile-act-text" }, tileAct(r))),
       h("div", { class: "rail-title" }, runLabel(r)),
@@ -1472,14 +1472,14 @@ function renderRail() {
       h("div", { class: "rail-sub" }, r.workflow_name ? h("span", { class: "wf-tag" }, `⌁ ${r.workflow_name}`) : "", groupTag(r), `${r.type_name} · ${shortCwd(r.cwd)}`),
       h("div", { class: "rail-sub dim rail-up" }, railUp(r)),
     ))),
-    h("button", { class: "tile-new", onclick: () => { drawerPicked(); openStartDialog({ kind: "agent" }); } }, h("span", { "aria-hidden": "true" }, "+"), "Start a session"),
+    h("button", { class: "tile-new", "data-key": "new", onclick: () => { drawerPicked(); openStartDialog({ kind: "agent" }); } }, h("span", { "aria-hidden": "true" }, "+"), "Start a session"),
     headless.length ? h("div", { class: "rail-head" }, h("span", {}, `${headless.length} running · log only`)) : "",
-    ...headless.map((r) => h("a", { class: "rail-item flat", href: `#runs/${r.id}`, onclick: (e) => { e.preventDefault(); openRun(r.id); } },
+    ...headless.map((r) => h("a", { class: "rail-item flat", "data-key": `run-${r.id}`, href: `#runs/${r.id}`, onclick: (e) => { e.preventDefault(); openRun(r.id); } },
       h("div", { class: "rail-title" }, runLabel(r)),
       h("div", { class: "rail-sub" }, `${r.type_name} · run #${r.id} · log only`),
     )),
     adoptable.length ? h("div", { class: "rail-head" }, h("span", { title: "on this machine, but the console did not start them, so there is no pane to type into" }, `${adoptable.length} started outside the console`)) : "",
-    ...adoptable.map((p) => h("div", { class: "rail-item flat" },
+    ...adoptable.map((p) => h("div", { class: "rail-item flat", "data-key": `pid-${p.pid}` },
       h("div", { class: "rail-title" }, h("span", { class: `dot ${p.session?.status || ""}`, title: p.session?.status || "" }), p.session?.title || p.session?.name || `${p.type} · pid ${p.pid}`),
       h("div", { class: "rail-sub" }, `${p.type} · ${shortCwd(p.cwd) || "?"}`),
       h("div", { class: "rail-sub dim" }, `pid ${p.pid} · ${originOf(p)}`, p.session?.web_url ? h("a", { href: p.session.web_url, target: "_blank", style: "margin-left:8px" }, "web ↗") : ""),
@@ -1494,7 +1494,30 @@ function renderRail() {
             remoteControlBtn(p.pid, p.session, Boolean(p.session.tmux)))
         : h("div", { class: "rail-sub dim" }, "no session id — can't take over"),
     )),
-  ));
+  ]);
+}
+
+/**
+ * Put new cards in the rail without moving what you're looking at. The scrolling strip is kept (a fresh one starts
+ * at the top), and when you've scrolled down, the first card in view stays where it was even if a session opened or
+ * closed above it. Cards that weren't there before fade in. Switching Live / Ended starts the list at the top.
+ */
+function fillRail(items) {
+  const rail = $("#session-rail"), old = $(".rail-strip", rail);
+  if (!old || old.dataset.view !== consoleView) {
+    return rail.replaceChildren(railBar(), h("div", { class: "rail-strip", "data-view": consoleView }, ...items));
+  }
+  const keyed = () => [...old.children].filter((el) => el.dataset.key);
+  const seen = new Set(keyed().map((el) => el.dataset.key));
+  const top = old.getBoundingClientRect().top;
+  const anchor = old.scrollTop > 0 ? keyed().find((el) => el.getBoundingClientRect().bottom > top) : null;
+  const off = anchor ? anchor.getBoundingClientRect().top - top : 0, scroll = old.scrollTop;
+  rail.firstElementChild?.replaceWith(railBar());
+  old.replaceChildren(...items.flat().filter((c) => c != null && c !== false && c !== ""));
+  old.scrollTop = scroll;
+  const again = anchor && keyed().find((el) => el.dataset.key === anchor.dataset.key);
+  if (again) old.scrollTop += again.getBoundingClientRect().top - top - off;
+  for (const el of keyed()) if (!seen.has(el.dataset.key)) el.classList.add("rail-enter");
 }
 
 function endedRail() {
