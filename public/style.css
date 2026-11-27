@@ -902,3 +902,25 @@ tr.stats-msgs-row, tr.stats-msgs-row:hover { background:var(--sunken); }
 .found-card { max-width:none; }
 textarea.masked:not(:focus) { -webkit-text-security:disc; }
 @media (max-width: 720px) { .secret-dl { grid-template-columns:1fr; gap:2px; } .secret-dl dd { margin-bottom:8px; } }
+
+/* Watching (what agents are waiting on) */
+.nav-count { display: inline-block; min-width: 18px; padding: 0 5px; margin-left: 3px; border-radius: 9px; background: var(--warn); color: var(--bg); font-size: 11.5px; font-weight: 700; line-height: 18px; text-align: center; }
+.watch-run { margin-bottom: 12px; }
+.watch-run.attention { border-color: var(--warn); }
+.watch-run h2 { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 15px; margin: 0; }
+.watch-run h2 .muted { font-weight: 400; font-size: 13px; }
+.watch-flag { margin: 8px 0; padding: 7px 10px; border-radius: 6px; background: var(--warn-bg); color: var(--warn); display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.watch-flag.api_error, .watch-flag.lost_shells { background: var(--bad-bg); color: var(--bad); }
+.watch-flag b { text-transform: uppercase; font-size: 11.5px; letter-spacing: .03em; }
+.watch-flag .grow { flex: 1 1 200px; }
+.watch-list { margin: 8px 0 0; padding: 0; list-style: none; font-size: 13.5px; }
+.watch-list li { padding: 5px 0; border-top: 1px solid var(--line); display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+.watch-list li .grow { flex: 1 1 260px; min-width: 0; overflow-wrap: anywhere; }
+.watch-list .kind { font-size: 11.5px; text-transform: uppercase; letter-spacing: .03em; color: var(--muted); min-width: 58px; }
+.watch-list .stalled { color: var(--bad); font-weight: 600; }
+.watch-said { margin: 8px 0 0; font-size: 13px; color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 4.5em; overflow: hidden; }
+.watch-quiet { font-size: 13.5px; }
+.watch-quiet li { padding: 4px 0; }
+#watch-stats dl { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 14px; margin: 0; }
+#watch-stats dt { color: var(--text); }
+#watch-stats dd { margin: 0; }

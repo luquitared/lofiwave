@@ -274,7 +274,7 @@ const typeByName = (n) => types.find((t) => t.name === n);
 // ---------------------------------------------------------------- tabs
 // Main tabs: Sessions, Workflows, Connect, and Advanced, which holds the rest (processes, apps, runs, types, system, usage, stats).
 const ADVANCED = ["agents", "apps", "runs", "types", "system", "usage", "stats"];
-const TITLES = { console: "Sessions", workflows: "Workflows", keys: "Keys", connect: "Connect", settings: "Settings", agents: "Advanced", apps: "Advanced", runs: "Advanced", types: "Advanced", system: "Advanced", usage: "Advanced", stats: "Advanced" };
+const TITLES = { console: "Sessions", watching: "Watching", workflows: "Workflows", keys: "Keys", connect: "Connect", settings: "Settings", agents: "Advanced", apps: "Advanced", runs: "Advanced", types: "Advanced", system: "Advanced", usage: "Advanced", stats: "Advanced" };
 $$("nav button").forEach((b) => b.addEventListener("click", () => switchTab(b.dataset.tab)));
 $$("#subnav button").forEach((b) => b.addEventListener("click", () => switchTab(b.dataset.sub)));
 function switchTab(name, push = true) {
@@ -998,6 +998,99 @@ cf.addEventListener("submit", async (e) => {
   toast("saved", true); cdlg.close(); loadConfigs();
 });
 
+// ---------------------------------------------------------------- watching (what agents wait on; src/watches.ts)
+let watchingData = null, watchStatsAt = 0;
+const FLAG_LABEL = { needs_you: "needs you", asked: "asked you", api_error: "stopped", unbacked_promise: "nothing will wake it", missed_wakeup: "missed wakeup", stale_shell: "quiet shell", lost_shells: "lost shells" };
+/** What a nudge says, for the flags an agent can fix itself. */
+const NUDGE = {
+  unbacked_promise: "[lofiwave] You ended your turn saying you'd report back, but nothing is set to wake you. Check on it now. If it isn't done, set a watch (`lw watch --until-cmd \"<check>\" --then \"<next step>\"`) before ending your turn.",
+  missed_wakeup: "[lofiwave] Your scheduled wakeup didn't come. Check on what you were waiting for, and use `lw watch` to wait on it.",
+  stale_shell: "[lofiwave] One of your background shells has written nothing for a long time. Check whether it's stuck (read its output file); stop it if so, and use `lw watch` if you're still waiting on something.",
+  lost_shells: "[lofiwave] Some background shells you started never reported back, and Claude no longer runs any. Check what became of that work, and use `lw watch` if you're still waiting on something.",
+};
+const loadWatching = guard(async () => {
+  watchingData = await get("/watching");
+  const n = watchingData.attention;
+  const c = $("#watching-count");
+  c.textContent = n ? String(n) : ""; c.hidden = !n;
+  c.title = n ? `${n} session${n === 1 ? "" : "s"} need${n === 1 ? "s" : ""} someone` : "";
+  if (activeTab === "watching") renderWatching();
+});
+const nudge = guard(async (runId, kind) => {
+  await post(`/runs/${runId}/message`, { text: NUDGE[kind] });
+  toast(`nudged run ${runId}`, true);
+  loadWatching();
+});
+function watchItem(w) {
+  const state = w.status === "active" ? (w.stalled ? h("span", { class: "stalled" }, "stalled") : "watching") : w.status === "delivering" ? "telling it" : w.outcome || w.status;
+  const prog = w.progress_kind ? ` · progress ${w.progress ? `"${w.progress}"` : "(no reading yet)"}${w.progress_at ? `, changed ${fmtRel(w.progress_at)}` : ""}` : "";
+  return h("li", {},
+    h("span", { class: "kind" }, `watch #${w.id}`),
+    h("span", { class: "grow", title: [w.message, w.check_error && `last check: ${w.check_error}`].filter(Boolean).join("\n") },
+      w.label ? h("b", {}, `${w.label} `) : "", `until ${w.until}${prog} · `, state,
+      w.check_error ? h("span", { class: "muted" }, " · last check failed") : "",
+      h("span", { class: "muted" }, ` · ${w.checks} checks, every ${fmtDur(w.every_sec)}${w.stall_sec ? `, stall after ${fmtDur(w.stall_sec)}` : ""}`)),
+    w.status === "active" ? h("button", { class: "small", title: "Deliver its message now", onclick: guard(async () => { await post(`/watches/${w.id}/fire`); toast(`watch #${w.id} fired`, true); loadWatching(); }) }, "Fire now") : "",
+    w.status === "active" || w.status === "delivering" ? h("button", { class: "small danger", onclick: () => confirmDo(`Stop watch #${w.id}? The agent won't be told.`, async () => { await del(`/watches/${w.id}`); loadWatching(); }) }, "Stop") : "",
+  );
+}
+function taskItem(t) {
+  const out = t.output_missing ? " · output file gone" : t.output_changed_at ? ` · output ${fmtBytes(t.output_bytes)}, written ${fmtRel(t.output_changed_at)}` : "";
+  const end = t.ended_at ? ` · ${t.end_status} ${fmtRel(t.ended_at)}` : t.expires_at ? ` · expires ${fmtRel(t.expires_at)}` : "";
+  return h("li", { class: t.ended_at ? "muted" : "" },
+    h("span", { class: "kind" }, t.kind === "shell" ? "shell" : t.kind === "agent" ? "agent" : "monitor"),
+    h("span", { class: "grow", title: t.output_file || t.id }, t.description || t.id, h("span", { class: "muted" }, ` · started ${fmtRel(t.started_at)}${out}${end}`)));
+}
+function renderWatching() {
+  const d = watchingData;
+  if (!d) return;
+  const busy = (r) => r.flags.length || r.watches.length || r.tasks.some((t) => !t.ended_at) || r.wakeup;
+  const shown = d.runs.filter(busy).sort((a, b) => (b.flags.length > 0) - (a.flags.length > 0) || b.flags.length - a.flags.length || a.run_id - b.run_id);
+  const quiet = d.runs.filter((r) => !busy(r));
+  const watches = d.runs.reduce((n, r) => n + r.watches.length, 0), open = d.runs.reduce((n, r) => n + r.tasks.filter((t) => !t.ended_at).length, 0);
+  $("#watching-summary").textContent = d.runs.length
+    ? `${d.runs.length} live session${d.runs.length === 1 ? "" : "s"} · ${d.attention} need${d.attention === 1 ? "s" : ""} someone · ${watches} watch${watches === 1 ? "" : "es"} · ${open} background task${open === 1 ? "" : "s"}`
+    : "No live sessions.";
+  const card = (r) => h("div", { class: `card watch-run${r.flags.length ? " attention" : ""}` },
+    h("div", { class: "card-head" },
+      h("h2", {}, h("span", { class: `dot ${r.activity}` }), r.name,
+        h("span", { class: "muted" }, `run ${r.run_id} · ${ACT_LABEL[r.activity] || r.activity}${r.background_shells ? " · shells running" : ""} · ${fmtDur((Date.now() - r.activity_since) / 1000)}`)),
+      h("button", { class: "small", onclick: () => openSessionLink(r.run_id) }, "Open")),
+    ...r.flags.map((f) => h("div", { class: `watch-flag ${f.kind}` },
+      h("b", {}, FLAG_LABEL[f.kind] || f.kind), h("span", { class: "grow" }, f.kind === "missed_wakeup" || f.kind === "stale_shell" ? f.text : `${f.text} · ${fmtRel(f.since)}`),
+      NUDGE[f.kind] ? h("button", { class: "small", title: NUDGE[f.kind], onclick: () => nudge(r.run_id, f.kind) }, "Nudge") : "")),
+    r.watches.length || r.tasks.length || r.wakeup ? h("ul", { class: "watch-list" },
+      ...r.watches.map(watchItem),
+      ...r.tasks.map(taskItem),
+      r.wakeup ? h("li", {}, h("span", { class: "kind" }, "wakeup"), h("span", { class: "grow" }, `${r.wakeup.missed ? "was due" : "due"} ${fmtRel(r.wakeup.wake_at)}${r.wakeup.reason ? `: ${r.wakeup.reason}` : ""}`)) : "") : "",
+    r.last_said ? h("div", { class: "watch-said", title: r.last_said.text }, `Last said ${fmtRel(r.last_said.at)}: ${r.last_said.text}`) : "",
+  );
+  $("#watching-runs").replaceChildren(
+    ...shown.map(card),
+    quiet.length ? h("div", { class: "card" }, h("div", { class: "card-head" }, h("h2", {}, "Nothing to wait on")),
+      h("ul", { class: "watch-list watch-quiet" }, ...quiet.map((r) => h("li", {}, h("span", { class: `dot ${r.activity}` }),
+        h("span", { class: "grow" }, h("a", { class: "link", onclick: () => openSessionLink(r.run_id) }, r.name), h("span", { class: "muted" }, ` · run ${r.run_id} · ${ACT_LABEL[r.activity] || r.activity} ${fmtDur((Date.now() - r.activity_since) / 1000)}`)))))) : "",
+  );
+}
+const loadWatchStats = guard(async () => {
+  watchStatsAt = Date.now();
+  const s = await get("/watches/stats?days=30");
+  const row = (k, v, hint = "") => [h("dt", {}, k), h("dd", { title: hint }, v == null ? "–" : String(v))];
+  $("#watch-stats").replaceChildren(
+    s.watches ? h("dl", {},
+      ...row("Watches", `${s.watches}${Object.keys(s.outcomes).length ? ` (${Object.entries(s.outcomes).map(([k, v]) => `${v} ${k}`).join(", ")})` : ""}`),
+      ...row("With stall detection", s.with_stall_detection),
+      ...row("Stalls reported", s.stalls),
+      ...row("…progress moved again within one threshold", s.stalls_cleared_within_stall_sec, "a slow patch, not a stall: many of these mean thresholds are too tight"),
+      ...row("…never moved again", s.stalls_never_cleared, "the job really was stuck (or the watch ended first)"),
+      ...row("Median time until progress moved again", s.median_stalled_for_sec == null ? null : fmtDur(s.median_stalled_for_sec)),
+      ...row("Near misses", s.near_misses, "watches that ended without a stall but went quiet for 75%+ of the threshold"),
+      ...row("Median wait to deliver", s.median_delivery_wait_sec == null ? null : fmtDur(s.median_delivery_wait_sec), "from firing to typing it into the session (it waits for the agent to be free)"),
+      ...(s.reading.length ? row("Reading", s.reading.join(" ")) : []),
+    ) : "No watches yet.",
+  );
+});
+
 // ---------------------------------------------------------------- keys (API keys and secrets for agents, src/secrets.ts)
 // The list never holds values: a value is fetched (and logged) only when someone reveals or copies it.
 let secrets = [], openSecret = null, secretTimer = null, secretsAt = 0;
@@ -1583,9 +1676,9 @@ function originOf(p) {
 
 /** What a live run is doing (working / idle / waiting_input), from the run itself, else its session's own status. */
 const actOf = (r) => r.activity || sessOf(r)?.status || "";
-const ACT_LABEL = { working: "working", idle: "idle", waiting_input: "needs you" };
-/** The tile's status line: "working · 4m". */
-const tileAct = (r) => (ACT_LABEL[actOf(r)] || "running") + (ACT_LABEL[r.activity] && r.activity_since ? ` · ${fmtDur((Date.now() - r.activity_since) / 1000)}` : "");
+const ACT_LABEL = { working: "working", idle: "idle", waiting_input: "needs you", busy: "working", waiting: "needs you", shell: "idle" };
+/** The tile's status line: "working · 4m", "idle · shells · 2h" (background shells still running). */
+const tileAct = (r) => (ACT_LABEL[actOf(r)] || "running") + (r.background_shells || (!r.activity && sessOf(r)?.status === "shell") ? " · shells" : "") + (ACT_LABEL[r.activity] && r.activity_since ? ` · ${fmtDur((Date.now() - r.activity_since) / 1000)}` : "");
 // Who started it goes here, not after the folder, where a long path would cut it off.
 const railUp = (r) => `up ${fmtDur((Date.now() - r.started_at) / 1000)}${byWho(r)}` + (sessOf(r)?.model ? ` · ${sessOf(r).model.replace(/^claude-/, "")}` : "");
 
@@ -2303,6 +2396,7 @@ function refresh() {
   else if (activeTab === "workflows") loadWorkflows();
   else if (activeTab === "connect") loadConnect();
   else if (activeTab === "keys") refreshKeys();
+  else if (activeTab === "watching") { loadWatching(); if (Date.now() - watchStatsAt > 60_000) loadWatchStats(); }
   else if (activeTab === "settings") renderSettings();
   else if (activeTab === "runs") { loadRuns(); if (selectedRun) refreshRunDetail(); }
   else if (activeTab === "types") loadTypes();
@@ -2311,6 +2405,8 @@ function refresh() {
   else if (activeTab === "stats") loadStats();
 }
 setInterval(refresh, 3000);
+// The Watching badge (sessions that need someone) stays current on every tab.
+setInterval(() => !document.hidden && activeTab !== "watching" && loadWatching(), 15000);
 setInterval(loadSystem, 30000);
 setInterval(() => !document.hidden && loadMe(), 10000);
 document.addEventListener("visibilitychange", () => !document.hidden && refresh());
@@ -2318,6 +2414,7 @@ document.addEventListener("visibilitychange", () => !document.hidden && refresh(
 (async () => {
   applyTheme(); // the page head already set the scheme; this syncs theme-color
   await Promise.all([loadSystem(), loadTypes(), loadWorkflows(), loadMe(), loadTargets(), loadConfigs()]);
+  loadWatching();
   const m = location.hash.match(/^#(\w+)(?:\/(\w+))?/);
   if (m && m[1] === "runs" && m[2]) openRun(Number(m[2]));
   else if (m && (m[1] === "sessions" || m[1] === "console") && /^\d+$/.test(m[2] || "")) openSessionLink(Number(m[2]));

@@ -31,6 +31,7 @@ import { startTokenIndex, tokensFresh } from "./tokens";
 import { ccxStatus, ccxSearch, ccxSessions, ccxShow } from "./ccx";
 import { insidePath, listDir, writeFiles, decodeContent, extractInto, archiveOf, resultsOf, makeFolder } from "./files";
 import { registerLw } from "./lw";
+import { createWatch, listWatches, getWatchOut, cancelWatch, fireWatch, watchStats, watching, startWatches, type WatchInput } from "./watches";
 import { listSecrets, createSecret, updateSecret, deleteSecret, readValue, secretDetail, scanOut, importFound, suggestName, type Who } from "./secrets";
 
 const PUBLIC_DIR = join(config.root, "public");
@@ -937,6 +938,36 @@ route("GET", "/api/runs/:id/wait", async (req, p, url) => {
   return json({ ...runOut(run, { withOutput: false }), reached, timed_out: !reached, waited_ms: now() - started });
 });
 
+// ---- watches: lofiwave waits on something for a run and tells it when it happens (src/watches.ts)
+const optInt = (v: unknown, field: string): number | undefined => {
+  if (v === undefined || v === null || v === "") return undefined;
+  const n = Number(v);
+  if (!Number.isFinite(n) || n < 0) throw new ApiError(400, `${field} must be a non-negative number`);
+  return n;
+};
+route("GET", "/api/watching", () => json(watching()));
+route("GET", "/api/watches/stats", (_r, _p, url) => json(watchStats(Math.min(Math.max(int(url.searchParams.get("days"), "days", 30) || 30, 1), 365))));
+route("GET", "/api/watches", (_r, _p, url) => json(listWatches({ run: int(url.searchParams.get("run"), "run", 0) || undefined, all: bool(url.searchParams.get("all"), false) })));
+route("POST", "/api/watches", async (req) => {
+  const b = await body(req);
+  const run_id = optInt(b.run_id ?? req.headers.get("x-lofiwave-run"), "run_id");
+  if (!run_id) throw new ApiError(400, "run_id is required (inside a lofiwave session it defaults to that session's run)");
+  let at = b.at;
+  if (typeof at === "string" && !/^\d+$/.test(at)) { at = Date.parse(at); if (!Number.isFinite(at)) throw new ApiError(400, "at must be Unix ms or an ISO time"); }
+  const inSec = optInt(b.in_sec, "in_sec");
+  const i: WatchInput = {
+    run_id, label: str(b.label, "label"), until_exit: optInt(b.until_exit, "until_exit"), until_cmd: str(b.until_cmd, "until_cmd") || undefined,
+    until_file: str(b.until_file, "until_file") || undefined, at: inSec !== undefined ? now() + inSec * 1000 : optInt(at, "at"),
+    until_run: b.until_run === undefined || b.until_run === null ? undefined : String(b.until_run),
+    progress_cmd: str(b.progress_cmd, "progress_cmd") || undefined, progress_file: str(b.progress_file, "progress_file") || undefined,
+    every_sec: optInt(b.every_sec, "every_sec"), stall_sec: optInt(b.stall_sec, "stall_sec"), for_sec: optInt(b.for_sec, "for_sec"), message: str(b.message, "message"),
+  };
+  return json(getWatchOut(createWatch(i, actor.getStore() ?? "").id), 201);
+});
+route("GET", "/api/watches/:id", (_r, p) => json(getWatchOut(Number(p.id))));
+route("DELETE", "/api/watches/:id", (_r, p) => json(cancelWatch(Number(p.id), actor.getStore() ?? "")));
+route("POST", "/api/watches/:id/fire", (_r, p) => json(fireWatch(Number(p.id), actor.getStore() ?? "")));
+
 // ---- sessions (reported by the agent's own hook; see scripts/claude-session-hook.sh)
 route("GET", "/api/runs/:id/sessions", (_r, p) => json(sessionsOf(getRun(Number(p.id)).id)));
 
@@ -1199,6 +1230,7 @@ registerLw();
 startScheduler();
 startQueue();
 startTokenIndex();
+startWatches();
 console.log(`lofiwave listening on http://${server.hostname}:${server.port}  (data: ${config.dataDir})`);
 if (config.tokenGenerated) {
   // First start: hand the person a link that logs the browser in (the UI keeps the token and drops it from the URL).

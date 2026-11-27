@@ -48,7 +48,13 @@ const starting = new Set<number>();
  * Claude's own registry says it for claude; for other TUIs it is read off the screen.
  */
 export type Activity = "working" | "idle" | "waiting_input" | "done";
-type ActivityState = { activity: Activity; since: number; waiting_for?: string };
+/** background: idle, but with background shells still running (Claude's registry says "shell"). */
+type ActivityState = { activity: Activity; since: number; waiting_for?: string; background?: boolean };
+/**
+ * Things that keep an idle run open (idle stop skips it while one says so): src/watches.ts adds "has an active
+ * watch", so a run isn't closed while lofiwave still has something to tell it.
+ */
+export const idleKeepers: ((runId: number) => boolean)[] = [];
 /** Last activity seen by each run's pane watcher. */
 const activities = new Map<number, ActivityState>();
 /** When each run was last sent a message (or started with a prompt): claude's registry says idle for a moment after one. */
@@ -608,7 +614,9 @@ async function watchPane(w: Watch): Promise<number | null> {
     // Only claude's registry is trusted to say "idle" for this: a screen that looks quiet may be a long tool call.
     const stopAfter = idleStopSecOf(meta, w.isClaude);
     if (stopAfter > 0 && reg && act && !entry.killedBy) {
-      if (act.activity === "idle" && (sawBusy || !meta.stop_when_idle)) {
+      // Background shells still running, or a watch waiting to report: the agent isn't done, so it isn't closed.
+      const kept = act.background || idleKeepers.some((k) => k(id));
+      if (act.activity === "idle" && !kept && (sawBusy || !meta.stop_when_idle)) {
         idleSince ||= Date.now();
         // Someone watching (a browser terminal or the simple view, a desktop window, tmux attach) may be about to type.
         if (Number(attached) > 0 || Date.now() - (screenSeenAt.get(sess) ?? 0) < 30_000) idleSince = Date.now();
@@ -707,25 +715,28 @@ function claudeActivity(pid: number, runId: number): ActivityState | null {
   if (!e?.status) return null;
   const since = e.statusUpdatedAt ?? Date.now();
   if (e.status === "waiting") return { activity: "waiting_input", since, waiting_for: e.waitingFor };
-  if (e.status !== "idle") return { activity: "working", since };
+  // "shell": the turn is over but background shells it started are still running. Not working: nothing happens
+  // until one of them ends (or someone types), so it reads as idle, with the shells noted.
+  const background = e.status === "shell";
+  if (e.status !== "idle" && !background) return { activity: "working", since };
   // A message sent after it went idle that it hasn't picked up yet: it is about to work.
   const sent = messagedAt.get(runId) ?? 0;
   if (sent > since && Date.now() - sent < 15_000) return { activity: "working", since: sent };
-  return { activity: "idle", since };
+  return { activity: "idle", since, ...(background ? { background } : {}) };
 }
 
 function noteActivity(id: number, a: ActivityState) {
   const cur = activities.get(id);
   // A screen reading has no time of its own (since 0): it has been doing this since we first saw it.
-  const same = cur && cur.activity === a.activity && cur.waiting_for === a.waiting_for;
+  const same = cur && cur.activity === a.activity && cur.waiting_for === a.waiting_for && Boolean(cur.background) === Boolean(a.background);
   activities.set(id, { ...a, since: a.since || (cur && same ? cur.since : Date.now()) });
 }
 
 /** A run's activity for the API: from its pane watcher, else claude's registry, else assume a running run works. */
-export function activityOf(run: RunRow): { activity: Activity; activity_since: number; waiting_for?: string } {
+export function activityOf(run: RunRow): { activity: Activity; activity_since: number; waiting_for?: string; background_shells?: boolean } {
   if (run.status !== "running") return { activity: "done", activity_since: run.ended_at ?? run.started_at };
   const a = activities.get(run.id) ?? (run.pid ? claudeActivity(run.pid, run.id) : null) ?? { activity: "working" as Activity, since: run.started_at };
-  return { activity: a.activity, activity_since: a.since, ...(a.waiting_for ? { waiting_for: a.waiting_for } : {}) };
+  return { activity: a.activity, activity_since: a.since, ...(a.waiting_for ? { waiting_for: a.waiting_for } : {}), ...(a.background ? { background_shells: true } : {}) };
 }
 
 /** Seconds a run may sit idle, with nobody watching, before it ends; 0 = never. */
