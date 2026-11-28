@@ -441,6 +441,12 @@ body.term-full .pane-meta { margin-top:2px; }
 td.empty { padding:28px 14px; text-align:center; }
 details.more { border-top:1px solid var(--line); padding-top:10px; }
 details.more summary { cursor:pointer; font-size:12px; }
+.preset-field { display:flex; flex-direction:column; gap:6px; }
+.field-label { font-size:12px; color:var(--muted); }
+.preset-picks { display:flex; flex-wrap:wrap; gap:6px; }
+.preset-pick { padding:4px 12px; font-size:13px; border-radius:999px; background:var(--panel-2); color:var(--muted); border:1px solid var(--line); }
+.preset-pick.on { background:var(--sel); color:var(--accent); border-color:var(--accent); }
+.preset-defaults { gap:10px; margin:0 0 10px; flex-wrap:wrap; }
 details.more > .grid { margin-top:14px; }
 dialog .hint { margin:0; font-size:12px; }
 #cron-label small { font-size:11px; }

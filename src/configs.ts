@@ -179,12 +179,12 @@ const PICKS_SYSTEM_PROMPT = /^--(append-)?system-prompt(-file)?(=|$)/;
 
 /**
  * Add the config's instructions to an agent's argv (the template part, so a restart doesn't count them as extra
- * args): claude `--append-system-prompt`, codex `-c developer_instructions=…`. Other types use `{instructions}` in
+ * args): claude and pi `--append-system-prompt`, codex `-c developer_instructions=…`. Other types use `{instructions}` in
  * their templates (substituted by buildCommand) or read LOFIWAVE_INSTRUCTIONS. Returns the args to add.
  */
 export function instructionArgs(agent: string, instructions: string, args: string[]): string[] {
   if (!instructions.trim()) return [];
-  if (agent === "claude") return args.some((a) => PICKS_SYSTEM_PROMPT.test(a)) ? [] : ["--append-system-prompt", instructions];
+  if (agent === "claude" || agent === "pi") return args.some((a) => PICKS_SYSTEM_PROMPT.test(a)) ? [] : ["--append-system-prompt", instructions];
   // A TOML basic string: JSON's escapes are valid TOML.
   if (agent === "codex") return args.some((a) => /^developer_instructions\s*=/.test(a)) ? [] : ["-c", `developer_instructions=${JSON.stringify(instructions)}`];
   return [];
