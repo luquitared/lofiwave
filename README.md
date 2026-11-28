@@ -170,6 +170,7 @@ Environment variables, or `KEY=VALUE` lines in `.env`:
 | `KEYS_SCAN_ROOTS` | home | Colon-separated folders *Keys → Found on this computer* looks through for `.env` files (shell profiles are read too when home is one of them) |
 | `LOFIWAVE_DEFAULT_PRESETS` | *(none)* | Presets every new session on this machine starts with, comma-separated (`vibecode,pr`). *Settings → Presets* or `lw presets default` overrides it on the machine. |
 | `LOFIWAVE_DEFAULT_VIEW` | `chat` | How sessions open in the browser: `chat` (Claude and pi sessions; others open in the terminal) or `terminal`. Overridden in *Settings → Presets* or with `lw presets view`. |
+| `LOFIWAVE_REMOTE_CONTROL` | `on` | `off`: new interactive `claude` sessions start without `--remote-control` (not shown in the Claude app). Overridden in *Settings → Presets* or with `lw presets remote-control`. Turning it on for one session from its pane still works. |
 | `LOFIWAVE_PRESETS_DIR` | *(unset)* | A folder of `<name>.md` files, each one more preset (see *Concepts → Preset*), for a machine set up by a script |
 | `LOFIWAVE_AGENT_CONTEXT` | *(on)* | `off`: agent runs aren't told they run under lofiwave, or about `lw` and `ccx` (see *Keys*) |
 | `CWD_ROOTS` | home and temp dirs | Colon-separated folders under which `mkdir_cwd` may create a run's folder |
@@ -351,13 +352,13 @@ Restarting is done through the run: `POST /api/runs/:id/restart`.
 
 | | |
 |---|---|
-| `GET /api/presets` | `{presets: [{name, description, prompt, source: "builtin"\|"file"\|"custom", edited, builtin_prompt?}], defaults: {names, from: "settings"\|"env"\|"none"}, default_view: {view: "chat"\|"terminal", from}}` |
+| `GET /api/presets` | `{presets: [{name, description, prompt, source: "builtin"\|"file"\|"custom", edited, builtin_prompt?}], defaults: {names, from: "settings"\|"env"\|"none"}, default_view: {view: "chat"\|"terminal", from}, remote_control: {on, from}}` |
 | `GET /api/presets/:name` | one |
 | `POST /api/presets` | create: `{name, description?, prompt}` → 201. Names are lowercase letters, digits, `-` and `_` |
 | `PUT /api/presets/:name` | change `description` and/or `prompt`; on a built-in or folder preset this saves your version |
 | `DELETE /api/presets/:name` | delete one made here (and take it out of the defaults); on an edited built-in or folder preset, go back to its own text (`{reset: true}`) |
 | `GET /api/settings` | the same as `GET /api/presets` |
-| `PUT /api/settings` | `{default_presets?: [names] \| "a,b" \| null, default_view?: "chat" \| "terminal" \| null}`; `null` goes back to the env default |
+| `PUT /api/settings` | `{default_presets?: [names] \| "a,b" \| null, default_view?: "chat" \| "terminal" \| null, remote_control?: true \| false \| null}`; `null` goes back to the env default |
 
 `POST /api/processes` takes `presets` (an array or `"a,b"`; unknown names are a 400; left out = the machine's defaults for an agent session without a `parent_run`), and so do `POST /api/processes/preview`, `POST /api/runs/:id/restart` and `POST /api/runs/:id/sessions/:sid/resume`, where they replace the run's.
 

@@ -143,3 +143,14 @@ test("preview shows the presets' prompt in the command", async () => {
   expect(r.presets).toEqual(["workshop"]);
   expect(r.args).toContain("WORKSHOP-PROMPT");
 });
+
+test("Remote Control: on by default for a new claude session; the setting turns it off; asked-for args stay", async () => {
+  const args = async (extra = "") => (await api("POST", "/processes/preview", { type: "claude", cwd: work, interactive: true, presets: [], extra_args: extra })).args as string[];
+  expect((await api("GET", "/settings")).remote_control).toEqual({ on: true, from: "none" });
+  expect(await args()).toContain("--remote-control");
+  expect((await api("PUT", "/settings", { remote_control: false })).remote_control).toEqual({ on: false, from: "settings" });
+  expect(await args()).not.toContain("--remote-control");
+  expect(await args("--remote-control")).toContain("--remote-control");
+  expect((await call("PUT", "/settings", { remote_control: "off" })).status).toBe(400);
+  expect((await api("PUT", "/settings", { remote_control: null })).remote_control.on).toBe(true);
+});

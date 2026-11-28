@@ -1025,6 +1025,10 @@ const loadPresets = guard(async () => {
     ...[["chat", "Chat"], ["terminal", "Terminal"]].map(([v, label]) => h("button", { class: `small${default_view.view === v ? " on" : ""}`, "aria-pressed": String(default_view.view === v),
       title: v === "chat" ? "the session as messages, with previews of what it built (Claude and pi sessions; others open in the terminal)" : "the agent's own terminal",
       onclick: () => default_view.view !== v && guard(async () => { presetInfo = await put("/settings", { default_view: v }); paneSig = ""; loadPresets(); })() }, label))));
+  const rc = presetInfo.remote_control;
+  $("#default-rc").replaceChildren(h("label", { class: "row", title: "claude's --remote-control: the session also shows up in the Claude app. Off: new sessions start without it; you can still turn it on for one session from its pane." },
+    h("input", { type: "checkbox", checked: rc.on, onchange: (e) => guard(async () => { presetInfo = await put("/settings", { remote_control: e.target.checked }); loadPresets(); })() }),
+    "Remote Control on new Claude sessions", rc.from === "env" ? h("small", { class: "muted" }, " (from LOFIWAVE_REMOTE_CONTROL)") : ""));
   const fromEnv = defaults.from === "env" ? " New sessions' defaults come from LOFIWAVE_DEFAULT_PRESETS until you change them here." : "";
   $("#defaults-from").textContent = (default_view.from === "env" ? "From LOFIWAVE_DEFAULT_VIEW." : "") + fromEnv;
   $("#preset-table tbody").replaceChildren(...presets.map((p) => {

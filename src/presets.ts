@@ -184,6 +184,19 @@ export function defaultView(): { view: View; from: "settings" | "env" | "none" }
   return { view: "chat", from: "none" };
 }
 
+/**
+ * Does a new interactive claude session get Remote Control (`--remote-control`, so it shows in the Claude app)? The
+ * `remote_control` setting ("on"/"off"), else LOFIWAVE_REMOTE_CONTROL, else on.
+ */
+export function remoteControlDefault(): { on: boolean; from: "settings" | "env" | "none" } {
+  const s = getSetting("remote_control");
+  if (s === "on" || s === "off") return { on: s === "on", from: "settings" };
+  const env = process.env.LOFIWAVE_REMOTE_CONTROL?.trim().toLowerCase() ?? "";
+  if (/^(0|off|false|no)$/.test(env)) return { on: false, from: "env" };
+  if (/^(1|on|true|yes)$/.test(env)) return { on: true, from: "env" };
+  return { on: true, from: "none" };
+}
+
 /** The joined prompt of these presets, in this order (unknown names skipped: a preset deleted since the run started). */
 export function presetInstructions(names: string[]): string {
   const all = new Map(listPresets().map((p) => [p.name, p]));

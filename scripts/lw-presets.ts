@@ -17,6 +17,8 @@ export const PRESETS_HELP = `Presets (prompts a session starts with; several are
                                    --env: back to LOFIWAVE_DEFAULT_PRESETS)
   lw presets view [chat|terminal|--env]
                                    how sessions open in the browser
+  lw presets remote-control [on|off|--env]
+                                   whether new Claude sessions start with Remote Control (default on)
   lw restart <run> [--presets a,b | --no-presets] [--fresh]
                                    start a session again with its presets or these; an interactive session
                                    keeps its conversation unless --fresh
@@ -87,6 +89,15 @@ export async function presetsCommand(argv: string[]) {
       }
       const r = await call("GET", "/presets");
       console.log(`sessions open in ${r.default_view.view}${r.default_view.from === "env" ? " (from LOFIWAVE_DEFAULT_VIEW)" : r.default_view.from === "settings" ? " (set on this machine)" : ""}`);
+      return;
+    }
+    case "remote-control": case "rc": {
+      if (flags.env || pos[0]) {
+        if (pos[0] && pos[0] !== "on" && pos[0] !== "off") die("usage: lw presets remote-control [on|off|--env]");
+        await call("PUT", "/settings", { remote_control: flags.env ? null : pos[0] === "on" });
+      }
+      const r = await call("GET", "/presets");
+      console.log(`Remote Control on new Claude sessions: ${r.remote_control.on ? "on" : "off"}${r.remote_control.from === "env" ? " (from LOFIWAVE_REMOTE_CONTROL)" : r.remote_control.from === "settings" ? " (set on this machine)" : ""}`);
       return;
     }
     default:

@@ -8,7 +8,7 @@ import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { db, now, hydrate, type ProcessTypeRow, type RunRow, type WorkflowRow } from "./db";
 import { config, logDir } from "./config";
-import { presetInstructions } from "./presets";
+import { presetInstructions, remoteControlDefault } from "./presets";
 import { killTree, pidAlive } from "./procs";
 import { discoverCodexSession, codexRolloutPath, codexIndexReadable, findCodexThread, codexThreadTouched, claudeRegistry, claudeWebUrl, claudeTranscriptPath, claudeTranscriptHome, trustClaudeFolder } from "./agents";
 import { openTerminalForTmux, macTabOf, typeIntoMacTab } from "./terminal";
@@ -112,6 +112,11 @@ export type StartOptions = {
   config?: string;
   /** Presets (src/presets.ts) whose prompts go in with the run's instructions, in this order. Kept in meta.presets. */
   presets?: string[];
+  /**
+   * Claude: keep the type's `--remote-control`? Unset: the machine's setting (remoteControlDefault). true is for
+   * "turn Remote Control on" (reopening a session for it), which works whatever the setting says.
+   */
+  remoteControl?: boolean;
 };
 
 /**
@@ -230,7 +235,7 @@ function templateFor(type: ProcessTypeRow, interactive: boolean, resume: boolean
  * machine's files aren't: lofiwave's chat settings file is left out, as on a target. The `docker run` wrapping itself
  * is added by startRun (wrapInDocker), once the run's env is known.
  */
-export function buildCommand(type: ProcessTypeRow, opts: { cwd: string; prompt?: string; extraArgs?: string[]; interactive?: boolean; resumeSession?: string; permissionMode?: string; target?: string; runConfig?: RunConfig | null }) {
+export function buildCommand(type: ProcessTypeRow, opts: { cwd: string; prompt?: string; extraArgs?: string[]; interactive?: boolean; resumeSession?: string; permissionMode?: string; target?: string; runConfig?: RunConfig | null; remoteControl?: boolean }) {
   const templateArgs = templateFor(type, Boolean(opts.interactive), Boolean(opts.resumeSession));
   const prompt = opts.prompt ?? "";
   const instructions = opts.runConfig?.instructions ?? "";
@@ -240,7 +245,10 @@ export function buildCommand(type: ProcessTypeRow, opts: { cwd: string; prompt?:
   const vars = { prompt, cwd: opts.cwd, session: opts.resumeSession ?? "", instructions };
   const kept = templateArgs.filter((a) => (prompt.trim() || !a.includes("{prompt}")) && (instructions.trim() || !a.includes("{instructions}")));
   const command = substitute(type.command, vars);
-  const templ = kept.map((a) => substitute(a, vars));
+  // The template's --remote-control is left out when this machine has Remote Control off for new sessions (Settings),
+  // unless the run asks for it. One in the run's own args stays.
+  const rcOff = basename(command) === "claude" && !(opts.remoteControl ?? remoteControlDefault().on);
+  const templ = kept.map((a) => substitute(a, vars)).filter((a) => !(rcOff && a === "--remote-control"));
   // A switch the template already passes (claude's --remote-control) isn't passed twice when the caller adds it too.
   // Only bare switches: `--model x` keeps its value and goes through.
   const extra = (opts.extraArgs ?? []).filter((a, i, all) => !(a.startsWith("--") && !a.includes("=") && templ.includes(a) && !/^[^-]/.test(all[i + 1] ?? "-")));
@@ -306,7 +314,7 @@ export async function startRun(opts: StartOptions): Promise<RunRow> {
     : runConfig;
   let { command, args, template_len } = buildCommand(type, { ...opts, cwd, permissionMode: e2b?.permission_mode, runConfig: cmdConfig });
   // Remote Control needs a claude.ai login: in a sandbox that only has an API key, leave it out.
-  if (e2b && !sandboxEnv(e2b, { ...JSON.parse(type.env || "{}"), ...(runConfig?.env ?? {}), ...(opts.env ?? {}) }, [config.authToken]).CLAUDE_CODE_OAUTH_TOKEN) {
+  if ((e2b && !sandboxEnv(e2b, { ...JSON.parse(type.env || "{}"), ...(runConfig?.env ?? {}), ...(opts.env ?? {}) }, [config.authToken]).CLAUDE_CODE_OAUTH_TOKEN)) {
     const drop = args.slice(0, template_len).filter((a) => a === "--remote-control").length;
     if (drop) { args = [...args.slice(0, template_len).filter((a) => a !== "--remote-control"), ...args.slice(template_len)]; template_len -= drop; }
   }
@@ -1046,7 +1054,7 @@ export async function resumeSession(runId: number, sessionId: string, o: { prese
  * Reopen a session here. `replacePid`: the process that has it open now (taking it over); it is stopped first, so
  * two agents never write one transcript. Refused when that pid is on a different session.
  */
-export async function resumeAgentSession(o: { agent: string; sessionId: string; cwd?: string; typeName?: string; env?: Record<string, string>; terminal?: string; replacePid?: number; config?: string; presets?: string[] }): Promise<RawRun> {
+export async function resumeAgentSession(o: { agent: string; sessionId: string; cwd?: string; typeName?: string; env?: Record<string, string>; terminal?: string; replacePid?: number; config?: string; presets?: string[]; remoteControl?: boolean }): Promise<RawRun> {
   const typeName = o.typeName ?? o.agent;
   const type = getType(typeName);
   if (!JSON.parse(type.resume_args || "[]").length) throw new ApiError(400, `process type "${typeName}" has no resume_args template`);
@@ -1056,7 +1064,7 @@ export async function resumeAgentSession(o: { agent: string; sessionId: string; 
     await stopAndWait(o.replacePid);
   }
   const cwd = o.cwd && existsSync(o.cwd) ? o.cwd : (type.default_cwd || process.env.HOME || "/");
-  const run = await startRun({ typeName, cwd, trigger: "resume", resumeSession: o.sessionId, env: o.env ?? {}, terminal: o.terminal, config: o.config, presets: o.presets });
+  const run = await startRun({ typeName, cwd, trigger: "resume", resumeSession: o.sessionId, env: o.env ?? {}, terminal: o.terminal, config: o.config, presets: o.presets, remoteControl: o.remoteControl });
   // Until the agent reports back (claude's hook, codex's index), remember what we asked it to reopen. Codex's is
   // confirmed (or marked failed) once its index shows the thread in use: see findCodexRunSession.
   recordSession(run.id, { session_id: o.sessionId, agent: o.agent, cwd, source: o.agent === "codex" ? "resume requested" : "resume" });
@@ -1133,8 +1141,8 @@ export async function enableRemoteControl(pid: number, o: { replace?: boolean; t
   const cwd = entry.cwd || run?.cwd || "";
   // A session nobody has typed into yet has no transcript, and `claude --resume` refuses it: start a fresh one there instead.
   const resumed = claudeTranscriptPath(entry.sessionId, cwd)
-    ? await resumeAgentSession({ agent: "claude", sessionId: entry.sessionId, cwd, terminal: o.terminal, typeName, env })
-    : await startRun({ typeName, cwd: existsSync(cwd) ? cwd : getType(typeName).default_cwd || process.env.HOME || "/", env, interactive: true, terminal: o.terminal, trigger: "manual" });
+    ? await resumeAgentSession({ agent: "claude", sessionId: entry.sessionId, cwd, terminal: o.terminal, typeName, env, remoteControl: true })
+    : await startRun({ typeName, cwd: existsSync(cwd) ? cwd : getType(typeName).default_cwd || process.env.HOME || "/", env, interactive: true, terminal: o.terminal, trigger: "manual", remoteControl: true });
   return { status: "replaced", web_url: "", run: resumed };
 }
 

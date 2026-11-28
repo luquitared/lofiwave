@@ -6,7 +6,7 @@ import { config } from "./config";
 import { db, now, hydrate, type ProcessTypeRow, type WorkflowRow, type RunRow, type SessionRow, type ApiKeyRow, type TargetRow, type ConfigRow } from "./db";
 import { getTarget, parseTargetConfig, checkTarget, TargetError, TARGET_KINDS } from "./targets";
 import { parseConfig, configOut, rowToConfig, dockerStatus, ConfigError } from "./configs";
-import { listPresets, getPreset, savePreset, deletePreset, presetNames, defaultPresets, defaultView, presetInstructions, setSetting, PresetError } from "./presets";
+import { listPresets, getPreset, savePreset, deletePreset, presetNames, defaultPresets, defaultView, remoteControlDefault, presetInstructions, setSetting, PresetError } from "./presets";
 import { listOsProcesses, cwdOf, killTree, type OsProcess } from "./procs";
 import { ApiError, startRun, killRun, restartRun, getRun, getType, readLogFrom, isLive, buildCommand, wrapInDocker, configOf, screenOf, historyOf, sendKeys, sendMessage, activityOf, waitForRun, tmuxPath, recordSession, resumeSession, resumeAgentSession, enableRemoteControl } from "./runner";
 import { transcriptMark, recordMessage, messageStatus, runMessages, waitForReply } from "./messages";
@@ -815,7 +815,7 @@ route("DELETE", "/api/configs/:name", (_r, p) => {
 });
 
 // ---- presets: prompts a session starts with, and this machine's defaults (src/presets.ts)
-const presetsOut = () => ({ presets: listPresets(), defaults: defaultPresets(), default_view: defaultView() });
+const presetsOut = () => ({ presets: listPresets(), defaults: defaultPresets(), default_view: defaultView(), remote_control: remoteControlDefault() });
 route("GET", "/api/presets", () => json(presetsOut()));
 route("GET", "/api/presets/:name", (_r, p) => json(asApiCfg(() => getPreset(p.name))));
 route("POST", "/api/presets", async (req) => {
@@ -828,7 +828,8 @@ route("PUT", "/api/presets/:name", async (req, p) => {
 });
 route("DELETE", "/api/presets/:name", (_r, p) => json({ ok: true, ...asApiCfg(() => deletePreset(p.name)) }));
 /**
- * This machine's defaults: {default_presets: [...] | "a,b" | null, default_view: "chat" | "terminal" | null}. A field
+ * This machine's defaults: {default_presets: [...] | "a,b" | null, default_view: "chat" | "terminal" | null,
+ * remote_control: true | false | null (claude's --remote-control on new interactive sessions)}. A field
  * left out is unchanged; null goes back to the env default (LOFIWAVE_DEFAULT_PRESETS / LOFIWAVE_DEFAULT_VIEW).
  */
 route("PUT", "/api/settings", async (req) => {
@@ -836,6 +837,10 @@ route("PUT", "/api/settings", async (req) => {
   if (b.default_presets !== undefined) {
     if (b.default_presets === null) setSetting("default_presets", null);
     else setSetting("default_presets", asApiCfg(() => presetNames(b.default_presets, "default_presets"))!.join(","));
+  }
+  if (b.remote_control !== undefined) {
+    if (b.remote_control !== null && typeof b.remote_control !== "boolean") throw new ApiError(400, "remote_control must be true, false or null");
+    setSetting("remote_control", b.remote_control === null ? null : b.remote_control ? "on" : "off");
   }
   if (b.default_view !== undefined) {
     if (b.default_view !== null && b.default_view !== "chat" && b.default_view !== "terminal") throw new ApiError(400, `default_view must be "chat", "terminal" or null`);
