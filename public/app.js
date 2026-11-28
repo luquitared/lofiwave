@@ -2,6 +2,66 @@
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 
+// ---------------------------------------------------------------- reaching the server
+// A copy of the page stays on the device (public/sw.js), so a home-screen lofiwave opens even when its machine is
+// asleep, and the startup screen can say why it isn't connecting. Service workers need https (or localhost).
+if ("serviceWorker" in navigator && window.isSecureContext) navigator.serviceWorker.register("/sw.js").catch(() => {});
+
+const machineName = location.hostname.split(".")[0] || location.host;
+const PROBE_TIMEOUT_MS = 8000;
+const RETRY_S = 5;
+
+/** One quick request to the server: null when it answered, else why it couldn't be reached, in words. */
+async function probeServer() {
+  if (navigator.onLine === false) return { title: "This device is offline", reason: `Connect to Wi-Fi or mobile data to reach ${machineName}.` };
+  let res;
+  try { res = await fetch("/api/auth", { cache: "no-store", signal: AbortSignal.timeout(PROBE_TIMEOUT_MS) }); }
+  catch (e) {
+    if (e?.name === "TimeoutError" || e?.name === "AbortError")
+      return { title: `${machineName} isn't answering`, reason: `No reply in ${PROBE_TIMEOUT_MS / 1000} seconds. It's probably asleep or turned off. If it's on, check that this device is on the same network (Tailscale connected).` };
+    return { title: `Can't reach ${machineName}`, reason: "The connection was refused or the address couldn't be found. The machine may be off or restarting, or this device isn't on its network (Tailscale connected?)." };
+  }
+  if (res.status >= 500) return { title: `${machineName} is awake, but lofiwave isn't answering`, reason: `Got HTTP ${res.status}. lofiwave may have stopped or still be starting on that machine.` };
+  return null;
+}
+
+let bootDone = false;
+let retryNow = null;
+/** Holds startup until the server answers, showing the startup screen with the reason and a retry meanwhile. */
+async function waitForServer() {
+  const boot = $("#boot");
+  for (;;) {
+    const fail = await probeServer();
+    if (!fail) { boot.hidden = true; return; }
+    boot.classList.add("failed");
+    $("#boot-title").textContent = fail.title;
+    $("#boot-reason").textContent = fail.reason; $("#boot-reason").hidden = false;
+    $("#boot-actions").hidden = false;
+    await new Promise((resolve) => {
+      let left = RETRY_S;
+      const tick = () => { $("#boot-countdown").textContent = `Trying again in ${left}s`; if (left-- <= 0) done(); };
+      const timer = setInterval(tick, 1000);
+      const done = () => { clearInterval(timer); retryNow = null; resolve(); };
+      retryNow = done;
+      tick();
+    });
+    boot.classList.remove("failed");
+    $("#boot-title").textContent = `Connecting to ${machineName}…`;
+    $("#boot-countdown").textContent = "";
+  }
+}
+$("#boot-retry").onclick = () => retryNow?.();
+window.addEventListener("online", () => retryNow?.());
+
+/** After startup, a failed request puts a strip at the top until a request gets through again. */
+function connectionLost() {
+  if (!bootDone) return;
+  const banner = $("#conn-banner");
+  banner.textContent = navigator.onLine === false ? "This device is offline. Retrying…" : `Lost the connection to ${machineName}. It may have gone to sleep. Retrying…`;
+  banner.hidden = false;
+}
+function connectionBack() { const banner = $("#conn-banner"); if (banner) banner.hidden = true; }
+
 // ---------------------------------------------------------------- api client
 let token = localStorage.getItem("ac_token") || "";
 // The server prints a link with #token=… on start: keep the token, and take it out of the address bar and history.
@@ -22,8 +82,10 @@ async function api(method, path, body) {
   catch (error) {
     const connection = $("#connection-status");
     if (connection) { connection.textContent = "Offline · retrying"; connection.classList.remove("online"); }
+    connectionLost();
     throw error;
   }
+  connectionBack();
   if (res.status === 401 && path !== "/login") {
     if (await passwordLogin()) return api(method, path, body);
     const t = prompt("Access token (AUTH_TOKEN in .env, or the one the server generated in data/auth-token):");
@@ -2317,6 +2379,8 @@ document.addEventListener("visibilitychange", () => !document.hidden && refresh(
 
 (async () => {
   applyTheme(); // the page head already set the scheme; this syncs theme-color
+  await waitForServer();
+  bootDone = true;
   await Promise.all([loadSystem(), loadTypes(), loadWorkflows(), loadMe(), loadTargets(), loadConfigs()]);
   const m = location.hash.match(/^#(\w+)(?:\/(\w+))?/);
   if (m && m[1] === "runs" && m[2]) openRun(Number(m[2]));
