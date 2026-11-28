@@ -264,7 +264,7 @@ $("#dir-use").onclick = () => useDir(dirAt.replace(/(.)\/+$/, "$1"));
 $("#dir-close").onclick = () => ddlg.close();
 
 // ---------------------------------------------------------------- state
-let types = [], workflows = [], targets = [], configs = [], dockerInfo = null, selectedRun = null, logOffset = 0, activeTab = "console";
+let types = [], workflows = [], targets = [], configs = [], presetInfo = null, dockerInfo = null, selectedRun = null, logOffset = 0, activeTab = "console";
 // Console (session-first working view) state.
 let consoleData = { live: [], headless: [], adoptable: [], ended: [] }, consoleRun = null, railSig = "", paneSig = "";
 // The rail shows live sessions or recently ended ones; an ended one opens read-only, with a button to turn it back on.
@@ -583,6 +583,7 @@ function openStartDialog({ kind, type } = {}) {
   $("#start-target-label").hidden = !sandboxes.length || kind === "app";
   fillConfigSelect(sf.config, "");
   $("#start-config-label").hidden = !configs.length;
+  startPresets = [...(presetInfo?.defaults.names ?? [])];
   applyStartType();
   dlg.showModal();
   // On a phone, focusing a field pops the keyboard over the form: leave it until a field is tapped.
@@ -607,13 +608,29 @@ function applyStartType() {
   sf.extra_args.placeholder = t?.name === "claude" ? "--permission-mode acceptEdits" : t?.name === "codex" ? "--sandbox workspace-write" : t?.name === "pi" ? "--model google-vertex/gemini-4-argon" : "";
   const c = configs.find((x) => x.name === sf.config.value);
   $("#start-config-hint").textContent = c ? configSummary(c) : "";
+  renderStartPresets(t);
+}
+/** The presets picked in the start dialog (the machine's defaults to begin with). Agents only. */
+let startPresets = [];
+function renderStartPresets(t) {
+  const list = presetInfo?.presets ?? [];
+  $("#start-presets-field").hidden = t?.kind !== "agent" || !list.length;
+  $("#start-presets").replaceChildren(...list.map((p) => {
+    const on = startPresets.includes(p.name);
+    return h("button", { type: "button", class: `preset-pick${on ? " on" : ""}`, "aria-pressed": String(on), title: p.description || p.prompt.slice(0, 200),
+      onclick: () => { startPresets = on ? startPresets.filter((n) => n !== p.name) : [...startPresets, p.name]; renderStartPresets(t); } }, p.name);
+  }));
+  const picked = list.filter((p) => startPresets.includes(p.name));
+  $("#start-presets-hint").textContent = picked.length ? picked.map((p) => p.description || p.name).join(" · ") : "None: the agent starts with its usual instructions.";
 }
 sf.type.onchange = applyStartType;
 sf.config.onchange = applyStartType;
 sf.target.onchange = applyStartType;
 $("#start-cancel").onclick = () => dlg.close();
 function startFormBody() {
-  return { type: sf.type.value, cwd: sf.cwd.value.trim(), prompt: sf.prompt.value, extra_args: sf.extra_args.value, env: parseEnv(sf.env.value), timeout_sec: Number(sf.timeout_sec.value || 0), interactive: startsInteractive(typeByName(sf.type.value)), target: sf.target.value || undefined, config: sf.config.value || undefined };
+  return { type: sf.type.value, cwd: sf.cwd.value.trim(), prompt: sf.prompt.value, extra_args: sf.extra_args.value, env: parseEnv(sf.env.value), timeout_sec: Number(sf.timeout_sec.value || 0), interactive: startsInteractive(typeByName(sf.type.value)), target: sf.target.value || undefined, config: sf.config.value || undefined,
+    // In the list's order, which is the order they are joined in.
+    presets: typeByName(sf.type.value)?.kind === "agent" ? (presetInfo?.presets ?? []).map((p) => p.name).filter((n) => startPresets.includes(n)) : undefined };
 }
 $("#preview-btn").onclick = guard(async () => {
   if (!sf.reportValidity()) return;
@@ -998,6 +1015,64 @@ cf.addEventListener("submit", async (e) => {
   toast("saved", true); cdlg.close(); loadConfigs();
 });
 
+// ---------------------------------------------------------------- presets (Settings): prompts sessions start with
+const FROM = { settings: "set here", env: "from LOFIWAVE_DEFAULT_PRESETS", none: "" };
+const loadPresets = guard(async () => {
+  presetInfo = await get("/presets");
+  const { presets, defaults, default_view } = presetInfo;
+  const setDefaults = (names) => guard(async () => { presetInfo = await put("/settings", { default_presets: names }); loadPresets(); })();
+  $("#default-view").replaceChildren(h("div", { class: "seg", role: "group", "aria-label": "Default view" },
+    ...[["chat", "Chat"], ["terminal", "Terminal"]].map(([v, label]) => h("button", { class: `small${default_view.view === v ? " on" : ""}`, "aria-pressed": String(default_view.view === v),
+      title: v === "chat" ? "the session as messages, with previews of what it built (Claude and pi sessions; others open in the terminal)" : "the agent's own terminal",
+      onclick: () => default_view.view !== v && guard(async () => { presetInfo = await put("/settings", { default_view: v }); paneSig = ""; loadPresets(); })() }, label))));
+  const fromEnv = defaults.from === "env" ? " New sessions' defaults come from LOFIWAVE_DEFAULT_PRESETS until you change them here." : "";
+  $("#defaults-from").textContent = (default_view.from === "env" ? "From LOFIWAVE_DEFAULT_VIEW." : "") + fromEnv;
+  $("#preset-table tbody").replaceChildren(...presets.map((p) => {
+    const on = defaults.names.includes(p.name);
+    return h("tr", {},
+      h("td", { "data-l": "default" }, h("input", { type: "checkbox", checked: on, title: on ? "new sessions start with it" : "not used unless picked", "aria-label": `${p.name} by default`,
+        onchange: () => setDefaults(on ? defaults.names.filter((n) => n !== p.name) : presets.map((x) => x.name).filter((n) => n === p.name || defaults.names.includes(n))) })),
+      h("td", { class: "full" }, h("b", {}, p.name), p.description ? h("div", { class: "muted wf-sub" }, p.description) : ""),
+      h("td", { class: "trunc", "data-l": "prompt", title: p.prompt }, p.prompt.split("\n").find((l) => l.trim() && !l.startsWith("#")) ?? ""),
+      h("td", { "data-l": "from" }, p.source === "builtin" ? (p.edited ? "built in, edited" : "built in") : p.source === "file" ? (p.edited ? "preset folder, edited" : "preset folder") : "made here"),
+      h("td", { class: "row" },
+        h("button", { class: "small", onclick: () => openPresetDialog(p) }, "Edit"),
+        p.source === "custom" ? h("button", { class: "small danger", onclick: () => confirmDo(`Delete preset "${p.name}"?`, async () => { await del(`/presets/${encodeURIComponent(p.name)}`); toast("deleted", true); loadPresets(); }) }, "Delete") : "",
+      ),
+    );
+  }));
+  if (dlg.open) renderStartPresets(typeByName(sf.type.value));
+});
+const pdlg = $("#preset-dialog"), pf = $("#preset-form");
+function openPresetDialog(p) {
+  pf.reset(); $("#preset-feedback").hidden = true;
+  pf.orig.value = p?.name ?? "";
+  pf.elements.namedItem("name").value = p?.name ?? ""; pf.elements.namedItem("name").disabled = Boolean(p);
+  $("#preset-title").textContent = p ? `Edit ${p.name}` : "New preset";
+  pf.description.value = p?.description ?? "";
+  pf.prompt.value = p?.prompt ?? "";
+  const theirs = p && p.source !== "custom";
+  $("#preset-builtin-note").textContent = theirs ? `Saving keeps your version on this machine; Reset goes back to the ${p.source === "builtin" ? "built-in" : "preset folder's"} text.` : "";
+  $("#preset-reset").hidden = !(theirs && p.edited);
+  $("#preset-reset").onclick = () => confirmDo(`Reset "${p.name}" to its ${p.source === "builtin" ? "built-in" : "preset folder"} text?`, async () => { await del(`/presets/${encodeURIComponent(p.name)}`); toast("reset", true); pdlg.close(); loadPresets(); });
+  pdlg.showModal();
+  (p ? pf.prompt : pf.elements.namedItem("name")).focus();
+}
+$("#preset-new-btn").onclick = () => openPresetDialog(null);
+$("#preset-cancel").onclick = () => pdlg.close();
+pf.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  if (!pf.reportValidity()) return;
+  $("#preset-feedback").hidden = true;
+  const body = { description: pf.description.value.trim(), prompt: pf.prompt.value };
+  const orig = pf.orig.value;
+  try {
+    if (orig) await put(`/presets/${encodeURIComponent(orig)}`, body);
+    else await post("/presets", { name: pf.elements.namedItem("name").value.trim(), ...body });
+  } catch (err) { $("#preset-feedback").textContent = err.message; $("#preset-feedback").hidden = false; return; }
+  toast("saved", true); pdlg.close(); loadPresets();
+});
+
 // ---------------------------------------------------------------- keys (API keys and secrets for agents, src/secrets.ts)
 // The list never holds values: a value is fetched (and logged) only when someone reveals or copies it.
 let secrets = [], openSecret = null, secretTimer = null, secretsAt = 0;
@@ -1120,6 +1195,7 @@ kf.addEventListener("submit", async (e) => {
 
 function renderSettings() {
   loadTargets();
+  loadPresets();
   loadConfigs();
   const pref = themePref();
   $("#theme-picker").replaceChildren(...THEMES.map((t) => h("button", { class: "theme", role: "radio", "aria-checked": String(pref === t.id), onclick: () => { try { localStorage.setItem("ac_theme", t.id); } catch {} applyTheme(t.id); renderSettings(); } },
@@ -1800,16 +1876,31 @@ function syncFull(hasTerm) {
 
 // ---------------------------------------------------------------- live terminal (xterm.js ⟷ websocket ⟷ tmux attach)
 /**
- * How the pane shows a run: "chat" (the session rendered from its transcript, Claude only) or "terminal" (xterm.js on
- * the tmux pane). Saved per browser. Terminal by default, Chat on phones (no keys for Esc/Tab/arrows) where it can.
+ * How the pane shows a run: "chat" (the session rendered from its transcript, Claude and pi) or "terminal" (xterm.js
+ * on the tmux pane). A session opens in the machine's default view (Settings → Presets, chat unless set otherwise),
+ * and always in chat on phones (no keys for Esc/Tab/arrows) where it can. Switching is remembered per session, in
+ * this browser.
  */
+const VIEW_KEY = "ac_view_by_run";
+function viewPicks() { try { return JSON.parse(localStorage.getItem(VIEW_KEY) || "{}"); } catch { return {}; } }
 function paneMode(r) {
-  const saved = localStorage.getItem("ac_term_mode");
+  const saved = r ? viewPicks()[r.id] : undefined;
   if (saved === "chat" && chatable(r)) return "chat";
   if (saved === "terminal") return "terminal";
-  return chatable(r) && matchMedia("(max-width: 700px)").matches ? "chat" : "terminal";
+  const dflt = presetInfo?.default_view.view ?? "chat";
+  return chatable(r) && (dflt === "chat" || matchMedia("(max-width: 700px)").matches) ? "chat" : "terminal";
 }
-function setPaneMode(mode) { localStorage.setItem("ac_term_mode", mode); paneSig = ""; renderPane(); }
+function setPaneMode(mode, runId = consoleRun?.id) {
+  if (runId != null) {
+    // Kept for the most recent sessions only.
+    const picks = viewPicks();
+    delete picks[runId]; picks[runId] = mode;
+    const ids = Object.keys(picks);
+    for (const id of ids.slice(0, Math.max(0, ids.length - 200))) delete picks[id];
+    try { localStorage.setItem(VIEW_KEY, JSON.stringify(picks)); } catch {}
+  }
+  paneSig = ""; renderPane();
+}
 /** The chat view reads Claude Code and pi sessions; other agents (Codex) and plain commands get the terminal only. */
 function chatable(r) {
   if (!r) return false;
@@ -1821,7 +1912,7 @@ function viewSwitch(r, mode) {
   const views = [["chat", "Chat", "the session as messages, tool calls and diffs, read from its transcript; scrolls on its own"], ["terminal", "Terminal", "a real terminal in the browser"]]
     .filter(([m]) => m !== "chat" || chatable(r));
   return h("div", { class: "seg", role: "group", "aria-label": "View" },
-    ...views.map(([m, label, title]) => h("button", { class: `small${m === mode ? " on" : ""}`, title, "aria-pressed": String(m === mode), onclick: () => m !== mode && setPaneMode(m) }, label)));
+    ...views.map(([m, label, title]) => h("button", { class: `small${m === mode ? " on" : ""}`, title, "aria-pressed": String(m === mode), onclick: () => m !== mode && setPaneMode(m, r.id) }, label)));
 }
 
 /**
@@ -2156,7 +2247,7 @@ let liveChat = null; // { runId, view }
 function openChat(runId) {
   if (!liveChat || liveChat.runId !== runId) {
     closeChat();
-    liveChat = { runId, view: new ChatView(`/runs/${runId}`, { onTerminal: () => setPaneMode("terminal") }) };
+    liveChat = { runId, view: new ChatView(`/runs/${runId}`, { onTerminal: () => setPaneMode("terminal", runId) }) };
   }
   // A rebuilt pane has a fresh placeholder: move the live view into it.
   const el = $("#console-chat"), root = liveChat.view.root;
@@ -2317,7 +2408,7 @@ document.addEventListener("visibilitychange", () => !document.hidden && refresh(
 
 (async () => {
   applyTheme(); // the page head already set the scheme; this syncs theme-color
-  await Promise.all([loadSystem(), loadTypes(), loadWorkflows(), loadMe(), loadTargets(), loadConfigs()]);
+  await Promise.all([loadSystem(), loadTypes(), loadWorkflows(), loadMe(), loadTargets(), loadConfigs(), loadPresets()]);
   const m = location.hash.match(/^#(\w+)(?:\/(\w+))?/);
   if (m && m[1] === "runs" && m[2]) openRun(Number(m[2]));
   else if (m && (m[1] === "sessions" || m[1] === "console") && /^\d+$/.test(m[2] || "")) openSessionLink(Number(m[2]));

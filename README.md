@@ -8,6 +8,7 @@ A small web console for the coding agents running on your machine: Claude Code, 
 - **Start, stop and restart** agents in a chosen folder. Every agent session is **interactive**: the real TUI in a tmux session you can watch and type into from the browser, and with Claude Code's Remote Control on, in the Claude app too. (Headless `claude -p` stays available through the API.)
 - **Turn on Remote Control** for a Claude Code session that is already running.
 - **Run targets**: give a session or workflow run its own [E2B](https://e2b.dev) sandbox VM instead of this machine, whose live terminal you still open and type into from the browser.
+- **Presets**: prompts that set how an agent works (autonomous, PR mode, vibecode for people who don't code, or your own). Pick several when you start a session; each machine has its default ones.
 - **Run configs**: a reusable bundle of custom instructions, environment variables (API keys, pasted as a `.env` file) and, optionally, a Docker image with volumes, attached to any session or workflow.
 - **Workflows**: a saved agent launch you run by hand or on a cron schedule. Each run is a live session you can watch and step into; it closes itself when the agent is done. Every run is kept: status, duration, full logs.
 - A REST API for all of it, documented at `/api/docs`, so other agents can drive it too. The *Connect* page gives you the URL to hand an agent and makes API keys for it.
@@ -167,13 +168,16 @@ Environment variables, or `KEY=VALUE` lines in `.env`:
 | `LOFIWAVE_KEYS_KEY` | *(unset)* | The master key that encrypts *Keys* (32 bytes, base64 or hex). Unset: generated once into `LOFIWAVE_KEYS_KEY_FILE`. Lose it and the stored keys are gone. |
 | `LOFIWAVE_KEYS_KEY_FILE` | `~/.config/lofiwave/keys.key` | Where the generated master key is kept (0600), outside `DATA_DIR` so a copy of the data folder alone doesn't give the keys away |
 | `KEYS_SCAN_ROOTS` | home | Colon-separated folders *Keys → Found on this computer* looks through for `.env` files (shell profiles are read too when home is one of them) |
+| `LOFIWAVE_DEFAULT_PRESETS` | *(none)* | Presets every new session on this machine starts with, comma-separated (`vibecode,pr`). *Settings → Presets* or `lw presets default` overrides it on the machine. |
+| `LOFIWAVE_DEFAULT_VIEW` | `chat` | How sessions open in the browser: `chat` (Claude and pi sessions; others open in the terminal) or `terminal`. Overridden in *Settings → Presets* or with `lw presets view`. |
+| `LOFIWAVE_PRESETS_DIR` | *(unset)* | A folder of `<name>.md` files, each one more preset (see *Concepts → Preset*), for a machine set up by a script |
 | `LOFIWAVE_AGENT_CONTEXT` | *(on)* | `off`: agent runs aren't told they run under lofiwave, or about `lw` and `ccx` (see *Keys*) |
 | `CWD_ROOTS` | home and temp dirs | Colon-separated folders under which `mkdir_cwd` may create a run's folder |
 | `OPEN_TERMINAL` | `auto` | Desktop terminal window opened on an interactive run. `auto` = iTerm then Terminal.app on macOS, the first of wezterm/kitty/alacritty/ghostty/foot/gnome-terminal/konsole/tilix/xfce4-terminal/mate-terminal/terminator/urxvt/xterm found on Linux; `none` to keep runs headless; or name one (`iterm`, `terminal`, `kitty`, …). Ignored on a headless machine (no `DISPLAY`/`WAYLAND_DISPLAY`). |
 
 ```
 lofiwave/
-├── src/       server.ts (HTTP + API), db.ts, secrets.ts, lw.ts, runner.ts, targets.ts, configs.ts, e2b.ts, jobs.ts, capacity.ts, files.ts, connect.ts, vtscreen.ts, scheduler.ts, cron.ts, procs.ts, agents.ts, terminal.ts
+├── src/       server.ts (HTTP + API), db.ts, secrets.ts, lw.ts, presets.ts, runner.ts, targets.ts, configs.ts, e2b.ts, jobs.ts, capacity.ts, files.ts, connect.ts, vtscreen.ts, scheduler.ts, cron.ts, procs.ts, agents.ts, terminal.ts
 ├── public/    the single-page UI
 ├── scripts/   lw.ts + lw-keys.ts (the lw command), start.sh, service installers, Claude Code session hook, Tailscale helpers
 └── data/      database, logs, token (created on first start, git-ignored)
@@ -214,9 +218,21 @@ A workflow with an agent type runs **interactive** (when tmux is installed), so 
 
 **Target** – where a workflow runs. Default: this machine. A workflow keeps its own target; *Run now* takes a different one for a single run (`POST /api/workflows/:id/run {"target": "..."}`).
 
+**Preset** – a named prompt that sets how an agent works. Pick one or more under *Presets* in *New session* (`presets` in `POST /api/processes`); their prompts are joined, in the listed order, and go in with the agent's instructions: `--append-system-prompt` for `claude` and `pi`, `developer_instructions` for `codex`, `{instructions}` for other types (lofiwave's own lines come first, a config's instructions last). Built in:
+
+- **autonomous**: keep going to the finish and decide on its own; ask only when blocked on something only the person can decide.
+- **pr**: work on a branch and push every finished piece as a pull request; save files the work depends on somewhere durable.
+- **vibecode**: for people who don't code: plain language, a live preview as soon as there is something to see, work saved and pushed for them, no secrets in the chat.
+
+Make your own under *Settings → Presets*, or with `lw presets add <name> --prompt-file <path>`; editing a built-in one keeps your version on this machine (*Reset* goes back). A machine set up by a script can bring more with `LOFIWAVE_PRESETS_DIR`: one `<name>.md` file per preset, with an optional first line `<!-- description -->`.
+
+Every new session starts with the machine's **default presets** (the ones ticked in *Settings → Presets*, `lw presets default <name>...`, else `LOFIWAVE_DEFAULT_PRESETS`), unless it picks its own (`presets: []` for none). Workflow runs and swarm workers (runs with a `parent_run`) don't get them. A run keeps its presets in `meta.presets`: a restart or resume keeps them, and `lw restart <run> --presets a,b` changes them (an interactive session is reopened on the same conversation).
+
+Sessions open in the **chat view** where the agent has one (Claude and pi), else the terminal. *Settings → Presets* (or `LOFIWAVE_DEFAULT_VIEW`, `lw presets view`) can make it the terminal instead; switching a session's view is remembered for that session in the browser.
+
 **Config** – a named, reusable bundle you attach to a run (*Config* in *New session* and in a workflow, `config` in `POST /api/processes` and `POST /api/workflows`); create them under *Settings → Run configs*. It has:
 
-- **instructions**: custom instructions for the agent. `claude` gets them as `--append-system-prompt` (unless the args already pick a system prompt), `codex` as `-c developer_instructions=…`. For any other type, put `{instructions}` in the type's args (one arg, like `--system={instructions}`; it is dropped when the config has none); every run with a config also gets them in `LOFIWAVE_INSTRUCTIONS`, and `LOFIWAVE_CONFIG` holds the config's name.
+- **instructions**: custom instructions for the agent. `claude` and `pi` get them as `--append-system-prompt` (unless the args already pick a system prompt), `codex` as `-c developer_instructions=…`. For any other type, put `{instructions}` in the type's args (one arg, like `--system={instructions}`; it is dropped when the config has none); every run with a config also gets them in `LOFIWAVE_INSTRUCTIONS`, and `LOFIWAVE_CONFIG` holds the config's name.
 - **env**: `KEY=VALUE` pairs such as API keys. Paste or import a `.env` file: plain `FOO=bar` and `export FOO=bar` lines, `#` comments, and "double" or 'single' quoted values are read. The values are secrets: stored in lofiwave's database, listed masked (`••••` plus the last 4 characters of long values), kept off the run record, the log and tmux's command line, and passed to the agent's process only. Saving a masked value back keeps the stored one, so you can change one key and leave the rest. lofiwave's own credentials (`AGENT_CONSOLE_TOKEN`, `AUTH_TOKEN`, …) can't be set from a config.
 - **docker** (optional): `image`, `volumes` (a host path or a named volume → a path in the container, `ro` or `rw`), and `user` (`host` = this machine's uid:gid, so files in the folder stay yours), `network`, and more `docker run` flags. A run with a docker config runs `docker run --rm --init -it …` instead of the agent directly (in tmux, so the terminal works as usual): the run's folder is mounted at the same path and is the working directory, and the env goes in by name (`-e KEY`), never in the command line. The image must have the agent installed (`claude`, `codex`, or the type's command), and its login or API key must reach it, usually through the config's env. In a container lofiwave can't read the agent's registry or transcript, so activity comes from the screen only, idle-stop is off, and what reads transcripts (replies to `/message`, Transcript, Resume here) doesn't work. A docker config can't be combined with an E2B target. If docker isn't installed or its daemon isn't answering, starting a run with such a config is refused with that reason (`GET /api/docker`, and *Settings*, show it too).
 
@@ -331,6 +347,20 @@ Restarting is done through the run: `POST /api/runs/:id/restart`.
 | `DELETE /api/configs/:name` | delete (refused while a workflow uses it) |
 | `GET /api/docker` | is docker installed and its daemon answering: `{available, path, version?, error?}` |
 
+### Presets
+
+| | |
+|---|---|
+| `GET /api/presets` | `{presets: [{name, description, prompt, source: "builtin"\|"file"\|"custom", edited, builtin_prompt?}], defaults: {names, from: "settings"\|"env"\|"none"}, default_view: {view: "chat"\|"terminal", from}}` |
+| `GET /api/presets/:name` | one |
+| `POST /api/presets` | create: `{name, description?, prompt}` → 201. Names are lowercase letters, digits, `-` and `_` |
+| `PUT /api/presets/:name` | change `description` and/or `prompt`; on a built-in or folder preset this saves your version |
+| `DELETE /api/presets/:name` | delete one made here (and take it out of the defaults); on an edited built-in or folder preset, go back to its own text (`{reset: true}`) |
+| `GET /api/settings` | the same as `GET /api/presets` |
+| `PUT /api/settings` | `{default_presets?: [names] \| "a,b" \| null, default_view?: "chat" \| "terminal" \| null}`; `null` goes back to the env default |
+
+`POST /api/processes` takes `presets` (an array or `"a,b"`; unknown names are a 400; left out = the machine's defaults for an agent session without a `parent_run`), and so do `POST /api/processes/preview`, `POST /api/runs/:id/restart` and `POST /api/runs/:id/sessions/:sid/resume`, where they replace the run's.
+
 `POST /api/processes` and `POST /api/workflows` take `config` (a name; 404 if unknown). A run with a config has `meta.config` and, in docker, `meta.docker: {image, container}`; a restart keeps its config.
 
 ### Runs
@@ -343,7 +373,7 @@ Restarting is done through the run: `POST /api/runs/:id/restart`.
 | `GET /api/runs/:id/log?raw=1` | the whole log as `text/plain` |
 | `POST /api/runs/:id/pin` | `{pinned: true\|false}` (default true): pin the run to the top of the *Sessions* list, or unpin it → updated run (`pinned_at` is when it was pinned, else null) |
 | `POST /api/runs/:id/kill?force=1` | stop (tree) → updated run. A `queued` run is taken out of the queue (`killed`). |
-| `POST /api/runs/:id/restart` | start a new run with the same parameters (kills the old one first if it is running) → 201 |
+| `POST /api/runs/:id/restart` | start a new run with the same parameters (kills the old one first if it is running) → 201. Optional body `{presets}` |
 | `GET /api/runs/:id/wait?until=idle&timeout=60&after=` | long-poll: answers once the run is `idle` (its turn is over, it waits on a prompt, or it ended) or `done` (ended), or after `timeout` seconds (max 600). `after` (Unix ms, e.g. a message's `sent_at`): only an idle that began then or later counts. → the run (without `output`) plus `{reached, timed_out, waited_ms}`. An agent running monitors or background tasks may never be idle: each task notification starts a new turn. To wait for the answer to a message use `until=replied`. |
 | `GET /api/runs/:id/wait?until=replied&message=<message_id>&timeout=60` | long-poll until the turn that read that message is over (or it was taken out of the queue unread, or the run ended): the run plus `{reached, timed_out, waited_ms, message}`, `message` as below |
 | `GET /api/runs/:id/screen?lines=200&cols=` | interactive runs: `{text, alive, cols, error?}` – the terminal's last `lines` lines (scrollback + screen). `cols` (40–220) resizes the tmux window to the viewer's width first, so the TUI reflows for a phone. `error` is set when tmux couldn't read the screen this time (an empty `text` then means nothing). Reading the screen counts as watching the run (it won't be closed for idling). Plain text with the styling stripped: a dim suggested prompt in claude's input box looks typed, though nobody typed it. To follow an agent use `activity`, `wait` and `sessions/:session_id/messages` instead. |

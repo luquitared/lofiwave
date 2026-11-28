@@ -141,6 +141,21 @@ CREATE TABLE IF NOT EXISTS configs (
   created_at   INTEGER NOT NULL,
   updated_at   INTEGER NOT NULL
 );
+-- Presets (src/presets.ts): named prompts a session starts with, several at once. Built-in ones live in the code; a
+-- row with a built-in's name is your version of it.
+CREATE TABLE IF NOT EXISTS presets (
+  name        TEXT PRIMARY KEY,
+  description TEXT NOT NULL DEFAULT '',
+  prompt      TEXT NOT NULL,
+  created_at  INTEGER NOT NULL,
+  updated_at  INTEGER NOT NULL
+);
+-- Machine settings changed from the UI or \`lw\` (default_presets, default_view), over their env defaults.
+CREATE TABLE IF NOT EXISTS settings (
+  key        TEXT PRIMARY KEY,
+  value      TEXT NOT NULL,
+  updated_at INTEGER NOT NULL
+);
 `);
 
 // ---- migrations for columns added after the first release

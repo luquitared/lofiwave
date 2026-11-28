@@ -6,6 +6,7 @@ import { config } from "./config";
 import { db, now, hydrate, type ProcessTypeRow, type WorkflowRow, type RunRow, type SessionRow, type ApiKeyRow, type TargetRow, type ConfigRow } from "./db";
 import { getTarget, parseTargetConfig, checkTarget, TargetError, TARGET_KINDS } from "./targets";
 import { parseConfig, configOut, rowToConfig, dockerStatus, ConfigError } from "./configs";
+import { listPresets, getPreset, savePreset, deletePreset, presetNames, defaultPresets, defaultView, presetInstructions, setSetting, PresetError } from "./presets";
 import { listOsProcesses, cwdOf, killTree, type OsProcess } from "./procs";
 import { ApiError, startRun, killRun, restartRun, getRun, getType, readLogFrom, isLive, buildCommand, wrapInDocker, configOf, screenOf, historyOf, sendKeys, sendMessage, activityOf, waitForRun, tmuxPath, recordSession, resumeSession, resumeAgentSession, enableRemoteControl } from "./runner";
 import { transcriptMark, recordMessage, messageStatus, runMessages, waitForReply } from "./messages";
@@ -517,6 +518,10 @@ route("POST", "/api/processes", async (req) => {
   const meta: Record<string, any> = {};
   if (group) meta.group = group;
   if (parent) meta.parent_run = parent.id;
+  // Presets: the ones asked for ([] = none), else the machine's defaults for a new agent session. A swarm's worker
+  // (it has a controller) gets none unless it asks: its brief says how to work.
+  const asked = asApiCfg(() => presetNames(b.presets));
+  const presets = asked ?? (getType(typeName).kind === "agent" && !parent ? defaultPresets().names : []);
   const run = await startJob({
     typeName,
     cwd,
@@ -537,6 +542,7 @@ route("POST", "/api/processes", async (req) => {
     target: str(b.target, "target").trim() || undefined,
     inputDir: str(b.input_dir, "input_dir").trim() || undefined,
     config: configName(b.config),
+    presets,
   }, {
     queue: bool(b.queue, false),
     // Once it is going to start (or wait in the queue): make its folder and put its files in.
@@ -591,12 +597,15 @@ route("POST", "/api/processes/preview", async (req) => {
   const type = getType(str(b.type, "type", { required: true }));
   const interactive = bool(b.interactive, type.kind === "agent" && Boolean(tmuxPath()));
   const name = configName(b.config);
-  const runConfig = name ? configOf(name) : null;
+  const picked = type.kind === "agent" ? asApiCfg(() => presetNames(b.presets)) ?? defaultPresets().names : [];
+  const presetText = presetInstructions(picked);
+  const named = name ? configOf(name) : null;
+  const runConfig = presetText ? { name: named?.name ?? "", description: "", env: {}, docker: null, ...(named ?? {}), instructions: [presetText, named?.instructions ?? ""].filter((x) => x.trim()).join("\n\n") } : named;
   const cwd = str(b.cwd, "cwd") || type.default_cwd || ".";
   let built = buildCommand(type, { cwd, prompt: str(b.prompt, "prompt"), extraArgs: strArray(b.extra_args, "extra_args"), interactive, runConfig });
   // The container's name and env keys are picked at start; these stand in for them.
   if (runConfig?.docker) built = wrapInDocker(runConfig.docker, built, { name: "lofiwave-…", cwd, interactive, envKeys: Object.keys({ LOFIWAVE_OUT_DIR: "", ...JSON.parse(type.env || "{}"), LOFIWAVE_CONFIG: "", ...runConfig.env, ...strMap(b.env, "env"), AGENT_CONSOLE_RUN_ID: "" }) });
-  return json({ command: built.command, args: built.args, interactive, tmux: interactive ? tmuxPath() : undefined, config: runConfig?.name, docker: Boolean(runConfig?.docker) });
+  return json({ command: built.command, args: built.args, interactive, tmux: interactive ? tmuxPath() : undefined, config: named?.name, presets: picked, docker: Boolean(runConfig?.docker) });
 });
 
 route("DELETE", "/api/processes/:pid", async (_r, p, url) => {
@@ -761,7 +770,7 @@ function configBody(b: any) {
   return typeof b?.docker?.args === "string" ? { ...b, docker: { ...b.docker, args: splitArgs(b.docker.args) } } : b;
 }
 function asApiCfg<T>(fn: () => T): T {
-  try { return fn(); } catch (e) { if (e instanceof ConfigError) throw new ApiError(e.status, e.message); throw e; }
+  try { return fn(); } catch (e) { if (e instanceof ConfigError || e instanceof PresetError) throw new ApiError(e.status, e.message); throw e; }
 }
 function configRowOf(name: string): ConfigRow {
   const r = db.query<ConfigRow, [string]>("SELECT * FROM configs WHERE name = ?").get(name);
@@ -804,6 +813,37 @@ route("DELETE", "/api/configs/:name", (_r, p) => {
   db.prepare("DELETE FROM configs WHERE id = ?").run(cur.id);
   return json({ ok: true });
 });
+
+// ---- presets: prompts a session starts with, and this machine's defaults (src/presets.ts)
+const presetsOut = () => ({ presets: listPresets(), defaults: defaultPresets(), default_view: defaultView() });
+route("GET", "/api/presets", () => json(presetsOut()));
+route("GET", "/api/presets/:name", (_r, p) => json(asApiCfg(() => getPreset(p.name))));
+route("POST", "/api/presets", async (req) => {
+  const b = await body(req);
+  return json(asApiCfg(() => savePreset(str(b.name, "name", { required: true }).trim().toLowerCase(), b, { create: true })), 201);
+});
+route("PUT", "/api/presets/:name", async (req, p) => {
+  const b = await body(req);
+  return json(asApiCfg(() => savePreset(p.name, b)));
+});
+route("DELETE", "/api/presets/:name", (_r, p) => json({ ok: true, ...asApiCfg(() => deletePreset(p.name)) }));
+/**
+ * This machine's defaults: {default_presets: [...] | "a,b" | null, default_view: "chat" | "terminal" | null}. A field
+ * left out is unchanged; null goes back to the env default (LOFIWAVE_DEFAULT_PRESETS / LOFIWAVE_DEFAULT_VIEW).
+ */
+route("PUT", "/api/settings", async (req) => {
+  const b = await body(req);
+  if (b.default_presets !== undefined) {
+    if (b.default_presets === null) setSetting("default_presets", null);
+    else setSetting("default_presets", asApiCfg(() => presetNames(b.default_presets, "default_presets"))!.join(","));
+  }
+  if (b.default_view !== undefined) {
+    if (b.default_view !== null && b.default_view !== "chat" && b.default_view !== "terminal") throw new ApiError(400, `default_view must be "chat", "terminal" or null`);
+    setSetting("default_view", b.default_view);
+  }
+  return json(presetsOut());
+});
+route("GET", "/api/settings", () => json(presetsOut()));
 
 // ---- runs
 route("GET", "/api/runs", (_r, _p, url) => {
@@ -885,7 +925,11 @@ route("POST", "/api/runs/:id/pin", async (req, p) => {
   return json(runOut(getRun(id)));
 });
 route("POST", "/api/runs/:id/kill", async (_r, p, url) => json(runOut(await killRun(Number(p.id), bool(url.searchParams.get("force"), false)))));
-route("POST", "/api/runs/:id/restart", async (_r, p) => json(runOut(await restartRun(Number(p.id))), 201));
+// Body (optional): {presets: [...]} starts it again with these presets instead of the ones it had.
+route("POST", "/api/runs/:id/restart", async (req, p) => {
+  const b = await body(req);
+  return json(runOut(await restartRun(Number(p.id), { presets: asApiCfg(() => presetNames(b.presets)) })), 201);
+});
 
 // ---- interactive runs (tmux): live screen + typing into it
 route("GET", "/api/runs/:id/screen", async (_r, p, url) => json(await screenOf(getRun(Number(p.id)), int(url.searchParams.get("lines"), "lines", 200) || 200, int(url.searchParams.get("cols"), "cols", 0))));
@@ -960,7 +1004,11 @@ route("PUT", "/api/runs/:id/sessions/:sid", async (req, p) => {
 });
 
 // Reopen a recorded session interactively (tmux, with the type's resume_args: claude gets --remote-control so it appears in the Claude app).
-route("POST", "/api/runs/:id/sessions/:sid/resume", async (_r, p) => json(runOut(await resumeSession(Number(p.id), p.sid)), 201));
+// Body (optional): {presets: [...]} reopens it with these presets instead of the run's.
+route("POST", "/api/runs/:id/sessions/:sid/resume", async (req, p) => {
+  const b = await body(req);
+  return json(runOut(await resumeSession(Number(p.id), p.sid, { presets: asApiCfg(() => presetNames(b.presets)) })), 201);
+});
 // Same, for a session the console did not start (e.g. a claude session seen on the Agents tab, or an id pasted in):
 // {session_id, agent?, cwd?}. Without agent/cwd they come from the transcript on disk.
 route("POST", "/api/sessions/resume", async (req) => {
