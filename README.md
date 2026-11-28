@@ -91,6 +91,8 @@ sudo tailscale serve --bg 7770      # → https://<machine>.<tailnet>.ts.net
 
 Or set `HOST=0.0.0.0` in `.env` and use `http://<machine>:7770` over the tailnet; that also exposes it to your LAN, still behind the token. On a new device, open the link with `#token=…` once, or paste the token when asked. The UI is responsive: on a phone the tabs move to a row at the top, a run opens full screen, and an interactive run's terminal is resized to the phone's width.
 
+Added to a phone's home screen, lofiwave keeps a copy of its page on the phone (a service worker, `public/sw.js`; it needs https, so use `tailscale serve`). When the machine is asleep, off or unreachable, the app still opens and says which it looks like (no answer, refused, offline, lofiwave not running), retrying every few seconds, instead of a white screen. A strip at the top says when the connection drops later.
+
 Linux helpers: `scripts/install-tailscale-linux.sh` installs Tailscale and prints the address; `scripts/setup-ssh-tailscale-only.sh` (sudo) restricts SSH to the tailnet (ufw + sshd `AllowUsers`; `STRICT=1` also denies all other incoming traffic).
 
 ## Team login

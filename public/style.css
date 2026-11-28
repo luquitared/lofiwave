@@ -902,3 +902,20 @@ tr.stats-msgs-row, tr.stats-msgs-row:hover { background:var(--sunken); }
 .found-card { max-width:none; }
 textarea.masked:not(:focus) { -webkit-text-security:disc; }
 @media (max-width: 720px) { .secret-dl { grid-template-columns:1fr; gap:2px; } .secret-dl dd { margin-bottom:8px; } }
+
+/* Startup screen: shown until the server answers, and says why when it doesn't (asleep, offline, lofiwave not running). */
+.boot { position:fixed; inset:0; z-index:100; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:10px; padding:24px calc(24px + env(safe-area-inset-right)) calc(24px + env(safe-area-inset-bottom)) calc(24px + env(safe-area-inset-left)); background:var(--bg); color:var(--text); text-align:center; }
+.boot[hidden] { display:none; }
+.boot-mark { border-radius:14px; animation:boot-pulse 1.6s ease-in-out infinite; margin-bottom:6px; }
+.boot.failed .boot-mark { animation:none; opacity:.55; filter:grayscale(1); }
+.boot-title { margin:0; font-size:17px; font-weight:600; }
+.boot-reason { margin:0; max-width:34ch; font-size:14px; line-height:1.5; }
+.boot-actions { display:flex; flex-direction:column; align-items:center; gap:8px; margin-top:8px; }
+.boot-actions[hidden] { display:none; }
+.boot-actions button { padding:9px 22px; font-size:15px; }
+#boot-countdown { font-size:12px; }
+@keyframes boot-pulse { 0%,100% { opacity:1; transform:scale(1); } 50% { opacity:.45; transform:scale(.94); } }
+@media (prefers-reduced-motion: reduce) { .boot-mark { animation:none; } }
+/* After startup: a strip under the top bar while the server can't be reached. */
+.conn-banner { position:fixed; left:0; right:0; top:0; z-index:90; padding:calc(8px + env(safe-area-inset-top)) 16px 8px; background:var(--warn-bg); color:var(--warn); border-bottom:1px solid var(--line); font-size:13px; text-align:center; }
+.conn-banner[hidden] { display:none; }

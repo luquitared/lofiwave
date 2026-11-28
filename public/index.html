@@ -23,6 +23,17 @@
 <link rel="stylesheet" href="/style.css">
 </head>
 <body class="console" data-tab="console">
+<div id="boot" class="boot" role="status" aria-live="polite">
+  <img class="boot-mark" src="/logo.png" alt="" width="56" height="56">
+  <p class="boot-title" id="boot-title">Connecting…</p>
+  <p class="boot-reason muted" id="boot-reason" hidden></p>
+  <div class="boot-actions" id="boot-actions" hidden><button id="boot-retry" class="primary">Try again</button><span class="muted" id="boot-countdown"></span></div>
+</div>
+<script>
+// Name the machine right away: everything else waits for app.js (and, on a sleeping machine, for nothing).
+document.getElementById("boot-title").textContent = "Connecting to " + location.hostname.split(".")[0] + "…";
+</script>
+<div id="conn-banner" class="conn-banner" role="alert" hidden></div>
 <a class="skip-link" href="#main">Skip to content</a>
 <header class="topbar">
   <button id="drawer-btn" class="drawer-btn" aria-label="Sessions" aria-controls="session-rail" aria-expanded="false"><svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true"><path d="M3 5h12M3 9h12M3 13h8" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"></path></svg></button>
